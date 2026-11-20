@@ -44,10 +44,7 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["init"]).0, 1, "already a vault");
     let (code, out) = run(&a, &["status"]);
     assert_eq!(code, 0);
-    assert!(
-        out.starts_with("? ") && out.ends_with("/a/sub/f.txt\n"),
-        "{out}"
-    );
+    assert_eq!(out, "? sub/f.txt\n");
     assert!(
         names(&a.join(".syncit/log")).is_empty(),
         "status writes nothing"
@@ -74,14 +71,11 @@ fn cli_smoke() {
     fs::write(b.join("sub/f.txt"), "from b").unwrap();
     let (code, out) = run(&b, &["sync", "../a"]);
     assert_eq!(code, 2, "{out}");
-    assert!(out.contains("/sub/f.txt (conflict: sub/f-"), "{out}");
+    assert!(out.contains("-> U sub/f.txt (conflict: sub/f-"), "{out}");
     assert_eq!(run(&b, &["move", "sub"]).0, 1, "no vault named");
     let (code, out) = run(&b, &["move", "sub", "../a"]);
     assert_eq!(code, 2, "moved; the conflict is still open: {out}");
-    assert!(
-        out.contains("\nR ") && out.contains("/b/sub/f.txt\n"),
-        "{out}"
-    );
+    assert!(out.contains("\n-> R sub/f.txt\n"), "{out}");
     assert!(!b.join("sub").exists());
     assert_eq!(
         run(&b, &["get", "../a/sub"]).0,

@@ -41,12 +41,12 @@ syncit clone ~/Documents /Volumes/Backup/Documents
 ```
 
 ```
-A /Volumes/Backup/Documents/letters/anna.txt
-A /Volumes/Backup/Documents/notes.txt
+-> A letters/anna.txt
+-> A notes.txt
 recorded 2, added 2, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
 ```
 
-Each line is one file: `A` added, `M` modified, `D` deleted. The last line sums up the run.
+Each line is one file: `A` added, `M` modified, `D` deleted. The arrow says which folder it is in: `->` yours (for `clone`, the new one), `<-` the other. The last line sums up the run.
 
 Now work in either folder. When you want them to agree, go into one and name the other:
 
@@ -56,8 +56,8 @@ syncit sync /Volumes/Backup/Documents
 ```
 
 ```
-M /Volumes/Backup/Documents/notes.txt
-A /Users/me/Documents/todo.txt
+<- M notes.txt
+-> A todo.txt
 recorded 2, added 1, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
 ```
 
@@ -114,7 +114,7 @@ syncit get /Volumes/Backup/Archive/music
 ```
 
 ```
-A /Users/me/Archive/music/m.mp3
+-> A music/m.mp3
 recorded 0, added 1, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
 ```
 
@@ -129,9 +129,9 @@ syncit move music photos/2024/raw /Volumes/Backup/Archive
 ```
 
 ```
-M /Volumes/Backup/Archive/music/m.mp3
-R /Users/me/Archive/music/m.mp3
-R /Users/me/Archive/photos/2024/raw/1.dng
+<- M music/m.mp3
+-> R music/m.mp3
+-> R photos/2024/raw/1.dng
 recorded 1, added 0, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
 ```
 
@@ -152,9 +152,9 @@ The same goes if the other vault has its own newer version of a file: nothing is
 If the same file was edited in two folders since they last synced, syncit keeps both. The newer one keeps the name; the other is saved as a copy next to it:
 
 ```
-M /Volumes/Backup/Documents/notes.txt
-C /Users/me/Documents/notes-b842127a.txt
-U /Users/me/Documents/notes.txt (conflict: notes-b842127a.txt)
+<- M notes.txt
+-> C notes-b842127a.txt
+-> U notes.txt (conflict: notes-b842127a.txt)
 recorded 2, added 0, updated 1, deleted 0, conflicts 1, pending 0, skipped 0
 ```
 
@@ -170,7 +170,7 @@ The `U … (conflict: …)` line is repeated on every sync until you edit the fi
 **Edited in one place, deleted in another.** The edit wins and the file is kept everywhere:
 
 ```
-U /Users/me/Documents/todo.txt (conflict: deleted in another vault)
+-> U todo.txt (conflict: deleted in another vault)
 ```
 
 Delete it again if that is what you want, or edit it to keep it; either one clears the message.
@@ -180,8 +180,8 @@ Delete it again if that is what you want, or edit it to keep it; either one clea
 `syncit status` shows what is waiting, and changes nothing:
 
 ```
-? /Users/me/Documents/todo.txt
-M /Users/me/Documents/notes.txt
+? todo.txt
+M notes.txt
 ```
 
 | Line | Meaning |
@@ -194,7 +194,7 @@ M /Users/me/Documents/notes.txt
 
 ## Reading the output
 
-Every line about a file starts with a letter, then the file's full path:
+Every line about a file has a letter, then the file's path in its vault. When a command involves another vault, the line starts with an arrow: `->` for a file in your vault, `<-` for a file in the other one. `status` and `snapshot` look only at your vault and print no arrow.
 
 | Letter | Meaning |
 |---|---|

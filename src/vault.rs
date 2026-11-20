@@ -15,6 +15,8 @@ pub const TMP_PREFIX: &str = ".syncit-tmp-";
 
 pub struct Vault {
     pub root: PathBuf,
+    /// In a run with a peer, `->` for our vault and `<-` for theirs.
+    pub side: &'static str,
     pub config: Config,
     pub cache: Cache,
     pub log: Log,
@@ -109,9 +111,9 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
 }
 
 impl Vault {
-    /// Find, lock and load the vault at or above `start`. `strict` is for the
+    /// Find, lock and load the vault at or above `start`. `local` is for the
     /// vault a command runs in; a peer's log is read leniently.
-    pub fn open(opts: &Options, start: &Path, strict: bool) -> Result<Vault> {
+    pub fn open(opts: &Options, start: &Path, local: bool) -> Result<Vault> {
         let root = find_root(start)?;
         let dot = root.join(".syncit");
         let lock = File::options()
@@ -132,7 +134,8 @@ impl Vault {
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
-            log: Log::load(opts, &dot.join("log"), strict)?,
+            log: Log::load(opts, &dot.join("log"), local)?,
+            side: "",
             hints: HashMap::new(),
             root,
             config,
@@ -172,6 +175,7 @@ impl Vault {
             vault: self.root.display().to_string(),
             path: path.to_string(),
             note: note.to_string(),
+            side: self.side,
         };
         print_stdout(&Message::Event(event.clone()), opts.json);
         sum.record(event);

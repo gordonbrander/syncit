@@ -76,18 +76,20 @@ fn nested(a: &Path, b: &Path) -> bool {
 }
 
 /// Open another vault for a run with `v`.
-fn other(opts: &Options, v: &Vault, path: &Path) -> Result<Vault> {
+fn other(opts: &Options, v: &mut Vault, path: &Path) -> Result<Vault> {
     ensure!(
         !nested(&find_root(path)?, &v.root),
         "cannot sync a vault with itself or with a vault inside it"
     );
-    Vault::open(opts, path, false)
+    let mut peer = Vault::open(opts, path, false)?;
+    (v.side, peer.side) = ("->", "<-");
+    Ok(peer)
 }
 
 /// A run with a peer (SPEC.md section 10). `a` is the local vault.
 fn run(opts: &Options, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
     let mut a = Vault::open(opts, cwd, true)?;
-    let mut b = other(opts, &a, peer)?;
+    let mut b = other(opts, &mut a, peer)?;
     let mut sum = Summary::default();
     record(opts, &mut a, Some(&b), &mut sum)?;
     record(opts, &mut b, Some(&a), &mut sum)?;
@@ -228,6 +230,7 @@ fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
             vault: v.root.display().to_string(),
             path: path.clone(),
             message: what.join(", "),
+            side: v.side,
         };
         print_stdout(&conflict, opts.json);
     }
@@ -323,7 +326,7 @@ pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
 pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> Result<Summary> {
     let mut v = Vault::open(opts, cwd, true)?;
     let prefixes = prefixes(&v.root, cwd, paths)?;
-    let mut t = other(opts, &v, target)?;
+    let mut t = other(opts, &mut v, target)?;
     let mut sum = Summary::default();
     record(opts, &mut v, Some(&t), &mut sum)?;
     record(opts, &mut t, Some(&v), &mut sum)?;

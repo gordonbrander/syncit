@@ -4,7 +4,6 @@
 
 use serde::Serialize;
 use std::fmt::{self, Display};
-use std::path::Path;
 
 /// Settings for the whole process, passed to everything.
 pub struct Options {
@@ -19,6 +18,10 @@ pub struct Event {
     pub vault: String,
     pub path: String,
     pub note: String,
+    /// Text form only: `->` for our vault and `<-` for theirs in a run with
+    /// a peer, empty in a command on one vault.
+    #[serde(skip)]
+    pub side: &'static str,
 }
 
 #[derive(Serialize)]
@@ -30,6 +33,8 @@ pub enum Message {
         vault: String,
         path: String,
         message: String,
+        #[serde(skip)]
+        side: &'static str,
     },
     Setting {
         name: &'static str,
@@ -49,14 +54,22 @@ pub enum Message {
 
 impl Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let full =
-            |vault: &String, path: &String| Path::new(vault).join(path).display().to_string();
+        // Whose vault, if there are two; then a letter and the path in the
+        // vault, `.` for the vault itself.
+        let head = |side: &str, letter: &str, path: &str| {
+            let (space, path) = (
+                if side.is_empty() { "" } else { " " },
+                if path.is_empty() { "." } else { path },
+            );
+            format!("{side}{space}{letter} {path}")
+        };
         match self {
             Message::Event(Event {
                 kind,
-                vault,
                 path,
                 note,
+                side,
+                ..
             }) => {
                 // The letters            } => {
                 // The letters of `git status --short`, where git has one.
@@ -69,7 +82,7 @@ impl Display for Message {
                     "new" => "?",
                     _ => "!",
                 };
-                write!(f, "{letter} {}", full(vault, path))?;
+                write!(f, "{}", head(side, letter, path))?;
                 match (letter, note.is_empty()) {
                     ("!", true) => write!(f, " ({kind})"),
                     ("!", false) => write!(f, " ({kind}: {note})"),
@@ -78,10 +91,11 @@ impl Display for Message {
                 }
             }
             Message::Conflict {
-                vault,
                 path,
                 message,
-            } => write!(f, "U {} (conflict: {message})", full(vault, path)),
+                side,
+                ..
+            } => write!(f, "{} (conflict: {message})", head(side, "U", path)),
             Message::Setting { name, value } => write!(f, "{name}: {value}"),
             Message::Info { message } => write!(f, "{message}"),
             Message::Warning { message } => write!(f, "warning: {message}"),
@@ -186,13 +200,14 @@ mod tests {
             vault: "/v".into(),
             path: "a/f.txt".into(),
             note: note.into(),
+            side: "",
         };
         let message = |kind, note| Message::Event(event(kind, note));
         let both = |m: &Message| (line(m, false), line(m, true));
         assert_eq!(
             both(&message("updated", "")),
             (
-                "M /v/a/f.txt".into(),
+                "M a/f.txt".into(),
                 r#"{"type":"event","kind":"updated","vault":"/v","path":"a/f.txt","note":""}"#
                     .into()
             )
@@ -203,29 +218,57 @@ mod tests {
             ("copied", "C"),
             ("moved", "R"),
         ] {
-            assert_eq!(
-                line(&message(kind, ""), false),
-                format!("{text} /v/a/f.txt")
-            );
+            assert_eq!(line(&message(kind, ""), false), format!("{text} a/f.txt"));
         }
-        assert_eq!(line(&message("new", ""), false), "? /v/a/f.txt");
-        assert_eq!(line(&message("behind", ""), false), "! /v/a/f.txt (behind)");
+        assert_eq!(line(&message("new", ""), false), "? a/f.txt");
+        assert_eq!(line(&message("behind", ""), false), "! a/f.txt (behind)");
         assert_eq!(
             line(&message("skipped", "changed"), false),
-            "! /v/a/f.txt (skipped: changed)"
+            "! a/f.txt (skipped: changed)"
         );
         let conflict = Message::Conflict {
             vault: "/v".into(),
             path: "n.txt".into(),
             message: "n-12345678.txt".into(),
+            side: "",
         };
         assert_eq!(
             both(&conflict),
             (
-                "U /v/n.txt (conflict: n-12345678.txt)".into(),
+                "U n.txt (conflict: n-12345678.txt)".into(),
                 r#"{"type":"conflict","vault":"/v","path":"n.txt","message":"n-12345678.txt"}"#
                     .into()
             )
+        );
+        // With a peer, each line says whose vault; `.` is the vault itself.
+        let sided = |side, kind, path: &str, note: &str| {
+            Message::Event(Event {
+                side,
+                path: path.into(),
+                ..event(kind, note)
+            })
+        };
+        assert_eq!(
+            both(&sided("->", "updated", "a/f.txt", "")),
+            (
+                "-> M a/f.txt".into(),
+                r#"{"type":"event","kind":"updated","vault":"/v","path":"a/f.txt","note":""}"#
+                    .into()
+            )
+        );
+        assert_eq!(
+            line(&sided("<-", "rejected", "", "segment x"), false),
+            "<- ! . (rejected: segment x)"
+        );
+        let conflict = Message::Conflict {
+            vault: "/v".into(),
+            path: "n.txt".into(),
+            message: "n-12345678.txt".into(),
+            side: "<-",
+        };
+        assert_eq!(
+            line(&conflict, false),
+            "<- U n.txt (conflict: n-12345678.txt)"
         );
         let warning = Message::Warning {
             message: "w".into(),

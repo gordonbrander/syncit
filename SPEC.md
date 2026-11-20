@@ -532,15 +532,15 @@ How it is built:
 
 | `type` | Fields | Text form | Stream |
 |---|---|---|---|
-| `event` | `kind`, `vault`, `path`, `note` | a letter and the full path, below | stdout |
-| `conflict` | `vault`, `path`, `message` | `U <full path> (conflict: <message>)` | stdout |
+| `event` | `kind`, `vault`, `path`, `note` | a marker, a letter and the path, below | stdout |
+| `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
 | `setting` | `name`, `value` | `<name>: <value>` | stdout |
 | `info` | `message` | the message | stdout |
 | `summary` | the counts | `recorded 3, added 1, …` | stdout |
 | `warning` | `message` | `warning: <message>` | stderr |
 | `error` | `message` | `error: <message>` | stderr |
 
-An event's text form is one letter, then the file's full path (`vault` joined with `path`), so that each line stands alone. The letters are those of `git status --short` where git has one:
+An event's text form is a marker, one letter, then `path`, the file's path in its vault. The marker says whose vault the file is in: `->` for the local vault, the one the command runs in, and `<-` for the other. Every command with a peer prints it (`sync`, `push`, `pull`, `clone`, `get`, `move`); `status` and `snapshot` involve one vault and print no marker. `clone` runs in the new vault, so the new folder's lines are `->`. The text form does not name the vault; the JSON form has `vault` and no marker. The letters are those of `git status --short` where git has one:
 
 | Letter | `kind` |
 |---|---|
@@ -552,18 +552,18 @@ An event's text form is one letter, then the file's full path (`vault` joined wi
 | `?` | `new`, in `status` |
 | `!` | anything that needs attention: `skipped`, `pending`, `incomplete`, `rejected`, and `behind` in `status` |
 
-Anything more goes in parentheses after the path. A `!` line gives its kind and reason: `(skipped: changed since it was scanned)`. A rejected segment has no file, so its line names the vault: `! /Users/me/work/ (rejected: segment 77b0…: not in canonical form)`.
+Anything more goes in parentheses after the path. A `!` line gives its kind and reason: `(skipped: changed since it was scanned)`. A rejected segment has no file, so its path is `.`, the vault itself: `-> ! . (rejected: segment 77b0…: not in canonical form)`.
 
 ```
-M /Volumes/Backup/work/notes.txt
-A /Users/me/work/foo/new.txt
-D /Users/me/work/old.txt
-C /Users/me/work/notes-3f9a1c2e.txt
-! /Users/me/work/big.bin (pending: content not available from any source)
-! /Users/me/work/draft.txt (skipped: changed since it was scanned)
-! /Users/me/work/x.txt (incomplete: waiting for missing history)
-U /Users/me/work/notes.txt (conflict: notes-3f9a1c2e.txt)
-U /Users/me/work/gone.txt (conflict: deleted in another vault)
+<- M notes.txt
+-> A foo/new.txt
+-> D old.txt
+-> C notes-3f9a1c2e.txt
+-> ! big.bin (pending: content not available from any source)
+-> ! draft.txt (skipped: changed since it was scanned)
+-> ! x.txt (incomplete: waiting for missing history)
+-> U notes.txt (conflict: notes-3f9a1c2e.txt)
+-> U gone.txt (conflict: deleted in another vault)
 recorded 3, added 1, updated 1, deleted 1, conflicts 2, pending 1, skipped 1
 ```
 
