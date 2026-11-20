@@ -255,7 +255,7 @@ Implements `PRD.md`, "Scanning", and `CRDT.md`, "Writing an entry". Serves `R3`,
 Walk the vault root recursively. Skip, without descending:
 
 - `.syncit` at the root;
-- any other directory that contains `.syncit` (a nested vault);
+- any other directory named `.syncit`, at any depth. A vault dragged into this one is not skipped: its files are ordinary files of this vault, and only its `.syncit/` stays out. Warn on stderr, naming the inner vault;
 - anything ignored;
 - symbolic links and anything that is not a regular file or a directory (warn once per run on stderr with a count);
 - names that are not valid UTF-8 (warn, naming the parent directory);
@@ -332,7 +332,7 @@ Implements `PRD.md`, "Current state", "Conflict copies", "A sync run" step 6, an
 
 These apply to every write, rename and delete in the working folder. A path that fails one is reported as `skipped` with the reason and left exactly as it was.
 
-- **Scan would skip it.** The path is ignored, has a `.syncit` component, has a file name starting with `.syncit-tmp-`, or lies inside a nested vault. Such a path is never written. (Not reported; it is simply not this vault's business.)
+- **Scan would skip it.** The path is ignored, has a `.syncit` component or has a file name starting with `.syncit-tmp-`. Such a path is never written. (Not reported; it is simply not this vault's business.)
 - **Symlinked parent.** Any existing ancestor directory of the path, below the vault root, is a symbolic link. Check with `symlink_metadata`. Segments come from other vaults and must not be able to write outside this one.
 - **Changed since scanned (`R10`).** The path has a row and the file fails the unchanged test and its hash differs from the row's, or the file is missing. The next scan will record the change.
 - **Untracked file in the way.** The path has no row and something exists there (`symlink_metadata` succeeds).
@@ -397,7 +397,7 @@ Save the cache once, after all paths.
 
 `sync`, `push` and `pull` share one procedure. "Receiver" means both vaults for `sync`, the peer for `push`, the local vault for `pull`.
 
-1. Open both vaults. Refuse if they are the same folder or either has a version other than 1. Lock both.
+1. Open both vaults. Refuse if they are the same folder, if one is inside the other (a run would copy the outer vault into the inner, one level deeper each time), or if either has a version other than 1. Lock both.
 2. Scan the local vault, then the peer (section 7). Both scan in every mode, so each vault's changes are recorded from its own cache.
 3. Exchange segments: each receiver takes every segment in the other vault's `log/` whose name it lacks. A segment is read, validated as in `CRDT.md`, and only then written into `log/`. A segment that fails is not stored, is reported as `rejected`, and does not stop the run.
 4. Each receiver reloads its log.
@@ -574,14 +574,14 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 
 Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` passing.
 
-- [ ] **1. Entry and segment codec.** `entry`, `segment`. Tests: `entry_id_vector`, `canonical_escaping`, `segment_round_trip`, `segment_rejects`.
-- [ ] **2. Read rules.** `log` with `resolve`. Tests: the `resolve_*` tests, `winner_order`.
-- [ ] **3. A single vault.** `config`, `cache`, `vault`, `scan`; commands `init`, `snapshot`, `status`. Tests: `wanted_cases`, `story_d3_snapshot` (without the sync step), `same_tick_edit`, `lost_cache` (single-vault part), `interrupted_before_cache`, `cli_smoke`.
-- [ ] **4. Sync without conflicts.** Blob fetch from working files, segment exchange, materialise steps 1–4 and 7 and the non-conflict part of 6; commands `sync`, `push`, `pull`, `clone`. Tests: `story_a1`, `story_a2`, `story_e1`, `story_c1`, `changed_during_run`, `untracked_in_the_way`, `corrupt_blob_source`.
-- [ ] **5. Conflicts.** Conflict copies, base, incomplete paths. Tests: `story_b1`, `copy_name_cases`, `edit_beats_delete`, `same_edit_no_conflict`, `new_file_at_existing_path`, `copied_vault`, `restored_backup`, `pending_then_edit`, `copy_deleted_stays_deleted`, `interrupted_transfer`.
-- [ ] **6. Partial vaults.** Wanted paths in materialise, `clone` of a sub-folder, `get`, `drop`. Tests: `story_a3`, `story_a4`, `story_a5`, `drop_refuses_sole_copy`.
-- [ ] **7. Retained blobs.** `.syncit/blobs/`, `keep`, `remote`, `retain`, `flush`. Tests: `story_d1`, `story_d2`.
-- [ ] **8. Hardening.** Locking, ignore file, symlink checks, version checks, output format and exit codes. Tests: `hostile_segment`, `symlink_escape`, `ignored_files`, `version_mismatch`, and the remaining parts of `lost_cache` and `story_d3`.
+- [x] **1. Entry and segment codec.** `entry`, `segment`. Tests: `entry_id_vector`, `canonical_escaping`, `segment_round_trip`, `segment_rejects`.
+- [x] **2. Read rules.** `log` with `resolve`. Tests: the `resolve_*` tests, `winner_order`.
+- [x] **3. A single vault.** `config`, `cache`, `vault`, `scan`; commands `init`, `snapshot`, `status`. Tests: `wanted_cases`, `story_d3_snapshot` (without the sync step), `same_tick_edit`, `lost_cache` (single-vault part), `interrupted_before_cache`, `cli_smoke`.
+- [x] **4. Sync without conflicts.** Blob fetch from working files, segment exchange, materialise steps 1–4 and 7 and the non-conflict part of 6; commands `sync`, `push`, `pull`, `clone`. Tests: `story_a1`, `story_a2`, `story_e1`, `story_c1`, `changed_during_run`, `untracked_in_the_way`, `corrupt_blob_source`.
+- [x] **5. Conflicts.** Conflict copies, base, incomplete paths. Tests: `story_b1`, `copy_name_cases`, `edit_beats_delete`, `same_edit_no_conflict`, `new_file_at_existing_path`, `copied_vault`, `restored_backup`, `pending_then_edit`, `copy_deleted_stays_deleted`, `interrupted_transfer`.
+- [x] **6. Partial vaults.** Wanted paths in materialise, `clone` of a sub-folder, `get`, `drop`. Tests: `story_a3`, `story_a4`, `story_a5`, `drop_refuses_sole_copy`.
+- [x] **7. Retained blobs.** `.syncit/blobs/`, `keep`, `remote`, `retain`, `flush`. Tests: `story_d1`, `story_d2`.
+- [x] **8. Hardening.** Locking, ignore file, symlink checks, version checks, output format and exit codes. Tests: `hostile_segment`, `symlink_escape`, `ignored_files`, `version_mismatch`, and the remaining parts of `lost_cache` and `story_d3`.
 
 ## 16. Decisions and open questions
 
@@ -616,4 +616,12 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 
 ## 17. Deviations
 
-Record here anything built differently from these documents, with the reason. Empty at the start.
+Record here anything built differently from these documents, with the reason.
+
+- **A peer's log is read leniently.** Section 6 says a local segment that fails validation stops the command; section 10 says a bad segment in the other vault is rejected and does not stop the run. Both cannot hold for the peer, which must load its own log to scan. A vault opened as a peer (or as the origin, for `get` and `drop`) skips its invalid segments with a warning on stderr; the receiving vault reports them as `rejected`. The vault a command runs in is still strict.
+- **`.syncit` is matched without regard to ASCII case** by the scan and by materialise, at any depth. A valid segment may name `.SYNCIT/x`, which on a case-insensitive filesystem is this vault's own `.syncit/`. Segment validation is unchanged (the format is not touched); the path is simply never written.
+- **Auto-include of a path that is itself excluded.** Section 7's rule finds no prefix when the new file's own path is in `exclude` (a dropped file put back by hand). The path is then moved from `exclude` to `include`, which is what `get` would do.
+- **`drop` re-checks each file before deleting it** with the unchanged test (step 5). A file edited between the scan of step 1 and the deletion is left on disk and reported as `skipped` (`R10`); the next scan adopts it.
+- **An interrupted scan may be re-recorded as a smaller segment.** Section 7 says the next scan writes the same entries again. A new file whose entry already reached the log is instead recognised by the "file, no row" rule and adopted, so the second segment can hold fewer entries. The set of entries is the same (`interrupted_before_cache`).
+- **`drop` reports each removed file as `dropped`**, an event kind section 12 does not list.
+- **A conflict copy deleted before any scan recorded it can come back** from the other vault, where the same copy was recorded as an ordinary new file. "A copy the user deleted stays deleted" holds from the first run after the copies were created (`copy_deleted_stays_deleted` syncs once before deleting). This follows from the documents as written; it is noted, not fixed.
