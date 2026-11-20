@@ -129,7 +129,8 @@ impl Vault {
             config.syncit
         );
         let cache = Cache::load(&root)?;
-        let ignore = Ignore::parse(&fs::read_to_string(dot.join("ignore")).unwrap_or_default());
+        let ignore =
+            Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
             log: Log::load(&dot.join("log"), strict)?,
             hints: HashMap::new(),

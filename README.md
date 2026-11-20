@@ -82,8 +82,6 @@ Files that exist on only one side are copied to the other. Files that exist on b
 
 **More than two folders.** Any vault can sync with any other; just name it: `syncit sync /path/to/other`. You don't have to route everything through one "main" copy. If A syncs with B and B syncs with C, C gets A's changes.
 
-You can run syncit from any sub-folder of a vault. It always works on the whole vault.
-
 ## One direction only: push and pull
 
 ```sh
@@ -241,7 +239,7 @@ This version of syncit stores old versions but has no command to restore one. Ea
 
 ## Ignoring files
 
-Create `.syncit/ignore` in a vault, one rule per line:
+Create a file named `.syncitignore` at the top of a vault, one rule per line:
 
 ```
 # files and folders with exactly this name, anywhere
@@ -253,7 +251,9 @@ build/
 projects/scratch/tmp
 ```
 
-There are no wildcards. Ignored files are never sent, never overwritten and never deleted by a sync. The ignore file is not synced, so each vault has its own.
+There are no wildcards. Ignored files are never sent, never overwritten and never deleted by a sync.
+
+`.syncitignore` is an ordinary file, so it syncs too and every vault gets the same rules. Rules that arrive during a sync apply from the next run. If you want a vault to have its own rules, add the line `.syncitignore` to its file; that file then stays put and is not replaced by another vault's.
 
 ## Good to know
 

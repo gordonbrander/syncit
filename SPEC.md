@@ -59,7 +59,7 @@ A sync run, done by each vault on its own folder (`PRD.md`, "A sync run"):
 | wanted | a path that the vault's include and exclude prefixes select for materialising |
 | blob | a file's bytes, addressed by hash |
 | peer | the other vault in a run; always named on the command line |
-| store | a folder used as a shared blob store, set per vault |
+| store | a log and a set of blobs with no working folder: a directory or an S3 bucket. Holds old versions, and lets vaults that never meet sync through it |
 
 ### Working rules for the implementer
 
@@ -82,14 +82,14 @@ Version 1 is done when all of these hold:
 
 ## 2. Scope of version 1
 
-In: every Must (`R1`–`R14`) and every Should (`R15`–`R18`, `R20`, `R25`) in `PRD.md`.
+In: every Must (`R1`–`R14`) and every Should (`R15`–`R18`, `R20`, `R24`, `R25`) in `PRD.md`.
 
 Out:
 
-- The Coulds: `R21` (limit a run to a path), `R22` (copy-on-write stashing), `R23` (mass-delete guard), `R24` (logs through the blob store). `syncit sync` therefore takes no `[path]` argument in version 1.
+- The Coulds: `R21` (limit a run to a path), `R22` (copy-on-write stashing), `R23` (mass-delete guard). `syncit sync` therefore takes no `[path]` argument in version 1.
 - Everything under "Non-goals" in `PRD.md`.
 - Signed segments, the heads file, and compaction (`CRDT.md`, "Planned extension", "Lookups", "Compaction").
-- Peers that are not directories on this machine.
+- Peers reached over a network (SSH, iroh). A vault is a directory on this machine. A store may also be an S3 bucket (section 8).
 - Windows. Version 1 targets macOS and Linux.
 
 ## 3. Crate and dependencies
@@ -97,6 +97,7 @@ Out:
 - One Cargo package named `syncit`, with a library (`src/lib.rs`) and a binary (`src/main.rs`). Integration tests call the library.
 - Rust edition 2024. Minimum Rust version 1.89, for `std::fs::File::try_lock`.
 - Dependencies: `clap` (with `derive`), `serde` (with `derive`), `serde_json`, `sha2`, `anyhow`.
+- For S3 stores (milestone 10) one more is needed: an S3 client. Which one is open; see section 16.
 - Dev dependency: `tempfile`.
 - From the standard library, not from crates: directory walking (`fs::read_dir`), hex encoding, setting file times (`File::set_modified`), file locking, atomic rename.
 
@@ -157,11 +158,11 @@ pub struct Loser { pub hash: String, pub mtime: i64 } // mtime: the largest amon
   .syncit/
     config    # JSON, local
     cache     # JSON, local
-    ignore    # optional text file, local
     lock      # empty file, locked while a command runs
     log/      # segments, named by hash; the only replicated part
     blobs/    # blobs, named by hash, flat
     tmp/      # scratch for atomic writes into .syncit/
+  .syncitignore   # optional ignore list; an ordinary file
 ```
 
 Every file written under `.syncit/` is written to `.syncit/tmp/` first and renamed into place.
@@ -181,7 +182,7 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 - `syncit`: format version (`R25`). A command refuses to run on a vault, or with a peer, whose version is not 1.
 - `include`, `exclude`: wanted-path prefixes, vault-relative, `/`-separated. `""` is the vault root.
 - `keep_local_history`: retain every version this vault sees in `.syncit/blobs/` (`R15`). Local history is whatever blobs are there; it is never required to be complete.
-- `store`: absolute path of a directory used as a shared blob store, or `null` (`R16`). Blobs are files named `<hash>` directly inside it.
+- `store`: a store location, or `null` (`R16`, `R24`): the absolute path of a directory, or `s3://<bucket>/<prefix>`. Section 8 defines a store.
 - Written pretty-printed. Unknown fields are an error. `keep_local_history` and `store` are independent, and are changed with `syncit config` (section 11).
 - A vault records nothing about other vaults. There is no origin or default peer: any vault syncs with any other, and folders may move.
 
@@ -224,15 +225,20 @@ segment:     {"syncit":1}\n<entry line>\n
 segment name: 131647b457f74cabf5580495b318db71fc518912d8c4a8b21a1b665205374f49
 ```
 
-### ignore
+### .syncitignore
 
-`.syncit/ignore` is optional, local and never replicated (`R20`). One rule per line; blank lines and lines starting with `#` are skipped.
+`.syncitignore`, at the vault root, is the optional ignore list (`R20`). One rule per line; blank lines and lines starting with `#` are skipped. Only the root file is read; there are no per-folder ignore lists.
 
 - A line without `/` is a name. It ignores any file or folder with exactly that name, at any depth.
 - A line with `/` is a vault-relative path prefix, matched as wanted prefixes are.
 - No wildcards.
 
 An ignored path is invisible: scan does not look at it (so a recorded file that becomes ignored is not read as deleted) and materialise never writes it.
+
+`.syncitignore` is itself an ordinary file. It is scanned, replicated and conflict-handled like any other, so vaults share one set of rules. No code treats its path specially. Two things follow:
+
+- A vault that wants rules of its own lists `.syncitignore` in the file. The file is then ignored there: not sent, and not replaced by another vault's.
+- The rules are read once, when a command opens the vault. A `.syncitignore` that arrives or changes during a run takes effect from the next run.
 
 ## 6. Reading the log
 
@@ -295,7 +301,7 @@ The segment is written before the cache is saved. If the run stops between the t
 
 ## 8. Blobs
 
-Implements `PRD.md`, "Blobs". Serves `R11`, `R13`, `R15`, `R16`.
+Implements `PRD.md`, "Blobs" and "Stores". Serves `R11`, `R13`, `R15`, `R16`, `R24`.
 
 ### Sources
 
@@ -305,7 +311,7 @@ Implements `PRD.md`, "Blobs". Serves `R11`, `R13`, `R15`, `R16`.
 2. this vault's `.syncit/blobs/<hash>`;
 3. the peer's working files, if there is a peer in this run;
 4. the peer's `.syncit/blobs/<hash>`;
-5. `<store>/<hash>`, if `store` is set and the directory exists.
+5. the store's `blobs/<hash>`, if `store` is set and the store is reachable.
 
 - Working files are found through an in-memory map from hash to paths, one per vault, built at the start of the run from the cache rows. Whenever the run writes a file or renames one (including a conflict copy, which has no row), it adds the new location to the map. The map is a hint only.
 - Every fetch copies to the destination while hashing and succeeds only if the hash matches (`R11`). On a mismatch the destination is removed and the next source is tried.
@@ -317,9 +323,31 @@ A vault retains blobs if `keep_local_history` is on or `store` is set. With both
 
 `retain()`: for every non-null hash in the log that is not already in `.syncit/blobs/` (nor in the store, when it is reachable), `fetch` it into `.syncit/blobs/`. Hashes with no source are skipped silently.
 
-`flush()`, when `store` is set and its directory exists: copy each blob in `.syncit/blobs/` that the store lacks to a temporary name inside the store directory and rename it to `<hash>`. Then, if `keep_local_history` is off, delete from `.syncit/blobs/` every blob the store now has. When the store is unreachable, blobs wait in `.syncit/blobs/`.
+`flush()`, when `store` is set and the store is reachable: upload each blob in `.syncit/blobs/` that the store lacks, then each segment in `.syncit/log/` that the store lacks. Then, if `keep_local_history` is off, delete from `.syncit/blobs/` every blob the store now has. When the store is unreachable, blobs wait in `.syncit/blobs/` and segments wait in `.syncit/log/`, where they live anyway.
 
 A retaining vault calls `retain()` after every scan, and again after segments are exchanged and before anything is materialised, so that a version is saved before it is replaced. It calls `flush()` at the end of the run.
+
+### Stores
+
+A store is a log and a set of blobs with no working folder: the replicated half of a vault, somewhere every vault can reach. It is one mechanism for two requirements. It is where old versions are kept (`R16`), and it is a place that vaults which never see each other can sync through (`R24`). These are not separate features: a store that held blobs without the log could not be read by anyone but the vault that filled it.
+
+```
+<store>/
+  format          # the single line {"syncit":1}
+  log/<name>      # segments, named by hash
+  blobs/<hash>    # blobs, named by hash
+```
+
+This is `.syncit/` without its local files (`config`, `cache`, `lock`, `tmp/`).
+
+- **Two kinds.** A directory, given as a path. An S3 bucket, given as `s3://<bucket>/<prefix>`, whose object keys are `<prefix>/format`, `<prefix>/log/<name>` and `<prefix>/blobs/<hash>`. Both kinds provide the same four operations: read `format`, list the names in `log/` or `blobs/`, get one object into a local file, put one object from a local file. Implement this as one enum with two variants, not a trait.
+- **Creating.** syncit never creates a store's directory or bucket. An existing empty directory or prefix becomes a store on the first write, which writes `format`. A non-empty directory or prefix without `format` is not a store and is refused, so a mistyped path cannot be filled with objects. A store whose `format` is not version 1 is refused (`R25`).
+- **No lock.** Every object is immutable, named by its hash, and written whole: in a directory by writing a temporary name and renaming, in S3 by a single PUT (multipart above 5 GB). Two vaults writing at once can only write the same bytes under the same name, so no coordination is needed.
+- **Not trusted.** A segment read from a store is validated exactly as one from a peer (section 10, step 3). A blob is hashed by `fetch` before use.
+- **Never pruned.** A store keeps everything it is given. Garbage collection is a non-goal.
+- **One listing per run.** A run lists `log/` and `blobs/` once each and works from those lists. It does not ask about objects one at a time.
+- **Reachable** means the directory exists, or the bucket answers. A missing directory or a network failure is "unreachable", not an error, for the vault's configured store: its blobs wait locally. For a store named on the command line it is an error.
+- **S3 credentials** come from the standard AWS environment variables and shared credentials file. They are never written to `config`.
 
 ## 9. Materialise
 
@@ -407,22 +435,40 @@ Save the cache once, after all paths.
 
 Scanning precedes exchange, so entries are written from what each vault held before it learned anything new (`PRD.md`, "A sync run").
 
+### A run with a store
+
+`sync`, `push` and `pull` accept a store location where they accept a vault. A store has no working folder, so nothing is scanned or materialised on its side, and it is not locked.
+
+1. Open and lock the local vault. Open the store: check `format`, list `log/` and `blobs/`.
+2. Scan the local vault (section 7).
+3. `pull` and `sync`: download every segment the vault lacks, validating each before it is written into `log/`. A segment that fails is `rejected`.
+4. Call `retain()` if the vault retains blobs.
+5. `pull` and `sync`: materialise, with the store as the blob source.
+6. `push` and `sync`: upload every blob for a non-null hash in the local log that the store lacks and that `fetch` can supply from this vault's working files or `.syncit/blobs/`. Then upload every segment the store lacks. Blobs go first, so that a vault reading the store meanwhile rarely sees an entry whose content has not arrived; if it does, the path is `pending` and the next run completes it.
+7. Report conflicts as in step 8 above.
+
+A vault with no stored history uploads the versions it has on disk, which is what another vault needs to materialise the current state. Older versions reach the store only from vaults that still hold them.
+
+The vault's configured `store` is the same thing, used automatically: `flush()` at the end of every run and snapshot is step 6 of this procedure. Syncing with it by name (`syncit sync <the store>`) is how its contents come back down.
+
+**Resolving the argument.** `s3://…` is a store. Otherwise it is a path: if a vault is found by walking up from it, it is that vault; else if the path is a directory that is empty or contains `format`, it is a store; else it is an error.
+
 ## 11. Commands
 
-The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
+The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. `sync`, `push` and `pull` also accept a store there (section 10, "A run with a store"). Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
 
 | Command | Steps |
 |---|---|
 | `syncit init [dir]` | `dir` defaults to `.`. Error if `dir/.syncit` exists. Create `.syncit/` with `log/`, `blobs/`, `tmp/` and a config of `include: [""]`. Existing files are untouched and recorded by the first scan. |
 | `syncit clone <src> <dir>` | Find the vault root `R` above `src`; `sub` is `src` relative to `R` (`""` if equal). `dir` must not exist or must be empty. Create it as a vault with `include: [sub]`. Then run `pull` from `R`. Nothing about `R` is recorded. (`R4`) |
-| `syncit sync <vault>` | Section 10, both directions. (`R1`, `R12`) |
-| `syncit push <vault>` | Section 10; only the peer receives. (`R2`) |
-| `syncit pull <vault>` | Section 10; only the local vault receives. (`R2`) |
+| `syncit sync <vault or store>` | Section 10, both directions. (`R1`, `R12`, `R24`) |
+| `syncit push <vault or store>` | Section 10; only the peer receives. (`R2`) |
+| `syncit pull <vault or store>` | Section 10; only the local vault receives. (`R2`) |
 | `syncit snapshot` | Scan, `retain()`, `flush()`. No peer. (`R17`) |
 | `syncit status` | Dry scan and `resolve`. Writes nothing at all. (`R18`) |
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit drop [--check <vault>] [--force] <path>...` | See below. (`R7`) |
-| `syncit config [local-history on\|off \| store <dir>\|none]` | See below. (`R15`, `R16`) |
+| `syncit config [local-history on\|off \| store <location>\|none]` | See below. (`R15`, `R16`) |
 
 `get` and `drop` take one or more paths, relative to the current directory. A path need not exist on disk. The steps below run once over all the paths together: `drop` makes its checks for every prefix before changing anything, so it either drops them all or refuses.
 
@@ -446,9 +492,9 @@ The order of 4 and 5 matters. A file with no row is "held again" after the next 
 
 ### config
 
-- `syncit config` prints the vault's settings: `local-history: on|off` and `store: <dir>|none`. A store that is set but not reachable is marked as such.
+- `syncit config` prints the vault's settings: `local-history: on|off` and `store: <location>|none`. A store that is set but not reachable is marked as such.
 - `syncit config local-history on|off` sets `keep_local_history`. Turning it off deletes nothing; blobs already stored stay until the user removes them.
-- `syncit config store <dir>` sets `store` to the absolute form of `dir`, which need not exist yet. `syncit config store none` clears it.
+- `syncit config store <location>` sets `store` to an `s3://` location as given, or to the absolute form of a directory path, which need not exist yet. `syncit config store none` clears it.
 
 Each form prints the settings afterwards and exits 0.
 
@@ -498,6 +544,7 @@ recorded 3, added 1, updated 1, deleted 1, conflicts 2, pending 1, skipped 1
 | after renaming a loser to its copy name, before placing the winner | the path is missing, the copy has no row | the scan records a tombstone and the copy; the winner still beats the tombstone, and the losing content is in the copy |
 | after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones |
 | during `drop`, after saving the cache | files with no rows | the scan adopts them; nothing is recorded as deleted |
+| while uploading to a store | some blobs or segments are in the store and others are not | every object is whole or absent; a reader sees a path as `pending` or `incomplete` and waits; the next run uploads the rest |
 
 ## 14. Tests
 
@@ -530,6 +577,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `story_a5_get_and_new_folder` | A.5 | `get` of a second folder; a new top-level folder in the copy reaches the archive, is added to `include`, and a file later added to it in the archive arrives in the copy; the three auto-include examples of section 7 |
 | `story_b1_conflict` | B.1 | both sides edit; after sync both hold the same winner and the same copy; exit status reports the conflict; editing the winner and syncing closes it everywhere |
 | `story_c1_three_vaults` | C.1 | three vaults synced in several pairings and orders converge; a change relays through a middle vault |
+| `story_c2_sync_through_store` | C.2 | two vaults that never sync with each other both sync with one directory store, in either order, and converge, including a conflict; a vault with no history supplies its current files; `clone` is not needed, a new vault `pull`s from the store |
 | `story_d1_no_history` | D.1 | with local history off and no store, `.syncit/blobs/` stays empty after syncs |
 | `story_d2_history` | D.2 | with local history on, every version's blob is present after edits and syncs; with a store set, blobs reach the store, and wait locally while it is missing |
 | `story_d3_snapshot` | D.3 | two snapshots without a peer give two entries in a chain; a later sync delivers both |
@@ -553,11 +601,16 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `interrupted_transfer` | remove a parent's segment from the receiver: the path is incomplete and untouched; a re-sync resolves it |
 | `hostile_segment` | a peer's log containing an invalid segment: it is rejected, the rest of the sync completes |
 | `symlink_escape` | an incoming path under a local symlinked directory is skipped and nothing outside the vault changes |
-| `ignored_files` | ignored files are not recorded, not deleted, and not overwritten |
+| `ignored_files` | ignored files are not recorded, not deleted, and not overwritten; a `.syncitignore` that lists itself stays local |
+| `ignore_file_syncs` | a `.syncitignore` created in one vault arrives in the other and its rules apply there from the next run; edits to it in two vaults are an ordinary conflict |
 | `corrupt_blob_source` | a peer file changed behind its cache is not installed (`R11`) |
 | `copy_deleted_stays_deleted` | deleting a conflict copy and syncing does not bring it back |
 | `drop_refuses_sole_copy` | `drop` refuses without `--check` when the vault keeps no history; an unrecorded edit under the path is recorded as an entry, and then blocks the drop against the checked vault until it is synced; local history counts as another copy; `--force` overrides |
 | `config_command` | `config` prints the settings, sets and clears each, stores the store path in absolute form, and the settings take effect |
+| `store_layout` | a store has `format`, `log/` and `blobs/`; an empty directory is initialised on first write; a non-empty directory without `format`, and one with version 2, are refused and left untouched |
+| `store_hostile` | a bad segment and a wrong blob planted in a store are rejected and not installed; the rest of the run completes |
+| `store_configured_gets_log` | with `store` set, every run and snapshot leaves the vault's segments in the store as well as its blobs; they wait locally while it is unreachable |
+| `s3_store` | the store tests above against an S3-compatible endpoint; skipped unless the environment names one |
 | `version_mismatch` | a peer with `"syncit": 2` in its config is refused |
 | `cli_smoke` | the built binary runs `init`, `snapshot`, `status` and returns the documented exit codes |
 
@@ -576,9 +629,10 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | R13 | 8 | `story_d1` |
 | R14 | 13 | `story_e1`, `interrupted_before_cache`, `interrupted_transfer` |
 | R15, R16 | 8, 11 | `story_d2`, `config_command` |
+| R24 | 8, 10 | `story_c2`, `store_layout`, `store_hostile`, `store_configured_gets_log`, `s3_store` |
 | R17 | 7, 11 | `story_d3` |
 | R18 | 11, 12 | `cli_smoke`, `story_b1` |
-| R20 | 5, 7 | `ignored_files` |
+| R20 | 5, 7 | `ignored_files`, `ignore_file_syncs` |
 | R25 | 5, 10 | `version_mismatch`, `segment_rejects` |
 
 ## 15. Milestones
@@ -593,6 +647,8 @@ Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warning
 - [x] **6. Partial vaults.** Wanted paths in materialise, `clone` of a sub-folder, `get`, `drop`. Tests: `story_a3`, `story_a4`, `story_a5`, `drop_refuses_sole_copy`.
 - [x] **7. Retained blobs.** `.syncit/blobs/`, `keep_local_history`, `store`, `retain`, `flush`, `config`. Tests: `story_d1`, `story_d2`.
 - [x] **8. Hardening.** Locking, ignore file, symlink checks, version checks, output format and exit codes. Tests: `hostile_segment`, `symlink_escape`, `ignored_files`, `version_mismatch`, and the remaining parts of `lost_cache` and `story_d3`.
+- [ ] **9. Stores hold the log.** The store layout of section 8 (`format`, `log/`, `blobs/`, replacing the flat directory of blobs that milestone 7 built); `flush` uploads segments; `sync`, `push` and `pull` with a directory store. Tests: `story_c2_sync_through_store`, `store_layout`, `store_hostile`, `store_configured_gets_log`.
+- [ ] **10. S3 stores.** The second kind of store, behind the same four operations. Test: `s3_store`.
 
 ## 16. Decisions and open questions
 
@@ -602,10 +658,10 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 
 | Question | Answer |
 |---|---|
-| Blob store | a directory path holding `<hash>` files; no network stores |
+| Store | a log and blobs with no working folder (section 8): one mechanism for keeping history (`R16`) and for syncing through a third place (`R24`). A directory, or an S3 bucket |
 | Origin | none. A vault records no other vault; `sync`, `push`, `pull` and `get` name one. Nothing breaks when a folder moves |
 | Settings | changed with `syncit config`, not by editing the file |
-| Ignore list | `.syncit/ignore`, local; names and path prefixes, no wildcards |
+| Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
 | `drop` safety | scans first, so unrecorded changes are recorded; refuses unless the content is in local history, the store, or the vault named by `--check`; `--force` overrides |
 | File metadata | regular files only; symlinks skipped with a warning; permissions and extended attributes not recorded |
 | File mtimes | a materialised file gets its entry's mtime |
@@ -617,12 +673,16 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Empty directories | not tracked; directories emptied by a deletion are removed |
 | Cross-path parents | a read rule, not a segment rejection (`CRDT.md` was corrected to match) |
 
+### Still open, to settle before milestone 10
+
+- **The S3 client.** Section 3 lists five dependencies and no others. S3 needs HTTPS and signed requests. The choices are a crate with a blocking API, or shelling out to an installed `rclone` or `aws`. Avoid one that brings an async runtime into a tool that has none.
+
 ### Still open, not for version 1
 
-- Wildcards in the ignore file, and whether it should replicate.
+- Wildcards in the ignore file, and per-folder ignore files.
 - A stored heads file, if loading the whole log becomes slow.
 - Compaction and blob garbage collection.
-- Signed segments and peers reached over a network.
+- Signed segments, and vaults reached over a network (SSH, iroh). Stores cover the case of syncing through a third place.
 - A `size` field in entries.
 - Unicode normalisation of paths.
 - A guard against mass deletion (`R23`). A whole vault on an unmounted drive cannot trigger one, because `.syncit/` is missing too; a missing mount *inside* a vault can.
@@ -630,6 +690,8 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 ## 17. Deviations
 
 Record here anything built differently from these documents, with the reason.
+
+- **Not built yet: milestones 9 and 10.** The code still has the store of milestone 7: a directory holding blobs as `<hash>` files directly inside it, with no `format`, no `log/`, and no run with a store. Sections 8 and 10 describe the target.
 
 - **A peer's log is read leniently.** Section 6 says a local segment that fails validation stops the command; section 10 says a bad segment in the other vault is rejected and does not stop the run. Both cannot hold for the peer, which must load its own log to scan. A vault opened as a peer (or as the vault that `drop --check` names) skips its invalid segments with a warning on stderr; the receiving vault reports them as `rejected`. The vault a command runs in is still strict.
 - **`.syncit` is matched without regard to ASCII case** by the scan and by materialise, at any depth. A valid segment may name `.SYNCIT/x`, which on a case-insensitive filesystem is this vault's own `.syncit/`. Segment validation is unchanged (the format is not touched); the path is simply never written.

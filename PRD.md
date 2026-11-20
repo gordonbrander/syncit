@@ -15,6 +15,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - **A.5** As the same person, I want to check out several sub-folders, and also add a new top-level folder locally, so that both my edits and the new folder reach the archive.
 - **B.1** When two folders have both been edited since they last synced, I want them brought into agreement with every conflicting version kept as a visible file, so no edit is silently lost and I can see what to reconcile.
 - **C.1** As someone with three or more copies, I want to sync them in any pairing and order and have them all converge, so I don't have to route everything through one machine.
+- **C.2** As someone whose copies are never in the same place, such as a home and an office machine, I want them to sync through a bucket or a shared drive, so neither has to reach the other.
 - **D.1** As someone who only cares about the latest version, I want to sync without storing old versions anywhere, so the tool costs me no extra disk.
 - **D.2** As someone who wants a permanent archive, I want every synced version retained and recoverable, so I can go back to any earlier state.
 - **D.3** When I'm away from my other copies, I want to record a snapshot of my folder's current state, so my history is as fine-grained as I choose and not only as fine as my syncs.
@@ -63,7 +64,8 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 **Should**
 
 - **R15** A vault can keep every version it sees in a local blob store. (D.2)
-- **R16** A vault can send blobs to a remote content-addressed store, holding them locally while the store is unreachable. (D.2, D.3)
+- **R16** A vault can send what it has to a content-addressed store, a folder or a bucket, holding it locally while the store is unreachable. (D.2, D.3)
+- **R24** A store holds the log as well as blobs, so vaults that never see each other can sync through it. `R16` and `R24` are one mechanism. (C.1, C.2)
 - **R17** Record a snapshot of the current state without syncing. (D.3)
 - **R18** Report pending local changes, files waiting on unavailable content, and open conflicts, without changing anything. (E.1)
 - **R20** Exclude files by an ignore list. (A.5, E.1)
@@ -74,7 +76,6 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - **R21** Limit a single run to a path within the vault. (A.4)
 - **R22** Stash blobs with copy-on-write clones where the filesystem supports it, so local history costs no disk until a file changes. (D.2)
 - **R23** Abort a run that would delete more than a set fraction of files unless forced. (E.1)
-- **R24** Use the remote store as a rendezvous for logs as well as blobs, so two vaults that never see each other can sync through it. (C.1)
 
 ## Proposal
 
@@ -181,7 +182,7 @@ A blob is a file's content, addressed by its hash. A blob source is anything tha
 
 - a vault's working folder, located through its stat cache
 - a vault's `.syncit/blobs/`
-- a remote store
+- a store
 
 Any source may hold any subset. Fetched bytes are hashed before use. If no reachable source has a blob, the path is reported as pending and retried on the next run. A missing blob for a superseded version means only that the version cannot be restored.
 
@@ -193,6 +194,17 @@ Two independent settings in `config` decide what a vault retains:
 | `store` | unset / store location | When set, blobs are uploaded to the store. While the store is unreachable they wait in `.syncit/blobs/`. |
 
 With both off, the vault stores no blobs and its log records hashes only. With both on, blobs are uploaded and also kept locally. Local history is never required to be complete: a vault has the blobs it has. Both are set with `syncit config`.
+
+### Stores
+
+A store is a log and a set of blobs with no working folder: the part of a vault that replicates, kept somewhere every vault can reach. It can be a folder, such as a shared or external drive, or an S3 bucket.
+
+- A vault's `store` setting sends its history there: blobs and log segments, after every run and snapshot.
+- `sync`, `push` and `pull` accept a store in place of a vault. Two vaults that each sync with the same store converge, without ever reaching each other.
+- A store needs no lock and no server. Everything in it is immutable and named by its hash, so writers cannot disagree, and everything read from it is verified.
+- A store keeps what it is given. It is never pruned.
+
+Keeping history and syncing through a third place are deliberately one feature. A store holding blobs without the log would be readable only by the vault that filled it; adding the log makes the same store a backup anyone can restore from and a rendezvous anyone can sync through.
 
 ### A sync run
 
@@ -221,8 +233,8 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 |---|---|
 | `syncit init [dir]` | Make a folder a vault. |
 | `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another. The vault root is found by walking up from the given path. Records the sub-path as wanted, and nothing about the source. |
-| `syncit sync <vault>` | Sync both ways with another vault. |
-| `syncit push <vault>` / `syncit pull <vault>` | Sync one way. |
+| `syncit sync <vault or store>` | Sync both ways with another vault, or with a store. |
+| `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
 | `syncit get <path in another vault>...` / `syncit drop <path>...` | Change what this vault holds. |
@@ -240,6 +252,7 @@ A vault records no other vault. Every command that involves a second vault names
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become wanted |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
+| C.2 | R16, R24 | a store holds the log and blobs; both vaults sync with it |
 | D.1 | R13 | `keep_local_history` off, `store` unset |
 | D.2 | R15, R16 | `keep_local_history` on, or `store` set |
 | D.3 | R17 | `snapshot` |
@@ -276,8 +289,8 @@ The design keeps three things separate that sync tools usually fuse: what happen
 
 - **File metadata.** Which of permission bits, symlinks and extended attributes are recorded in an entry, and whether a metadata-only change is a new version.
 - **Case-insensitive filesystems.** How two paths differing only in case are handled on macOS and Windows.
-- **Peers that are not mounted paths.** The proposal assumes both vaults are reachable as directories. Syncing over SSH, over iroh, or through the remote store as in R24, is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
-- **Ignore list.** File name and syntax; whether it is replicated or local.
+- **Vaults that are not mounted paths.** The proposal assumes a vault is reachable as a directory. Stores cover syncing through a bucket. Syncing two vaults directly over SSH or iroh is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
+- **Ignore list.** Settled for version 1: `.syncitignore` at the vault root, an ordinary file that syncs with the rest. Wildcards and per-folder lists are open.
 - **`drop` safety.** Whether it refuses when no other reachable source holds the content.
 - **Mass-delete guard.** Whether R23 is on by default, and at what threshold.
 - **Tie-break timestamp.** File mtime reflects when the edit happened but can be set arbitrarily; scan time cannot be forged but reflects when the tool ran.

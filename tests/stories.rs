@@ -742,11 +742,9 @@ fn ignored_files() {
     ]);
     let b = tmp.path().join("b");
     cmd::init(&b).unwrap();
-    fs::write(
-        b.join(".syncit/ignore"),
-        "# local rules\n\nsecret.txt\nbuild/\n",
-    )
-    .unwrap();
+    // Listing the ignore file in itself keeps these rules local to b.
+    let rules = "# local rules\n\n.syncitignore\nsecret.txt\nbuild/\n";
+    fs::write(b.join(".syncitignore"), rules).unwrap();
     put(&b, "secret.txt", "b's secret", 1);
     put(&b, "sub/secret.txt", "deeper", 1);
     let report = cmd::sync(&b, &a).unwrap();
@@ -762,7 +760,7 @@ fn ignored_files() {
     };
     assert!(!recorded(&b, "b's secret") && !recorded(&b, "deeper"));
     // A recorded file that becomes ignored is neither deleted nor read as deleted.
-    fs::write(b.join(".syncit/ignore"), "secret.txt\nbuild/\nkeep.txt\n").unwrap();
+    fs::write(b.join(".syncitignore"), format!("{rules}keep.txt\n")).unwrap();
     fs::remove_file(a.join("keep.txt")).unwrap();
     cmd::sync(&b, &a).unwrap();
     assert!(is(&b, "keep.txt", "k"));
@@ -772,6 +770,27 @@ fn ignored_files() {
     let report = cmd::sync(&b, &a).unwrap();
     assert_eq!(report.recorded, 0);
     assert!(is(&a, "keep.txt", "back"));
+    assert!(!a.join(".syncitignore").exists());
+}
+
+#[test]
+fn ignore_file_syncs() {
+    // `.syncitignore` is an ordinary file: its rules travel with it.
+    let (_tmp, a, b) = pair(&[("f.txt", "f")]);
+    put(&a, ".syncitignore", "scratch\n", 1);
+    put(&a, "scratch/x.txt", "x", 1);
+    let report = cmd::sync(&b, &a).unwrap();
+    assert_eq!((report.recorded, report.exit_code()), (1, 0));
+    assert!(is(&b, ".syncitignore", "scratch\n") && !b.join("scratch").exists());
+    // From the next run on they apply in b too.
+    put(&b, "scratch/y.txt", "y", 2);
+    assert_eq!(cmd::sync(&b, &a).unwrap().recorded, 0);
+    assert!(!a.join("scratch/y.txt").exists() && is(&b, "scratch/y.txt", "y"));
+    // Two vaults changing the rules is an ordinary conflict.
+    put(&a, ".syncitignore", "scratch\nfrom a\n", 3);
+    put(&b, ".syncitignore", "scratch\nfrom b\n", 4);
+    assert_eq!(cmd::sync(&b, &a).unwrap().conflicts.len(), 1);
+    assert!(is(&a, ".syncitignore", "scratch\nfrom b\n"));
 }
 
 #[test]
