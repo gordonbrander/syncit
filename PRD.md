@@ -10,7 +10,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 
 - **A.1** As someone with an archive on a backup drive, I want to check it out to my computer, edit files, and sync back, so the archive gets my edits.
 - **A.2** As the same person, I want files I add to my working copy to appear in the archive when I sync, so new work is backed up without extra steps.
-- **A.3** When my working copy holds files I no longer need locally, I want to unload them without deleting them from the archive, so I can free space and keep the archive whole.
+- **A.3** When my working copy holds files I no longer need locally, I want to drop them without deleting them from the archive, so I can free space and keep the archive whole.
 - **A.4** As someone with a large archive, I want to check out a single sub-folder, edit and add files in it, and sync back, so I only carry what I'm working on.
 - **A.5** As the same person, I want to check out several sub-folders, and also add a new top-level folder locally, so that both my edits and the new folder reach the archive.
 - **B.1** When two folders have both been edited since they last synced, I want them brought into agreement with every conflicting version kept as a visible file, so no edit is silently lost and I can see what to reconcile.
@@ -22,6 +22,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 
 ## Goals
 
+- Using a vault feels like ordinary file management: dragging, dropping, editing in applications, saving, renaming, deleting. There is no staging, committing or branching, and no step between changing a file and syncing it. The experience to aim for is Dropbox, not git.
 - The folder a person works in contains ordinary files, readable and editable by any application.
 - Any vault can sync with any other vault, and any set of vaults converges to the same state regardless of the order of syncs.
 - No edit is silently lost: a conflicting, deleted, or overwritten version is either still on disk under a visible name or was explicitly discarded by policy.
@@ -48,7 +49,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - **R2** Sync in one direction only, as a push or a pull. (A.1, A.2)
 - **R3** Propagate edits, additions and deletions. (A.1, A.2, B.1)
 - **R4** Create a vault as a partial copy of another by naming a sub-folder, and extend it later with further sub-folders. The directory structure matches the source. (A.4, A.5)
-- **R5** A file absent from a partial vault because it was never loaded is not treated as deleted. (A.3, A.4, A.5)
+- **R5** A file absent from a partial vault because it was never fetched is not treated as deleted. (A.3, A.4, A.5)
 - **R6** A file present in a vault is synced even if it lies outside the sub-folders that vault was created with. (A.5)
 - **R7** Provide an explicit way to remove files from a vault without deleting them elsewhere, and to bring them back. (A.3)
 - **R8** Detect when the same path was changed independently in two vaults. Choose a winner deterministically, so every vault picks the same one without coordination. (B.1, C.1)
@@ -115,7 +116,7 @@ The log is a grow-only set of entries. `CRDT.md` specifies it in full. Each entr
 - An entry's id is the hash of its canonical bytes. Two byte-identical entries are the same entry.
 - Entries are written in segments. A segment is an immutable JSON Lines file named by its hash, holding the entries one scan produced.
 - Merging two logs is set union: copy the segments you don't have.
-- Only `sync`, `push`, `pull` and `snapshot` write entries. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
+- Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot` and `drop`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
 - A vault holds the log entries of every vault it has heard from, directly or through a relay.
 
 ### Current state
@@ -169,8 +170,9 @@ The stat cache is also the record of what this vault holds. If it is lost, or th
 
 - New paths from other vaults are materialised only if wanted.
 - Paths the vault already holds are always kept up to date, wanted or not.
-- `load <path>` adds an include and materialises the files.
-- `unload <path>` removes the files, drops their cache rows, and adds an exclude.
+- A new file or folder placed in the vault outside its wanted paths becomes wanted when it is first scanned. No separate step is needed; `drop` undoes it.
+- `get <path>...` adds an include and materialises the files.
+- `drop <path>...` records any pending changes, then removes the files and their cache rows, and adds an exclude.
 - Deleting a file with ordinary tools is a deletion and propagates.
 
 ### Blobs
@@ -223,16 +225,16 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 | `syncit push [peer]` / `syncit pull [peer]` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
-| `syncit load <path>` / `syncit unload <path>` | Change what this vault holds. |
+| `syncit get <path>...` / `syncit drop <path>...` | Change what this vault holds. |
 
 ### How the stories are met
 
 | Story | Requirements | Mechanism |
 |---|---|---|
 | A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
-| A.3 | R5, R7 | `unload` drops cache rows, so absence is "not held" |
+| A.3 | R5, R7 | `drop` removes cache rows, so absence is "not held" |
 | A.4 | R4, R5 | `clone` of a sub-path; same directory structure |
-| A.5 | R4, R6 | `load` for further folders; present files are always recorded |
+| A.5 | R4, R6 | `get` for further folders; present files are always recorded and become wanted |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
 | D.1 | R13 | `keep` off, `remote` unset |
@@ -245,7 +247,7 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 The design keeps three things separate that sync tools usually fuse: what happened (the log), what the bytes are (blobs), and what is on disk (the working folder and its cache). Each can be partial, lost, or rebuilt without corrupting the others.
 
 - **Do nothing: `rsync -au` in both directions.** With no memory of the last sync it cannot tell a deletion from a creation, or a one-sided edit from a two-sided one. Deleted files come back and the older of two concurrent edits is silently overwritten. It ties correctness to clocks agreeing across machines.
-- **Use `rclone bisync` or `unison`.** These are the boring existing options and they work for two folders. Both keep a snapshot of the last sync per pair of folders. That ties the metadata to a pair: a third folder needs a snapshot per pairing, a moved or restored folder invalidates it, and there is no history. Neither supports unload-without-delete.
+- **Use `rclone bisync` or `unison`.** These are the boring existing options and they work for two folders. Both keep a snapshot of the last sync per pair of folders. That ties the metadata to a pair: a third folder needs a snapshot per pairing, a moved or restored folder invalidates it, and there is no history. Neither supports drop-without-delete.
 - **A pairwise snapshot of our own.** The same model as above. It is the two-replica special case of the log and has the same limits.
 - **A state map instead of a log.** Storing only the current entries per path and discarding superseded ones converges equally well, but it forgets. History would then need versioned copies of the map, a second mechanism for something the log gives for free.
 - **A hub-only design.** With every sync passing through one central vault, causality reduces to a revision number per path. It rules out syncing two working copies directly and recording snapshots while away from the hub, and it makes one folder special.
@@ -273,8 +275,7 @@ The design keeps three things separate that sync tools usually fuse: what happen
 - **Case-insensitive filesystems.** How two paths differing only in case are handled on macOS and Windows.
 - **Peers that are not mounted paths.** The proposal assumes both vaults are reachable as directories. Syncing over SSH, over iroh, or through the remote store as in R24, is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
 - **Ignore list.** File name and syntax; whether it is replicated or local.
-- **Folders added outside the wanted paths.** A new local top-level folder is recorded and held (R6). Whether it is also added to the wanted paths automatically, so later files added to it elsewhere arrive, or needs an explicit `load`.
-- **`unload` safety.** Whether it refuses when no other reachable source holds the content.
+- **`drop` safety.** Whether it refuses when no other reachable source holds the content.
 - **Mass-delete guard.** Whether R23 is on by default, and at what threshold.
 - **Tie-break timestamp.** File mtime reflects when the edit happened but can be set arbitrarily; scan time cannot be forged but reflects when the tool ran.
 - **Conflict-copy names.** Behaviour when a short hash collides with an existing unrelated file, and for names with several extensions such as `.tar.gz`.

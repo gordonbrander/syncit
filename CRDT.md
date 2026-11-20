@@ -60,11 +60,11 @@ A segment arrives from another vault and is not trusted. It is rejected whole if
 - any path is absolute, has an empty, `.` or `..` component, or lies under `.syncit/`;
 - any `parents` array is unsorted or has duplicates.
 
-After merging, an entry whose parent is present but has a different path is invalid, and the segment containing it is rejected.
+One check cannot be made on a segment alone, because a parent may live in another segment: an entry whose parent is present in the log but has a different path is **invalid**. This is a read rule, not a reason to reject a segment, so that it depends only on the set of entries and not on the order they arrived in.
 
 ## Reading the log
 
-For a path `p`, with `E` the entries for `p`:
+For a path `p`, with `E` the entries for `p`, leaving out invalid entries (see "Validation"), which are never heads and supersede nothing:
 
 1. **Superseded**: every entry named in the `parents` of an entry in `E`.
 2. **Heads**: `E` minus the superseded entries.
