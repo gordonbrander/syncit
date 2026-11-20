@@ -1,0 +1,283 @@
+# syncit
+
+## TLDR
+
+People who keep the same files in more than one place (a backup drive, a laptop, a second machine, a bucket) can copy them one way with rsync, but they cannot safely sync both ways, hold only part of an archive, or find out when two copies diverged. syncit is a command-line tool that turns any folder into a *vault*: a folder of ordinary files plus a small `.syncit/` directory. Any vault can sync with any other vault, in either direction or both. A vault can hold a subset of the files. Conflicting edits are kept side by side instead of one overwriting the other. Keeping old versions is optional and decided per vault.
+
+## User stories
+
+Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a backup drive and `b` is a working copy on a computer.
+
+- **A.1** As someone with an archive on a backup drive, I want to check it out to my computer, edit files, and sync back, so the archive gets my edits.
+- **A.2** As the same person, I want files I add to my working copy to appear in the archive when I sync, so new work is backed up without extra steps.
+- **A.3** When my working copy holds files I no longer need locally, I want to unload them without deleting them from the archive, so I can free space and keep the archive whole.
+- **A.4** As someone with a large archive, I want to check out a single sub-folder, edit and add files in it, and sync back, so I only carry what I'm working on.
+- **A.5** As the same person, I want to check out several sub-folders, and also add a new top-level folder locally, so that both my edits and the new folder reach the archive.
+- **B.1** When two folders have both been edited since they last synced, I want them brought into agreement with every conflicting version kept as a visible file, so no edit is silently lost and I can see what to reconcile.
+- **C.1** As someone with three or more copies, I want to sync them in any pairing and order and have them all converge, so I don't have to route everything through one machine.
+- **D.1** As someone who only cares about the latest version, I want to sync without storing old versions anywhere, so the tool costs me no extra disk.
+- **D.2** As someone who wants a permanent archive, I want every synced version retained and recoverable, so I can go back to any earlier state.
+- **D.3** When I'm away from my other copies, I want to record a snapshot of my folder's current state, so my history is as fine-grained as I choose and not only as fine as my syncs.
+- **E.1** As a developer scripting backups, I want sync to be safe to interrupt and re-run, and to print what it changed and what conflicted, so I can run it unattended.
+
+## Goals
+
+- The folder a person works in contains ordinary files, readable and editable by any application.
+- Any vault can sync with any other vault, and any set of vaults converges to the same state regardless of the order of syncs.
+- No edit is silently lost: a conflicting, deleted, or overwritten version is either still on disk under a visible name or was explicitly discarded by policy.
+- A vault can hold part of the whole without that being mistaken for deletion.
+- Whether old versions are kept, and where, is a local choice per vault that does not affect how sync behaves.
+- The model is small enough to hold in one's head: files, a log, and blobs.
+
+### Non-goals
+
+- Garbage collection of blobs and compaction of the log. When compaction is added it will be a command the user runs and coordinates across vaults, never automatic.
+- Chunking or delta transfer; a changed file is transferred whole.
+- Rename detection; a rename is a delete and a create.
+- Merging the contents of conflicting files.
+- A background daemon or file watcher; syncit runs when invoked.
+- Mapping a sub-folder of one vault onto a different path in another.
+- Encryption of blobs or logs.
+- A hub-only mode with a privileged central vault.
+
+## Requirements
+
+**Must**
+
+- **R1** Sync two vaults in both directions so that afterwards they hold the same files for the paths both hold. (B.1, C.1)
+- **R2** Sync in one direction only, as a push or a pull. (A.1, A.2)
+- **R3** Propagate edits, additions and deletions. (A.1, A.2, B.1)
+- **R4** Create a vault as a partial copy of another by naming a sub-folder, and extend it later with further sub-folders. The directory structure matches the source. (A.4, A.5)
+- **R5** A file absent from a partial vault because it was never loaded is not treated as deleted. (A.3, A.4, A.5)
+- **R6** A file present in a vault is synced even if it lies outside the sub-folders that vault was created with. (A.5)
+- **R7** Provide an explicit way to remove files from a vault without deleting them elsewhere, and to bring them back. (A.3)
+- **R8** Detect when the same path was changed independently in two vaults. Choose a winner deterministically, so every vault picks the same one without coordination. (B.1, C.1)
+- **R9** Write each losing version next to the winner as `<name>-<short hash>.<ext>`, and print the list of conflicts at the end of the run. (B.1)
+- **R10** Never overwrite or delete a local file whose content changed after it was last scanned. (B.1, E.1)
+- **R11** Verify the hash of any content before writing it into a working folder. (E.1)
+- **R12** Any number of vaults, synced pairwise in any order, converge. A vault can relay changes between two vaults that never meet. (C.1)
+- **R13** A vault can operate with no stored history: no blob copies, no extra disk beyond a small log. (D.1)
+- **R14** An interrupted run leaves both vaults valid, and re-running completes the work. (E.1)
+
+**Should**
+
+- **R15** A vault can keep every version it sees in a local blob store. (D.2)
+- **R16** A vault can send blobs to a remote content-addressed store, holding them locally while the store is unreachable. (D.2, D.3)
+- **R17** Record a snapshot of the current state without syncing. (D.3)
+- **R18** Report pending local changes, files waiting on unavailable content, and open conflicts, without changing anything. (E.1)
+- **R20** Exclude files by an ignore list. (A.5, E.1)
+- **R25** The on-disk format carries a version, so a later change such as a different hash function can be detected and migrated instead of misread. (E.1)
+
+**Could**
+
+- **R21** Limit a single run to a path within the vault. (A.4)
+- **R22** Stash blobs with copy-on-write clones where the filesystem supports it, so local history costs no disk until a file changes. (D.2)
+- **R23** Abort a run that would delete more than a set fraction of files unless forced. (E.1)
+- **R24** Use the remote store as a rendezvous for logs as well as blobs, so two vaults that never see each other can sync through it. (C.1)
+
+## Proposal
+
+syncit is a single command-line binary written in Rust.
+
+### Vault
+
+A vault is a folder containing a `.syncit/` directory. There is no other kind of participant: every vault is a peer, and none is special. Paths are relative to the vault root and are the same in every vault, so `foo/bar/x.txt` in one vault is `foo/bar/x.txt` in all of them.
+
+```
+b/
+  .syncit/
+    config     # format version, origin, wanted paths, remote, keep
+    log/       # immutable log segments, named by their hash
+    cache      # local stat cache: path -> (size, mtime, hash, base)
+    blobs/     # optional: content-addressed file copies
+  foo/bar/x.txt   # ordinary files
+```
+
+`config` and `cache` are local and never replicated. `log/` is replicated. `blobs/` is a store that other vaults may read from.
+
+### Format version and hashing
+
+Every hash in the format is SHA-256: blob names, entry ids and segment names.
+
+The format has a version number, starting at 1. It is recorded in `config` and at the head of every log segment, so a segment is self-describing wherever it ends up. A vault refuses to sync with a peer, or to read a segment, whose version differs from its own. Changing the hash function is a new version and requires migrating a vault: rehashing its content and rewriting its log. Two versions cannot be mixed, because the same content would have two hashes and read as a conflict.
+
+### The log
+
+The log is a grow-only set of entries. `CRDT.md` specifies it in full. Each entry records that a path had some content:
+
+| Field | Meaning |
+|---|---|
+| path | relative to the vault root |
+| hash | hash of the file's bytes, or null for a deletion (a tombstone) |
+| mtime | the file's modification time when scanned |
+| parents | ids of the entries for this path that this one replaces |
+
+- An entry's id is the hash of its canonical bytes. Two byte-identical entries are the same entry.
+- Entries are written in segments. A segment is an immutable JSON Lines file named by its hash, holding the entries one scan produced.
+- Merging two logs is set union: copy the segments you don't have.
+- Only `sync`, `push`, `pull` and `snapshot` write entries. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
+- A vault holds the log entries of every vault it has heard from, directly or through a relay.
+
+### Current state
+
+The current state is computed from the log and never stored as truth. For each path:
+
+1. An entry named as a parent by another entry is superseded. The rest are the heads.
+2. Heads with the same hash are the same version.
+3. Heads with different hashes conflict. The winner is the maximum by `(is_file, mtime, entry id)`.
+
+`is_file` ranks any file above a tombstone, so an edit beats a concurrent delete. `mtime` makes the most recent edit win. The entry id breaks all remaining ties.
+
+No entry is written to resolve a conflict. Every vault computes the same winner from the same log. A conflict closes when someone next changes the path in a vault where every conflicting version is visible: that entry names all of them as parents. So a person resolves a conflict by opening the copies, patching the winner, and saving.
+
+### Conflict copies
+
+Each losing version that is a file is written beside the winner as `<name>-<short hash>.<ext>`, where the hash is the first 8 hex characters of the loser's content hash, placed before the last extension.
+
+```
+notes.txt            # the winner
+notes-3f9a1c2e.txt   # the other version
+```
+
+```
+conflict: notes.txt — kept the newer version, other saved as notes-3f9a1c2e.txt
+```
+
+- A copy is created only if its path has no entries in the log. A copy the user has deleted therefore stays deleted.
+- On the vault that wrote the losing version, the existing file is renamed to the copy name before the winner is written.
+- On other vaults the loser's content is fetched like any other blob.
+- Once written, a copy is an ordinary file, recorded by the next scan. Vaults creating the same copy independently produce equal content, which is not a conflict.
+- A losing deletion produces no copy; it is reported in the output.
+
+### Scanning
+
+A scan compares the working folder to the stat cache and produces new entries.
+
+- A file whose size and mtime match its cache row is unchanged. Otherwise it is hashed, and if the hash differs a new entry is written.
+- A file whose mtime is not older than the start of the previous scan is hashed regardless, to catch edits within one timestamp tick.
+- A cache row with no file on disk is a deletion and gets a tombstone.
+- A file on disk with no cache row, wherever it is in the vault, is looked up in the log. If its hash matches an earlier version of that path, the vault holds that version and nothing is written. Otherwise it is new and gets an entry.
+- A path in the log with neither a file nor a cache row is simply not held. Nothing is written.
+
+Each cache row also records its `base`: the entries the file on disk was derived from. A new entry's parents are the base, not the newest entries in the log. A vault that has heard of a newer version but not yet put it on disk therefore produces a conflict when its file is edited, instead of overwriting a version nobody there saw.
+
+The stat cache is also the record of what this vault holds. If it is lost, or the vault is restored from a backup, present files are recognised as old versions and brought forward, and absent files are treated as not held; no deletion is invented.
+
+### What a vault holds
+
+`config` lists wanted paths: directory prefixes to include and to exclude, with the longest matching prefix deciding. `init` wants everything. `clone` of a sub-folder wants that sub-folder.
+
+- New paths from other vaults are materialised only if wanted.
+- Paths the vault already holds are always kept up to date, wanted or not.
+- `load <path>` adds an include and materialises the files.
+- `unload <path>` removes the files, drops their cache rows, and adds an exclude.
+- Deleting a file with ordinary tools is a deletion and propagates.
+
+### Blobs
+
+A blob is a file's content, addressed by its hash. A blob source is anything that can return the bytes for a hash:
+
+- a vault's working folder, located through its stat cache
+- a vault's `.syncit/blobs/`
+- a remote store
+
+Any source may hold any subset. Fetched bytes are hashed before use. If no reachable source has a blob, the path is reported as pending and retried on the next run. A missing blob for a superseded version means only that the version cannot be restored.
+
+Two independent settings in `config` decide what a vault retains:
+
+| Setting | Values | Effect |
+|---|---|---|
+| `keep` | off / on | When on, every version scanned or received is retained in `.syncit/blobs/`, and blobs offered by peers for versions it lacks are collected. |
+| `remote` | unset / store URL | When set, blobs are uploaded to the store. While the store is unreachable they wait in `.syncit/blobs/`. |
+
+With both off, the vault stores no blobs and its log records hashes only.
+
+### A sync run
+
+Both vaults do each step, acting on their own folder:
+
+1. Scan, and write a segment of new entries.
+2. Stash or upload blobs for the new entries, per `keep` and `remote`.
+3. Exchange log segments.
+4. Compute current state from the merged log.
+5. Fetch the blobs needed for wanted and held paths.
+6. Materialise: write each file to a temporary name in the same directory and rename it into place; apply deletions; write conflict copies; update the stat cache.
+
+Immediately before replacing or deleting a file, it is checked against its cache row. If it has changed, the path is skipped and reported; the next run sees the change as a new entry.
+
+Scanning always precedes merging, so entries are written from what the vault held before it learned anything new.
+
+In a push or pull, both vaults still scan, but only the receiving vault takes segments and materialises.
+
+### Copied and restored vaults
+
+A vault has no identity. Two copies of one folder, or a vault restored from a backup, are ordinary vaults. If both are edited, their entries share a parent and neither replaces the other, so they conflict in the usual way.
+
+### Commands
+
+| Command | Does |
+|---|---|
+| `syncit init [dir]` | Make a folder a vault. |
+| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another. The vault root is found by walking up from the given path. Records the origin and the sub-path. |
+| `syncit sync [peer] [path]` | Sync both ways with the peer, by default the origin. |
+| `syncit push [peer]` / `syncit pull [peer]` | Sync one way. |
+| `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
+| `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
+| `syncit load <path>` / `syncit unload <path>` | Change what this vault holds. |
+
+### How the stories are met
+
+| Story | Requirements | Mechanism |
+|---|---|---|
+| A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
+| A.3 | R5, R7 | `unload` drops cache rows, so absence is "not held" |
+| A.4 | R4, R5 | `clone` of a sub-path; same directory structure |
+| A.5 | R4, R6 | `load` for further folders; present files are always recorded |
+| B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
+| C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
+| D.1 | R13 | `keep` off, `remote` unset |
+| D.2 | R15, R16 | `keep` on, or `remote` set |
+| D.3 | R17 | `snapshot` |
+| E.1 | R10, R11, R14, R18, R25 | immutable segments, atomic writes, hash checks, `status`, format version |
+
+## Rationale and alternatives
+
+The design keeps three things separate that sync tools usually fuse: what happened (the log), what the bytes are (blobs), and what is on disk (the working folder and its cache). Each can be partial, lost, or rebuilt without corrupting the others.
+
+- **Do nothing: `rsync -au` in both directions.** With no memory of the last sync it cannot tell a deletion from a creation, or a one-sided edit from a two-sided one. Deleted files come back and the older of two concurrent edits is silently overwritten. It ties correctness to clocks agreeing across machines.
+- **Use `rclone bisync` or `unison`.** These are the boring existing options and they work for two folders. Both keep a snapshot of the last sync per pair of folders. That ties the metadata to a pair: a third folder needs a snapshot per pairing, a moved or restored folder invalidates it, and there is no history. Neither supports unload-without-delete.
+- **A pairwise snapshot of our own.** The same model as above. It is the two-replica special case of the log and has the same limits.
+- **A state map instead of a log.** Storing only the current entries per path and discarding superseded ones converges equally well, but it forgets. History would then need versioned copies of the map, a second mechanism for something the log gives for free.
+- **A hub-only design.** With every sync passing through one central vault, causality reduces to a revision number per path. It rules out syncing two working copies directly and recording snapshots while away from the hub, and it makes one folder special.
+- **Symlinks into a blob directory.** The working folder would hold links, as in git-annex. Editors that save by replacing a file break the link, editors that write through it corrupt the blob, and other tools see links where they expect files. It ties the user's files to the storage layout.
+- **Sub-path given on every command.** Passing `--path` per run makes scope depend on what was typed last. A bare sync would pull the whole vault, and widening the scope after pruning locally would turn the pruned files into deletions.
+- **Mapping a sub-folder to a different root.** Checking out `a/zing/zap` as `b/` needs a path translation at every boundary. Keeping the structure identical removes it.
+- **Writing an entry to resolve each conflict.** Unnecessary, since every vault computes the same winner from the log. It would also close a conflict before anyone had looked at it.
+- **Version vectors instead of parent hashes.** A counter per vault per path tolerates an incomplete log and compacts easily. It requires every vault to have a unique identity, and fails silently when that breaks: a vault copied or restored from backup reuses a counter, and a later entry from its twin then replaces a new edit it never saw. Parent hashes name exactly what an entry replaced, so identity is not needed.
+- **BLAKE3 instead of SHA-256.** BLAKE3 is faster on a first scan of a large archive and is the hash used by `iroh-blobs`, so blob ids would work unchanged if iroh were later used as a transport. SHA-256 was chosen for now because its tooling is on every machine and it is hardware-accelerated on current CPUs. The format version keeps the switch possible.
+- **Requiring blobs to be stored before an entry is published.** This would force every vault to keep or upload history. Treating a missing blob as "not yet" or "not kept" lets retention be optional.
+
+## Prior art
+
+- **rsync**: the size-and-mtime-then-checksum comparison used by the scan.
+- **unison, rclone bisync**: two-way sync against a stored snapshot of the previous run.
+- **Syncthing**: per-file version vectors across many devices, and conflict copies.
+- **git**: a working tree of real files, a content-addressed object store, and an index that caches stat data to avoid rehashing, including its handling of same-tick edits.
+- **git-annex**: content-addressed files with partial presence per replica and remote stores; its symlinked working tree is the design avoided here.
+- **CouchDB**: a document's revision tree is a grow-only set of hash-linked revisions merged by union, with a deterministic winner. The log is that model with several parents per entry, and with losing versions surfaced as files instead of hidden.
+- **Dropbox**: conflicted copies surfaced as sibling files.
+
+## Open questions
+
+- **File metadata.** Which of permission bits, symlinks and extended attributes are recorded in an entry, and whether a metadata-only change is a new version.
+- **Case-insensitive filesystems.** How two paths differing only in case are handled on macOS and Windows.
+- **Peers that are not mounted paths.** The proposal assumes both vaults are reachable as directories. Syncing over SSH, over iroh, or through the remote store as in R24, is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
+- **Ignore list.** File name and syntax; whether it is replicated or local.
+- **Folders added outside the wanted paths.** A new local top-level folder is recorded and held (R6). Whether it is also added to the wanted paths automatically, so later files added to it elsewhere arrive, or needs an explicit `load`.
+- **`unload` safety.** Whether it refuses when no other reachable source holds the content.
+- **Mass-delete guard.** Whether R23 is on by default, and at what threshold.
+- **Tie-break timestamp.** File mtime reflects when the edit happened but can be set arbitrarily; scan time cannot be forged but reflects when the tool ran.
+- **Conflict-copy names.** Behaviour when a short hash collides with an existing unrelated file, and for names with several extensions such as `.tar.gz`.
+- **Log growth.** Compaction is a non-goal for now; at what size it becomes necessary is unknown, and its mechanism is undesigned (see `CRDT.md`).
+- **Unicode paths.** Whether paths are normalised, and what happens to file names that are not valid UTF-8.
+- **Size in the entry.** Whether entries record file size, so `status` can report how much data is pending.
