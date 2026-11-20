@@ -80,6 +80,25 @@ fn cli_smoke() {
         out,
         "{\"type\":\"blame\",\"path\":\"sub/f.txt\",\"nicknames\":[\"a\"]}\n"
     );
+    // `log` prints the hash that `restore` takes; the copy is named by it.
+    let (code, out) = run(&a, &["log", "sub/f.txt"]);
+    assert_eq!(code, 0);
+    let short = &out[..8];
+    assert!(out.ends_with("Z a sub/f.txt (current)\n"), "{out}");
+    assert_eq!(run(&a, &["restore", "sub/f.txt"]).0, 1, "no hash given");
+    assert_eq!(
+        run(&a, &["restore", "sub/f.txt", "zz"]).0,
+        1,
+        "no such version"
+    );
+    let (code, out) = run(&a.join("sub"), &["restore", "f.txt", short]);
+    assert_eq!((code, out), (0, format!("C sub/f-{short}.txt\n")));
+    fs::remove_file(a.join(format!("sub/f-{short}.txt"))).unwrap();
+    let (code, out) = run(&a, &["restore", "--in-place", "sub/f.txt", short]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "sub/f.txt is already that version\n")
+    );
     assert_eq!(run(&a, &["frobnicate"]).0, 1, "bad arguments");
     assert_eq!(run(tmp.path(), &["clone", "a/sub", "b"]).0, 0);
     assert_eq!(fs::read_to_string(b.join("sub/f.txt")).unwrap(), "v1");
@@ -154,7 +173,7 @@ fn cli_smoke() {
     assert_eq!(code, 0);
     for command in [
         "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "blame",
-        "config",
+        "log", "restore", "config",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),

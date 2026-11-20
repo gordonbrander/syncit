@@ -262,7 +262,42 @@ Snapshots are delivered with the next sync, so your history is as fine-grained a
 
 ### Getting an old version back
 
-This version of syncit stores old versions but has no command to restore one. Each stored version is a plain file in `.syncit/blobs/`, named by the SHA-256 of its content. You can open or copy it directly.
+`log` lists the versions of a file, newest first, with the vault that recorded each:
+
+```sh
+syncit log notes.txt
+```
+
+```
+81db67b6 2026-11-20 17:21Z laptop notes.txt (current)
+3f9a1c2e 2026-11-19 09:12Z drive notes.txt
+-------- 2026-11-18 20:40Z laptop notes.txt (deleted)
+5c02e8aa 2026-11-18 08:05Z laptop notes.txt (no content)
+```
+
+Each line starts with the first characters of the version's hash; times are UTC. `(no content)` marks a version this vault did not keep, which is every old version unless history was on when it passed through.
+
+`restore` takes a file and enough of a hash to pick one version:
+
+```sh
+syncit restore notes.txt 3f9a
+```
+
+```
+C notes-3f9a1c2e.txt
+```
+
+The old version is written beside the file, under the name a conflict copy would have, and your current file is not touched. Look at it, take what you need, and delete it; or move it over the original to go back to it entirely. Either way the next sync treats what you did as an ordinary edit.
+
+To replace the file in one step, or to bring back a file you deleted:
+
+```sh
+syncit restore --in-place notes.txt 3f9a
+```
+
+syncit records the file as it is first, so with history on, the version you replace can itself be restored later. With history off it cannot, unless another vault still has it.
+
+Each stored version is also a plain file in `.syncit/blobs/`, named by the SHA-256 of its content.
 
 ## Who changed what
 
@@ -336,7 +371,7 @@ syncit --json push /Volumes/Backup/Documents
 {"type":"summary","recorded":1,"added":0,"updated":1,"deleted":0,"conflicts":0,"pending":0,"skipped":0,"incomplete":0,"rejected":0}
 ```
 
-The types are `event`, `conflict`, `summary`, `setting`, `blame` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
+The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
 
 ## Commands
 
@@ -352,6 +387,8 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame` and `info` on s
 | `syncit get <path in another vault>...` | start holding those files here, and fetch them |
 | `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
 | `syncit blame [path]...` | show which vault recorded the current version of each file |
+| `syncit log [path]...` | list the recorded versions of each file, newest first |
+| `syncit restore <path> <hash>` | bring back an old version as a copy beside the file; `--in-place` replaces the file |
 | `syncit config` | show this vault's settings |
 | `syncit config local-history on\|off` | keep old versions inside the vault, or stop |
 | `syncit config nickname <name>` | name this vault in the changes it records |

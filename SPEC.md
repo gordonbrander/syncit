@@ -112,7 +112,7 @@ Suggested layout. Merge or split if it reads better, but keep the pure parts fre
 | `segment` | encode, decode and validate a whole segment | none |
 | `log` | load `log/`, the path-to-entries map, `resolve` (the read rules) | load only |
 | `config` | `Config`, load and save, `wanted` | load and save |
-| `cache` | `Cache`, `Row`, load and save, the unchanged test | load, save, stat |
+| `cache` | `Cache`, `Row`, the deletion records, load and save, the unchanged test | load, save, stat |
 | `scan` | walk, the write table, segment writing | yes |
 | `blobs` | hashing, blob sources, fetch, retain | yes |
 | `materialise` | the per-path procedure, conflict copies, setting base | yes |
@@ -197,12 +197,16 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
   "scanned": 1763600000000,
   "rows": {
     "foo/bar/x.txt": { "size": 120, "mtime": 1763599990000, "hash": "9c1f…", "base": ["3f9a…"] }
+  },
+  "deleted": {
+    "foo/old.txt": ["77b0…"]
   }
 }
 ```
 
 - `scanned`: when the most recent scan started, in milliseconds. 0 before the first scan.
 - `rows`: one per held path. `mtime` is the file's mtime as the filesystem reported it, in milliseconds (floor; negative before 1970).
+- `deleted`: one per path this vault has seen deleted, with its base: the heads, all tombstones, that the absence of a file here reflects. A path is in at most one of `rows` and `deleted`. A cache written before this field existed has none, and loads as if it were empty.
 - A missing cache file is an empty cache. That is the "lost cache" case and must work (`CRDT.md`, "Writing an entry", third row).
 
 **The unchanged test.** A file is unchanged against its row if its size and mtime equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise and `move`.
@@ -277,11 +281,15 @@ Paths are recorded as the operating system returns them, joined with `/`. No Uni
 Let `now` be the time the scan started. For each file found, and for each row whose path was not found and is not ignored, apply the table in `CRDT.md`, "Writing an entry":
 
 - **File and row.** Apply the unchanged test. If the hash equals the row's, refresh the row's size and mtime and write nothing. If it differs, write a file entry with `parents` = the row's base; the row becomes `(size, mtime, new hash, [new entry id])`.
-- **Row, no file.** Write a tombstone with `mtime = now` and `parents` = the row's base. Remove the row.
-- **File, no row.** Hash it. If any valid entries of this path have that hash, write nothing and create a row whose base is all of them (superseded ones included). Otherwise write a file entry with `parents = []` and create the row.
-- **Neither.** Nothing. The path is not held.
+- **Row, no file.** Write a tombstone with `mtime = now` and `parents` = the row's base. Replace the row with a deletion record whose base is the tombstone.
+- **File, deletion record.** Hash it. Write a file entry with `parents` = the record's base, whatever the hash. Replace the record with the row.
+- **File, neither.** Hash it. Then the first of these that applies:
+  1. `resolve` gives a winner that is a tombstone (so every head is one): write a file entry with `parents` = the heads and create the row.
+  2. Some valid entries of this path have that hash: write nothing and create a row whose base is all of them (superseded ones included).
+  3. Otherwise write a file entry with `parents = []` and create the row.
+- **No file, no row.** Nothing. The path is not held, or is deleted and stays so.
 
-**Auto-include.** In the "file, no row" case, if the path is not wanted, the scan adds an include for it, so that a folder dragged into a vault is synced from then on, including files later added to it elsewhere. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
+**Auto-include.** When a file has no row, with or without a deletion record, if the path is not wanted, the scan adds an include for it, so that a folder dragged into a vault is synced from then on, including files later added to it elsewhere. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
 
 | New file | Include added | Why not shorter |
 |---|---|---|
@@ -387,14 +395,14 @@ Let `S = resolve(p)`, `row` the cache row, `W` the winner, `h` its hash.
 1. `S` is `Absent`: nothing.
 2. `S` is `Incomplete`: report `incomplete`. Nothing else.
 3. The path is neither held nor wanted: nothing. (`R5`. A held path is kept up to date whether wanted or not.)
-4. **`W` is a tombstone.** If held: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. If not held: nothing.
+4. **`W` is a tombstone.** If held: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. Then, held or not, set the path's deletion record to the heads: with no file here, this vault's state reflects all of them. A path that reaches this step is held or wanted, so a wanted path the vault never held gets a record too.
 5. **`W` is a file and held with `row.hash == h`.** The content is in place. Go to "copies and base".
 6. **`W` is a file and held with a different hash.** Run the safety checks.
    - If `row.hash` is a loser hash and its copy path `c` has no entries in the log: the local file is a conflicting version and must stay visible. If something already exists at `c`, report `skipped` (name clash) and stop. Otherwise write the winner to its temporary name first; rename `p` to `c`; rename the temporary file onto `p`; remove the old row. `c` gets no row.
    - Otherwise the local version is superseded, or its copy was already recorded: write the winner over it.
    - If the winner's blob is unavailable: report `pending`, change nothing, and leave the row and its base alone.
    - On success the row becomes `(size, mtime as stat reports, h, base)`. Report `updated`. Go to "copies and base".
-7. **`W` is a file, not held, wanted.** Run the safety checks and write the file. Unavailable: `pending`. On success create the row and report `added`. Go to "copies and base".
+7. **`W` is a file, not held, wanted.** Run the safety checks and write the file. Unavailable: `pending`, and a deletion record stays as it is. On success create the row, remove any deletion record and report `added`. Go to "copies and base".
 
 ### Copies and base
 
@@ -496,6 +504,8 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
 | `syncit blame [path]...` | See below. |
+| `syncit log [path]...` | See below. (`R26`) |
+| `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
 | `syncit config [local-history on\|off]` | See below. (`R15`) |
 | `syncit config nickname <name>` | See below. |
 
@@ -536,6 +546,37 @@ There is no way to stop holding a path without naming a vault that takes it. An 
 
 It reads the log only. A vault that receives a file records nothing, so it is never named for it; an edit that no scan has recorded is not attributed to anyone. It has no summary and exits 0.
 
+### log
+
+`syncit log [path]...` prints the recorded versions of each file. The paths are in this vault, relative to the current directory, and need not exist on disk; with none, every path in the log is considered.
+
+1. Open and lock the vault. Nothing is scanned and nothing is written.
+2. For each path in the log at or under a given path, in sorted order: take its valid entries, newest first by `(mtime, id)`. Superseded entries, tombstones and losing heads are all listed.
+3. Print a `version` message for each, with the entry's hash (null for a tombstone), its mtime, the nicknames of the segments holding it, `current` (it is the winner `resolve` gives), and `available` (some blob source of this vault has the content: a working file or `.syncit/blobs/`; checked as a dry run checks it, without hashing).
+
+The order is by mtime, which is the file's and can be set to anything; it is a listing, not the order of supersession. It has no summary and exits 0.
+
+### restore
+
+`syncit restore [--in-place] <path> <hash>` brings back a recorded version of one file. `<hash>` is any non-empty prefix of the content hash that matches exactly one of the distinct hashes among the path's valid entries; none or several is an error. The path need not exist on disk.
+
+Without `--in-place`:
+
+1. Open and lock the vault. Nothing is scanned.
+2. Let `c = copy_name(path, hash)`. If `c` is ignored: error. If a file is at `c`: with that hash, say so and stop, exit 0; with other content, error.
+3. Write the content at `c` as materialise writes a file (safety checks, temporary name, verified, renamed), with the current time as its mtime. No source has it: error.
+4. Report `copied`. No row and no entry is written: `c` is an ordinary file that the next scan records, as it does a conflict copy.
+
+With `--in-place`:
+
+1. Open and lock the vault. Scan and `retain()`, so that an edit no scan has recorded is in the log, and kept if local history is on, before it is replaced.
+2. If the row has that hash already: say so and stop, exit 0.
+3. If there is no row, the path's winner must be a tombstone; otherwise error. With no file here and a live winner, the vault does not hold the path, and a scan would take the restored bytes for an old copy (section 7), which the next run would bring forward.
+4. Write the content at the path as in step 3 above.
+5. Scan and `retain()` again. Over a file this records an ordinary edit whose parents are the row's base; over a deletion, a re-creation whose parents are the deletion record's base. Report `updated` or `added`.
+
+The mtime is now, not the old entry's: restoring is a new edit, and with the old time it would lose a conflict to anything newer. Neither form has a summary; both exit 0 unless they fail. There is no `--dry-run` and no way to name a peer as the source of the content.
+
 ### config
 
 - `syncit config` prints the vault's settings, as `setting` messages: `local-history: on|off`, then `nickname: <nickname>`.
@@ -557,7 +598,7 @@ How it is built:
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
 - `Options` holds the process-wide settings (`json`, and `dry_run` of section 10) and is passed to everything that can print or write.
-- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame` and `config` have no summary.
+- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages
 
@@ -567,6 +608,7 @@ How it is built:
 | `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
 | `setting` | `name`, `value` | `<name>: <value>` | stdout |
 | `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
+| `version` | `path`, `hash`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
 | `info` | `message` | the message | stdout |
 | `summary` | the counts | `recorded 3, added 1, …` | stdout |
 | `warning` | `message` | `warning: <message>` | stderr |
@@ -617,7 +659,7 @@ The same run's first and last lines with `--json`:
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Completed; nothing needs attention. `init`, `status`, `blame` and `config` always exit 0 unless they fail. |
+| 0 | Completed; nothing needs attention. `init`, `status`, `blame`, `log`, `restore` and `config` always exit 0 unless they fail. |
 | 1 | Failed: bad arguments, not a vault, vault in use, version mismatch, corrupt local file, a refused `move`. |
 | 2 | Completed, but there are conflicts or pending, skipped, incomplete or rejected items. |
 
@@ -630,9 +672,9 @@ The same run's first and last lines with `--json`:
 | after writing a segment, before saving the cache | entries exist that the cache does not reflect | the scan writes the identical entries again (section 7) |
 | during segment exchange | some segments copied; possibly a child without its parent | segments are whole or absent; such paths are `Incomplete` and wait |
 | while fetching a blob | a `.syncit-tmp-*` file | never renamed into place; the next scan deletes it |
-| after replacing files, before saving the cache | files newer than their rows | the scan re-records them as entries with the winner's hash and mtime: either the same entry or a head with the same hash, which is the same version. Files with no row are adopted |
+| after replacing files, before saving the cache | files newer than their rows | the scan re-records them as entries with the winner's hash and mtime: either the same entry or a head with the same hash, which is the same version. Files with no row are adopted; one written over a deletion record is re-recorded with the winner's hash and mtime, which is again the same version |
 | after renaming a loser to its copy name, before placing the winner | the path is missing, the copy has no row | the scan records a tombstone and the copy; the winner still beats the tombstone, and the losing content is in the copy |
-| after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones |
+| after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones. The deletion record names only the second until the next materialise sets it to both |
 | during `move`, after saving the cache | files with no rows | the scan adopts them; nothing is recorded as deleted |
 | while uploading to a store (milestone 9) | some blobs or segments are in the store and others are not | every object is whole or absent; a reader sees a path as `pending` or `incomplete` and waits; the next run uploads the rest |
 
@@ -682,6 +724,10 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `edit_beats_delete` | edit on one side, delete on the other: the file survives everywhere and the delete is reported |
 | `same_edit_no_conflict` | identical content written on both sides is not a conflict |
 | `new_file_at_existing_path` | a file created in a partial vault at a path another vault already has: equal content is adopted or merges silently, different content is an ordinary conflict with a copy |
+| `recreate_after_delete` | a file deleted, synced, and created again at the same path, with an old version's bytes or new ones, in the vault that deleted it or the one that received the deletion, and with the cache lost: it stays in both vaults as one head whose parents are the tombstones, with no conflict; both vaults hold a deletion record in between |
+| `recreate_against_unseen_recreation` | a path deleted here, re-created in another vault whose content has not arrived, then re-created here with an old version's bytes: a conflict with a copy, not an old file brought forward |
+| `log_lists_versions` | `log` lists a path's entries newest first with the recording vault, marks the current one, lists a deletion, finds a path with no file, and reports content as available only where a working file or a kept blob has it |
+| `restore_version` | `restore` writes the copy and leaves the file alone; again is a no-op; the copy syncs as a new file and, moved over the file, as an edit; `--in-place` records unrecorded edits first and then the old version on top of them; over a deleted file it stays in both vaults with no conflict; refused for an unknown or empty hash, content not kept, a taken copy name, and a path not on disk here |
 | `lost_cache` | delete `.syncit/cache`, sync: no entries written for unchanged files, no deletions invented, old files brought forward |
 | `copied_vault` | copy a vault folder with `cp -R` semantics, edit both, sync all: an ordinary conflict, nothing lost |
 | `restored_backup` | restore a vault to an old state, edit, sync: conflict with the newer head, nothing lost |
@@ -730,6 +776,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | R18 | 11, 12 | `cli_smoke`, `story_b1` |
 | R20 | 5, 7 | `ignored_files`, `ignore_file_syncs` |
 | R25 | 5, 10 | `version_mismatch`, `segment_rejects` |
+| R26 | 7, 11 | `log_lists_versions`, `restore_version`, `recreate_after_delete` |
 
 ## 15. Milestones
 
@@ -744,6 +791,7 @@ Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warning
 - [x] **7. Local history.** `.syncit/blobs/`, `keep_local_history`, `retain`, `config`. Tests: `story_d1`, `story_d2`, `config_command`.
 - [x] **8. Hardening.** Locking, ignore file, symlink checks, version checks, output format and exit codes. Tests: `hostile_segment`, `symlink_escape`, `ignored_files`, `version_mismatch`, and the remaining parts of `lost_cache` and `story_d3`.
 - [x] **8a. Nicknames.** The segment header with a nickname, the `nickname` setting and `config nickname`, the log's record of which vaults recorded each entry, and `blame`. Tests: `header_rejects`, `nickname_default`, `blame_names_the_recording_vault`, and the nickname parts of `config_command`, `message_forms` and `cli_smoke`.
+- [x] **8b. Restore.** Deletion records in the cache (sections 5, 7 and 9), the `version` message, and the commands `log` and `restore`. Tests: `recreate_after_delete`, `recreate_against_unseen_recreation`, `log_lists_versions`, `restore_version`, and the `version` parts of `message_forms` and `cli_smoke`.
 - [ ] **9. Stores.** Everything under "Stores" in section 8 and "A run with a store" in section 10, for directory stores: the layout, the `store` setting and `config store`, `flush`, the store as a blob source, and `sync`, `push`, `pull` and `move` with a store. Tests: `story_c2_sync_through_store`, `store_layout`, `store_hostile`, `store_configured_gets_log`.
 - [ ] **10. S3 stores.** The second kind of store, behind the same four operations. Test: `s3_store`.
 
@@ -762,7 +810,8 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
 | `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target wants every file and, after the push, holds the same content at every path |
 | File metadata | regular files only; symlinks skipped with a warning; permissions and extended attributes not recorded |
-| File mtimes | a materialised file gets its entry's mtime |
+| File mtimes | a materialised file gets its entry's mtime; a restored one gets the current time |
+| Re-creating a deleted file | a new version that replaces the tombstones the vault had seen, kept in a deletion record in the cache. With no record, a file at a deleted path is still kept as a new version: when it cannot be decided, data is retained |
 | Unicode paths | recorded as the OS returns them; names that are not UTF-8 are skipped with a warning |
 | Case-insensitive filesystems | no special handling; a case collision surfaces as "untracked file in the way" and nothing is overwritten |
 | Conflict-copy name clash | the existing file is left alone; the conflict is reported and stays open |

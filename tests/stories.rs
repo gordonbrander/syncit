@@ -12,9 +12,10 @@ const O: &Options = &Options {
     json: false,
     dry_run: false,
 };
+use syncit::cache::Cache;
 use syncit::config::Config;
 use syncit::entry::sha256;
-use syncit::log::Log;
+use syncit::log::{Log, PathState};
 use syncit::materialise::{copy_name, materialise};
 use syncit::scan::scan;
 use syncit::vault::Vault;
@@ -401,6 +402,224 @@ fn edit_beats_delete() {
     put(&b, "f.txt", "again", 2);
     assert_eq!(cmd::sync(O, &b, &a).unwrap().exit_code(), 0);
     assert!(is(&a, "f.txt", "again"));
+}
+
+/// One head at `path`, a file, whose parents are all tombstones; and the
+/// vault's cache holds it as a file, not as a deletion.
+fn replaced_deletion(dir: &Path, path: &str) -> bool {
+    let (log, cache) = (log(dir), Cache::load(dir).unwrap());
+    let PathState::Resolved { heads, .. } = log.resolve(path) else {
+        return false;
+    };
+    let head = &log.entries[&heads[0]];
+    heads.len() == 1
+        && head.hash.is_some()
+        && !head.parents.is_empty()
+        && head.parents.iter().all(|p| log.entries[p].hash.is_none())
+        && cache.rows.contains_key(path)
+        && !cache.deleted.contains_key(path)
+}
+
+#[test]
+fn recreate_after_delete() {
+    // Re-created where it was deleted, with an old version's bytes and with
+    // new ones: an ordinary new version, not an old copy and not a conflict.
+    let (_tmp, a, b) = pair(&[("same.txt", "one"), ("diff.txt", "one"), ("k.txt", "k")]);
+    for path in ["same.txt", "diff.txt"] {
+        fs::remove_file(a.join(path)).unwrap();
+    }
+    assert_eq!(cmd::sync(O, &a, &b).unwrap().deleted, 2);
+    for dir in [&a, &b] {
+        let seen = Cache::load(dir).unwrap().deleted;
+        assert_eq!(seen.len(), 2, "both vaults record the deletions");
+    }
+    put(&a, "same.txt", "one", 1);
+    put(&a, "diff.txt", "two", 1);
+    for _ in 0..2 {
+        let report = cmd::sync(O, &a, &b).unwrap();
+        assert_eq!((report.conflicts, report.exit_code()), (0, 0));
+    }
+    for dir in [&a, &b] {
+        assert!(is(dir, "same.txt", "one") && is(dir, "diff.txt", "two"));
+        assert!(replaced_deletion(dir, "same.txt") && replaced_deletion(dir, "diff.txt"));
+    }
+
+    // The same in the vault that received the deletion.
+    fs::remove_file(a.join("same.txt")).unwrap();
+    cmd::sync(O, &a, &b).unwrap();
+    put(&b, "same.txt", "one", 2);
+    for _ in 0..2 {
+        let report = cmd::sync(O, &b, &a).unwrap();
+        assert_eq!((report.conflicts, report.exit_code()), (0, 0));
+    }
+    assert!(is(&a, "same.txt", "one") && replaced_deletion(&b, "same.txt"));
+
+    // With the cache lost there is no record: the file is kept all the same.
+    fs::remove_file(a.join("same.txt")).unwrap();
+    cmd::sync(O, &a, &b).unwrap();
+    fs::remove_file(a.join(".syncit/cache")).unwrap();
+    put(&a, "same.txt", "one", 3);
+    for _ in 0..2 {
+        let report = cmd::sync(O, &a, &b).unwrap();
+        assert_eq!(
+            (report.conflicts, report.deleted, report.exit_code()),
+            (0, 0, 0)
+        );
+    }
+    assert!(is(&b, "same.txt", "one") && replaced_deletion(&a, "same.txt"));
+}
+
+#[test]
+fn recreate_against_unseen_recreation() {
+    // b deletes f.txt. a re-creates it; b hears of that through c, which
+    // carries the news but not the content. b then re-creates it too, with
+    // an old version's bytes. b had seen only the deletion, so the two
+    // re-creations conflict and both are kept.
+    let (tmp, a, b) = pair(&[("f.txt", "v1"), ("sub/s.txt", "s")]);
+    let c = tmp.path().join("c");
+    cmd::clone(O, &a.join("sub"), &c).unwrap();
+    fs::remove_file(b.join("f.txt")).unwrap();
+    cmd::sync(O, &b, &a).unwrap();
+    put(&a, "f.txt", "other", 1);
+    cmd::sync(O, &c, &a).unwrap();
+    let report = cmd::sync(O, &b, &c).unwrap();
+    assert_eq!(report.pending, 1);
+    put(&b, "f.txt", "v1", 2);
+    let report = cmd::sync(O, &b, &a).unwrap();
+    assert_eq!(report.conflicts, 1);
+    let copy = copy_of("f.txt", "other");
+    for dir in [&a, &b] {
+        assert!(is(dir, "f.txt", "v1") && is(dir, &copy, "other"));
+    }
+}
+
+#[test]
+fn log_lists_versions() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("d/g.txt", "g")]);
+    cmd::config(O, &b, Some(Setting::Nickname("other".into()))).unwrap();
+    put(&a, "f.txt", "v2", 1);
+    cmd::sync(O, &a, &b).unwrap();
+    put(&b, "f.txt", "v3", 2);
+    cmd::sync(O, &a, &b).unwrap();
+    let seen = cmd::log(O, &a, &paths(&["f.txt"])).unwrap();
+    let line = |i: usize| {
+        let v: &syncit::output::Version = &seen[i];
+        let names = v.nicknames.join(",");
+        (v.hash.clone(), names, v.current, v.available)
+    };
+    // Newest first. Without local history, only what is on disk is available.
+    let hash = |content: &str| Some(sha256(content.as_bytes()));
+    assert_eq!(seen.len(), 3);
+    assert_eq!(line(0), (hash("v3"), "other".into(), true, true));
+    assert_eq!(line(1), (hash("v2"), "a".into(), false, false));
+    assert_eq!(line(2), (hash("v1"), "a".into(), false, false));
+    // A deletion is listed, and the path is still found though no file is there.
+    fs::remove_file(a.join("f.txt")).unwrap();
+    cmd::snapshot(O, &a).unwrap();
+    let seen = cmd::log(O, &a.join("d"), &paths(&["../f.txt"])).unwrap();
+    assert_eq!(seen.len(), 4);
+    assert_eq!((&seen[0].hash, seen[0].current), (&None, true));
+    assert!(!seen[1].current && !seen[1].available);
+    // No paths: every file. With local history, old versions are available.
+    assert_eq!(cmd::log(O, &a, &[]).unwrap().len(), 5);
+    // Kept from the first run after it is turned on.
+    cmd::config(O, &b, Some(Setting::LocalHistory(true))).unwrap();
+    cmd::snapshot(O, &b).unwrap();
+    put(&b, "d/g.txt", "g2", 3);
+    cmd::snapshot(O, &b).unwrap();
+    put(&b, "d/g.txt", "g3", 4);
+    cmd::snapshot(O, &b).unwrap();
+    let seen = cmd::log(O, &b, &paths(&["d"])).unwrap();
+    let available: Vec<bool> = seen.iter().map(|v| v.available).collect();
+    assert_eq!(available, [true, true, true]);
+}
+
+#[test]
+fn restore_version() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("gone.txt", "g1"), ("k.txt", "k")]);
+    let hash = |content: &str| sha256(content.as_bytes());
+    let restore = |dir: &Path, path: &str, content: &str, in_place| {
+        cmd::restore(O, dir, Path::new(path), &hash(content)[..8], in_place)
+    };
+    // Without local history an old version cannot be brought back.
+    put(&a, "f.txt", "v2", 1);
+    cmd::snapshot(O, &a).unwrap();
+    let error = restore(&a, "f.txt", "v1", false).unwrap_err().to_string();
+    assert!(error.contains("local-history"), "{error}");
+    // The other vault still has v1 on disk; history collects it from there.
+    cmd::config(O, &a, Some(Setting::LocalHistory(true))).unwrap();
+    cmd::sync(O, &a, &b).unwrap();
+
+    // A copy: beside the file, which is left alone; an ordinary new file.
+    let copy = copy_of("f.txt", "v1");
+    assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy);
+    assert!(is(&a, "f.txt", "v2") && is(&a, &copy, "v1"));
+    assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy, "again");
+    assert!(has(&cmd::status(O, &a).unwrap(), "new", &copy));
+    assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
+    assert!(is(&b, &copy, "v1"));
+    // A copy deleted since the last scan can be had again.
+    fs::remove_file(a.join(&copy)).unwrap();
+    assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy);
+    assert!(
+        cmd::status(O, &a).unwrap().is_empty(),
+        "the same file as before"
+    );
+    // The copy moved over the file is an edit like any other.
+    fs::rename(a.join(&copy), a.join("f.txt")).unwrap();
+    assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
+    assert!(is(&b, "f.txt", "v1") && !b.join(&copy).exists());
+
+    // In place: unrecorded edits are recorded first, then the old version
+    // replaces the file as a new version on top of them.
+    put(&a, "f.txt", "unrecorded", 2);
+    assert_eq!(restore(&a, "f.txt", "v2", true).unwrap(), "f.txt");
+    assert!(is(&a, "f.txt", "v2"));
+    let log_a = log(&a);
+    let PathState::Resolved { heads, .. } = log_a.resolve("f.txt") else {
+        panic!("unresolved");
+    };
+    let head = &log_a.entries[&heads[0]];
+    assert_eq!((heads.len(), head.hash.clone()), (1, Some(hash("v2"))));
+    let parent = &log_a.entries[&head.parents[0]];
+    assert_eq!(parent.hash, Some(hash("unrecorded")));
+    assert!(cmd::status(O, &a).unwrap().is_empty(), "already recorded");
+    assert_eq!(restore(&a, "f.txt", "v2", true).unwrap(), "f.txt", "again");
+    // The replaced version was kept, and can be had back in turn.
+    assert!(restore(&a, "f.txt", "unrecorded", false).is_ok());
+    fs::remove_file(a.join(copy_of("f.txt", "unrecorded"))).unwrap();
+    assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
+    assert!(is(&b, "f.txt", "v2"));
+
+    // In place, for a deleted file: it stays, here and in the other vault.
+    fs::remove_file(a.join("gone.txt")).unwrap();
+    assert_eq!(cmd::sync(O, &a, &b).unwrap().deleted, 1);
+    assert_eq!(restore(&a, "gone.txt", "g1", true).unwrap(), "gone.txt");
+    for _ in 0..2 {
+        let report = cmd::sync(O, &a, &b).unwrap();
+        assert_eq!((report.conflicts, report.exit_code()), (0, 0));
+    }
+    assert!(is(&a, "gone.txt", "g1") && is(&b, "gone.txt", "g1"));
+    assert!(replaced_deletion(&a, "gone.txt"));
+
+    // Refusals.
+    let refused = |result: anyhow::Result<String>, why: &str| {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains(why), "{error}");
+    };
+    refused(restore(&a, "f.txt", "never", false), "no version");
+    refused(restore(&a, "nowhere.txt", "v1", false), "no version");
+    refused(
+        cmd::restore(O, &a, Path::new("f.txt"), "", false),
+        "no version",
+    );
+    put(&a, &copy, "something else", 3);
+    refused(restore(&a, "f.txt", "v1", false), "is taken");
+    // c holds only k.txt: f.txt is not on disk there.
+    let c = a.parent().unwrap().join("c");
+    cmd::clone(O, &a.join("k.txt"), &c).unwrap();
+    refused(restore(&c, "f.txt", "v1", true), "not on disk");
+    assert!(!c.join("f.txt").exists());
 }
 
 #[test]

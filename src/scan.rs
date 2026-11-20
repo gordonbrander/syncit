@@ -3,6 +3,7 @@
 use crate::blobs::hash_file;
 use crate::cache::{Row, mtime_ms};
 use crate::entry::{Entry, Id};
+use crate::log::{Log, PathState};
 use crate::output::{Options, warn};
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault, write_atomic};
@@ -61,27 +62,37 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
                 if !config.wanted(path) {
                     unwanted.push(path.clone());
                 }
-                // A file this vault did not know it had: if the log knows
-                // this content at this path, the vault holds that version.
-                let known = v
-                    .log
-                    .valid(path)
-                    .into_iter()
-                    .filter(|(_, e)| e.hash.as_ref() == Some(&hash));
-                let known: Vec<Id> = known.map(|(id, _)| id.clone()).collect();
-                if !known.is_empty() {
-                    cache.rows.insert(
-                        path.clone(),
-                        Row {
-                            size,
-                            mtime,
-                            hash,
-                            base: known,
-                        },
-                    );
-                    continue;
+                if let Some(base) = cache.deleted.remove(path) {
+                    // Re-created where this vault saw a deletion: the new
+                    // version replaces the tombstones it had seen.
+                    (base, "new")
+                } else if let Some(tombstones) = deleted_heads(&v.log, path) {
+                    // No record of what this vault saw, and nothing live at
+                    // the path: an add. Tombstones have no content to lose.
+                    (tombstones, "new")
+                } else {
+                    // A file this vault did not know it had: if the log knows
+                    // this content at this path, the vault holds that version.
+                    let known = v
+                        .log
+                        .valid(path)
+                        .into_iter()
+                        .filter(|(_, e)| e.hash.as_ref() == Some(&hash));
+                    let known: Vec<Id> = known.map(|(id, _)| id.clone()).collect();
+                    if !known.is_empty() {
+                        cache.rows.insert(
+                            path.clone(),
+                            Row {
+                                size,
+                                mtime,
+                                hash,
+                                base: known,
+                            },
+                        );
+                        continue;
+                    }
+                    (vec![], "new")
                 }
-                (vec![], "new")
             }
         };
         let entry = Entry {
@@ -112,12 +123,14 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             .map(|row| row.base)
             .unwrap_or_default();
         out.changes.push((path.clone(), "deleted"));
-        out.entries.push(Entry {
+        let entry = Entry {
             hash: None,
             mtime: now,
             parents,
             path,
-        });
+        };
+        cache.deleted.insert(entry.path.clone(), vec![entry.id()]);
+        out.entries.push(entry);
     }
 
     // Shortest first, so one dragged-in folder yields one include.
@@ -143,6 +156,17 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     }
     v.cache = cache;
     Ok(out)
+}
+
+/// The heads of a path whose every head is a tombstone; None for any other
+/// path. A file beats a tombstone, so a tombstone winner means all of them.
+fn deleted_heads(log: &Log, path: &str) -> Option<Vec<Id>> {
+    match log.resolve(path) {
+        PathState::Resolved { heads, winner, .. } if log.entries[&winner].hash.is_none() => {
+            Some(heads)
+        }
+        _ => None,
+    }
 }
 
 /// Collect the vault-relative paths of the regular files under `dir`.

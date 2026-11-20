@@ -107,21 +107,29 @@ Scanning is unaffected, because new entries take their parents from the stat cac
 
 The only operation is "this vault's file at `p` is now this content". A scan writes it when the disk differs from the stat cache.
 
-The stat cache row for a path is `(size, mtime, hash, base)`. **`base` is the set of entries this vault's file was derived from, and a new entry's parents are the row's base.** They are not the log's current heads. The two differ whenever the vault has heard of a newer version it has not yet put on disk: the blob was unavailable, the file was skipped because it was being edited, or a run was interrupted after merging. Using the heads there would supersede a version the person never saw.
+The stat cache row for a path is `(size, mtime, hash, base)`. A path this vault has seen deleted has a deletion record in place of a row, holding only a base. **`base` is the set of entries this vault's file, or its absence, was derived from, and a new entry's parents are the base.** They are not the log's current heads. The two differ whenever the vault has heard of a newer version it has not yet put on disk: the blob was unavailable, the file was skipped because it was being edited, or a run was interrupted after merging. Using the heads there would supersede a version the person never saw.
 
 | Disk | Cache row | Entry written | New base |
 |---|---|---|---|
-| file, hash differs from row | present | file entry, parents = base | the new entry |
-| no file | present | tombstone, parents = base | row removed |
+| file, hash differs from row | row | file entry, parents = base | the new entry |
+| no file | row | tombstone, parents = base | row replaced by a deletion record: the tombstone |
+| file | deletion record | file entry, parents = base | record replaced by a row: the new entry |
+| file | none; every head of this path is a tombstone | file entry, parents = the heads | the new entry |
 | file | none; hash matches entries of this path | none | the matching entries |
 | file | none; hash matches nothing | file entry, parents = `[]` | the new entry |
-| no file | none | none | — |
+| no file | deletion record, or none | none | — |
 
-The third row is how a vault with a lost cache, or one restored from backup, is recognised as holding an old version and brought forward, instead of having its old files recorded as new edits.
+The rows with no cache entry are tried in the order given.
+
+A file where this vault saw a deletion is a re-creation, whatever its content: the vault knows what it had seen, so nothing is inferred. If another vault re-created the path meanwhile and this one has not yet put that version on disk, the two re-creations are concurrent and conflict.
+
+The fourth row is the same act with no record of what the vault had seen: a lost cache, or a file placed at a path the vault never held. A tombstone has no content, so replacing one loses nothing. `parents = []` would not do: a file put back with its old mtime could yield an entry byte-identical to the path's first, which the tombstone already supersedes.
+
+The fifth row is how a vault with a lost cache, or one restored from backup, is recognised as holding an old version and brought forward, instead of having its old files recorded as new edits.
 
 ## Setting base
 
-After a path is materialised, its base is the set of heads now visible in this vault:
+After a path is materialised, its base is the set of heads now visible in this vault. When the winner is a tombstone and no file is at the path, that is every head, and it is kept in the path's deletion record. Otherwise:
 
 - the winner, and any head with the same hash, once the winner's content is the file at the path;
 - a losing tombstone, once the winner is in place;

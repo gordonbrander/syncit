@@ -26,10 +26,43 @@ pub struct Event {
     pub side: &'static str,
 }
 
+/// One entry of a file's history: a version, or a deletion.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Version {
+    pub path: String,
+    /// The content's hash; null for a deletion.
+    pub hash: Option<String>,
+    pub mtime: i64,
+    /// The vaults that recorded it.
+    pub nicknames: Vec<String>,
+    /// Whether this is the path's current state.
+    pub current: bool,
+    /// Whether this vault can supply the content, so `restore` would work.
+    pub available: bool,
+}
+
+/// Milliseconds since the epoch as `2026-11-20 14:03Z`.
+// ponytail: UTC only, by the days-to-civil arithmetic; use a time crate if
+// local time is wanted.
+fn utc(ms: i64) -> String {
+    let (days, secs) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000) / 1000);
+    let z = days + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let (h, min) = (secs / 3600, secs % 3600 / 60);
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}Z")
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Message {
     Event(Event),
+    Version(Version),
     /// An open conflict. `message` names the conflict copies.
     Conflict {
         vault: String,
@@ -103,6 +136,24 @@ impl Display for Message {
                 side,
                 ..
             } => write!(f, "{} (conflict: {message})", head(side, "U", path)),
+            Message::Version(v) => {
+                let hash = v.hash.as_deref().map_or("--------", |h| &h[..8]);
+                let mut notes = vec![];
+                if v.current {
+                    notes.push("current");
+                }
+                match &v.hash {
+                    None => notes.push("deleted"),
+                    Some(_) if !v.available => notes.push("no content"),
+                    Some(_) => {}
+                }
+                let (time, names) = (utc(v.mtime), v.nicknames.join(","));
+                write!(f, "{hash} {time} {names} {}", v.path)?;
+                if !notes.is_empty() {
+                    write!(f, " ({})", notes.join(", "))?;
+                }
+                Ok(())
+            }
             Message::Setting { name, value } => write!(f, "{name}: {value}"),
             Message::Blame { path, nicknames } => write!(f, "{} {path}", nicknames.join(",")),
             Message::Info { message } => write!(f, "{message}"),
@@ -289,6 +340,37 @@ mod tests {
                 r#"{"type":"blame","path":"a/f.txt","nicknames":["drive","notes"]}"#.into()
             )
         );
+        let version = |hash: Option<&str>, current, available| {
+            Message::Version(Version {
+                path: "a/f.txt".into(),
+                hash: hash.map(|h| h.repeat(8)),
+                mtime: 1_700_000_000_000,
+                nicknames: vec!["drive".into()],
+                current,
+                available,
+            })
+        };
+        assert_eq!(
+            both(&version(Some("3f9a1c2e"), true, true)),
+            (
+                "3f9a1c2e 2023-11-14 22:13Z drive a/f.txt (current)".into(),
+                format!(
+                    r#"{{"type":"version","path":"a/f.txt","hash":"{}","mtime":1700000000000,"nicknames":["drive"],"current":true,"available":true}}"#,
+                    "3f9a1c2e".repeat(8)
+                )
+            )
+        );
+        assert_eq!(
+            line(&version(Some("3f9a1c2e"), false, false), false),
+            "3f9a1c2e 2023-11-14 22:13Z drive a/f.txt (no content)"
+        );
+        assert_eq!(
+            line(&version(None, true, false), false),
+            "-------- 2023-11-14 22:13Z drive a/f.txt (current, deleted)"
+        );
+        assert_eq!(utc(0), "1970-01-01 00:00Z");
+        assert_eq!(utc(-1), "1969-12-31 23:59Z");
+        assert_eq!(utc(951_782_400_000), "2000-02-29 00:00Z");
         let warning = Message::Warning {
             message: "w".into(),
         };

@@ -1,4 +1,5 @@
-//! `.syncit/cache`: which version of each file this vault has on disk.
+//! `.syncit/cache`: which version of each file this vault has on disk, and
+//! which deletions it has seen.
 
 use crate::blobs::hash_file;
 use crate::entry::Id;
@@ -26,6 +27,11 @@ pub struct Row {
 pub struct Cache {
     pub scanned: i64, // when the most recent scan started, in milliseconds
     pub rows: BTreeMap<String, Row>,
+    /// Paths this vault has seen deleted, each with its base: the heads, all
+    /// tombstones, that the absence of a file here reflects. A path is in at
+    /// most one of `rows` and `deleted`.
+    #[serde(default)]
+    pub deleted: BTreeMap<String, Vec<Id>>,
 }
 
 /// A file's mtime in milliseconds since the epoch, rounded down.

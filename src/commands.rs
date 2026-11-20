@@ -1,16 +1,17 @@
 //! One function per command. Each prints as it goes; a command that runs a
 //! sync returns a `Summary` for `main` to print last.
 
-use crate::blobs::retain;
+use crate::blobs::{available, hash_file, retain};
 use crate::config::{Config, default_nickname, prefix_matches};
 use crate::entry::valid_path;
 use crate::log::PathState;
-use crate::materialise::{copy_name, materialise, prune};
-use crate::output::{Event, Message, Options, Summary, print_stdout, warn};
+use crate::materialise::{copy_name, materialise, prune, write_now};
+use crate::output::{Event, Message, Options, Summary, Version, print_stdout, warn};
 use crate::scan::scan;
 use crate::segment::{self, valid_nickname};
 use crate::vault::{Vault, find_root, relative, resolve_path, write_atomic};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -468,6 +469,125 @@ pub fn blame(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(Strin
         found.push((path.clone(), nicknames));
     }
     Ok(found)
+}
+
+/// The recorded history of each file under `paths`, or of every file if
+/// there are none: per path, newest first by mtime. Reads the log only.
+/// Returns what it printed.
+pub fn log(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>> {
+    let v = Vault::open(opts, cwd, true)?;
+    let mut prefixes = prefixes(&v.root, cwd, paths)?;
+    if prefixes.is_empty() {
+        prefixes.push(String::new());
+    }
+    let mut found = vec![];
+    for path in v.log.paths.keys() {
+        if !prefixes.iter().any(|prefix| prefix_matches(prefix, path)) {
+            continue;
+        }
+        let winner = match v.log.resolve(path) {
+            PathState::Resolved { winner, .. } => Some(winner),
+            _ => None,
+        };
+        let mut entries = v.log.valid(path);
+        entries.sort_by_key(|(id, e)| Reverse((e.mtime, *id)));
+        for (id, e) in entries {
+            let version = Version {
+                path: path.clone(),
+                hash: e.hash.clone(),
+                mtime: e.mtime,
+                nicknames: v.log.authors[id].iter().cloned().collect(),
+                current: winner.as_ref() == Some(id),
+                available: e.hash.as_ref().is_some_and(|h| available(&v, None, h)),
+            };
+            print_stdout(&Message::Version(version.clone()), opts.json);
+            found.push(version);
+        }
+    }
+    Ok(found)
+}
+
+/// Bring back the version of `path` whose hash starts with `hash`: as a copy
+/// beside the file, named as a conflict copy is, or in place of it. Returns
+/// the vault-relative path that holds the version afterwards.
+///
+/// A copy is an ordinary new file, recorded by the next scan. In place, the
+/// folder is scanned first so that no unrecorded edit is lost, and again
+/// afterwards so that the restored version is recorded like any other edit.
+pub fn restore(
+    opts: &Options,
+    cwd: &Path,
+    path: &Path,
+    hash: &str,
+    in_place: bool,
+) -> Result<String> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    let p = relative(&v.root, &resolve_path(&cwd.join(path))?)?;
+    let mut sum = Summary::default();
+    if in_place {
+        record(opts, &mut v, None, &mut sum)?;
+    }
+    let versions = v.log.valid(&p).into_iter();
+    let hashes: BTreeSet<String> = versions
+        .filter_map(|(_, e)| e.hash.clone())
+        .filter(|h| !hash.is_empty() && h.starts_with(hash))
+        .collect();
+    let mut hashes = hashes.into_iter();
+    let h = match (hashes.next(), hashes.next()) {
+        (Some(h), None) => h,
+        (None, _) => bail!("no version of {p} has a hash starting with {hash}; see `syncit log`"),
+        (Some(_), Some(_)) => bail!("several versions of {p} have a hash starting with {hash}"),
+    };
+    let held = v.cache.rows.get(&p).map(|row| row.hash.clone());
+    let dest = if in_place {
+        p.clone()
+    } else {
+        copy_name(&p, &h)
+    };
+    let already = |what: &str| {
+        let message = format!("{dest} {what}");
+        print_stdout(&Message::Info { message }, opts.json);
+    };
+    if in_place {
+        if held.as_ref() == Some(&h) {
+            already("is already that version");
+            return Ok(dest);
+        }
+        // With no file here, a scan would take the restored bytes for an old
+        // copy and the next sync would bring it forward again, unless the
+        // path is deleted.
+        let deleted = matches!(v.log.resolve(&p), PathState::Resolved { winner, .. }
+            if v.log.entries[&winner].hash.is_none());
+        ensure!(
+            held.is_some() || deleted,
+            "{p} is not on disk in this vault: sync or `syncit get` it first, or restore a copy"
+        );
+    } else {
+        ensure!(!v.skips(&dest), "the copy name {dest} is ignored");
+        let file = v.root.join(&dest);
+        if file.symlink_metadata().is_ok() {
+            ensure!(
+                hash_file(&file).is_ok_and(|x| x == h),
+                "the copy name {dest} is taken"
+            );
+            already("is already there");
+            return Ok(dest);
+        }
+    }
+    ensure!(
+        write_now(&mut v, &dest, &h)?,
+        "the content of that version is not in this vault; old versions are kept only while local-history is on"
+    );
+    if in_place {
+        record(opts, &mut v, None, &mut sum)?;
+    }
+    let kind = match (in_place, held) {
+        (false, _) => "copied",
+        (true, Some(_)) => "updated",
+        (true, None) => "added",
+    };
+    v.event(opts, &mut sum, kind, &dest, "");
+    Ok(dest)
 }
 
 /// A change `config` can make.

@@ -65,6 +65,17 @@ enum Command {
     },
     /// Show which vault recorded the current version of each file
     Blame { paths: Vec<PathBuf> },
+    /// List the recorded versions of files, newest first
+    Log { paths: Vec<PathBuf> },
+    /// Bring back an old version of a file, as a copy beside it
+    Restore {
+        path: PathBuf,
+        /// The start of the version's hash, as `log` prints it
+        hash: String,
+        /// Replace the file itself instead of writing a copy
+        #[arg(long)]
+        in_place: bool,
+    },
     /// Show this vault's settings, or change one
     Config {
         #[command(subcommand)]
@@ -114,6 +125,12 @@ fn main() {
             commands::move_to(opts, cwd, &paths, &vault).map(Some)
         }
         Command::Blame { paths } => commands::blame(opts, cwd, &paths).map(|_| None),
+        Command::Log { paths } => commands::log(opts, cwd, &paths).map(|_| None),
+        Command::Restore {
+            path,
+            hash,
+            in_place,
+        } => commands::restore(opts, cwd, &path, &hash, in_place).map(|_| None),
         Command::Config { setting } => {
             let change = setting.map(|setting| match setting {
                 SettingArg::LocalHistory { value } => Setting::LocalHistory(value == "on"),

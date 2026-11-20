@@ -67,6 +67,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - **R16** A vault can send what it has to a content-addressed store, a folder or a bucket, holding it locally while the store is unreachable. (D.2, D.3)
 - **R24** A store holds the log as well as blobs, so vaults that never see each other can sync through it. `R16` and `R24` are one mechanism. (C.1, C.2)
 - **R17** Record a snapshot of the current state without syncing. (D.3)
+- **R26** List the recorded versions of a file, and bring one back: as a copy beside the file, or in place of it. (D.2)
 - **R18** Report pending local changes, files waiting on unavailable content, and open conflicts, without changing anything. (E.1)
 - **R20** Exclude files by an ignore list. (A.5, E.1)
 - **R25** The on-disk format carries a version, so a later change such as a different hash function can be detected and migrated instead of misread. (E.1)
@@ -90,7 +91,7 @@ b/
   .syncit/
     config     # format version, wanted paths, store, keep_local_history
     log/       # immutable log segments, named by their hash
-    cache      # local stat cache: path -> (size, mtime, hash, base)
+    cache      # local: path -> (size, mtime, hash, base), and deletions seen
     blobs/     # optional: content-addressed file copies
   foo/bar/x.txt   # ordinary files
 ```
@@ -151,19 +152,39 @@ conflict: notes.txt — kept the newer version, other saved as notes-3f9a1c2e.tx
 - Once written, a copy is an ordinary file, recorded by the next scan. Vaults creating the same copy independently produce equal content, which is not a conflict.
 - A losing deletion produces no copy; it is reported in the output.
 
+### Restoring a version
+
+`syncit log` lists the recorded versions of a file, each with the short hash of its content, and says which of them this vault can still supply. `syncit restore <path> <hash>` brings one back.
+
+```
+syncit log notes.txt
+81db67b6 2026-11-20 17:21Z laptop notes.txt (current)
+3f9a1c2e 2026-11-19 09:12Z drive notes.txt
+
+syncit restore notes.txt 3f9a
+C notes-3f9a1c2e.txt
+```
+
+- By default the version is written beside the file under the name a conflict copy of it would have. Nothing is overwritten and nothing is written to the log. The copy is an ordinary new file, recorded by the next scan.
+- Moving the copy over the original is an ordinary edit: the old content becomes a new version on top of the current one.
+- `--in-place` writes the version at the path itself, replacing the file or bringing back a deleted one. The folder is scanned first, so an edit not yet recorded is in the log before it is replaced, and again afterwards, so the restored version is recorded like any other edit.
+- A restored file is dated now, not with the old version's time. Restoring is a new edit, and should not lose a conflict to something older.
+- Only content this vault can supply can be restored: a file on disk, or a blob kept by `keep_local_history`. With history off, the version `--in-place` replaces survives only as a hash, unless another vault holds it.
+
 ### Scanning
 
 A scan compares the working folder to the stat cache and produces new entries.
 
 - A file whose size and mtime match its cache row is unchanged. Otherwise it is hashed, and if the hash differs a new entry is written.
 - A file whose mtime is not older than the start of the previous scan is hashed regardless, to catch edits within one timestamp tick.
-- A cache row with no file on disk is a deletion and gets a tombstone.
-- A file on disk with no cache row, wherever it is in the vault, is looked up in the log. If its hash matches an earlier version of that path, the vault holds that version and nothing is written. Otherwise it is new and gets an entry.
-- A path in the log with neither a file nor a cache row is simply not held. Nothing is written.
+- A cache row with no file on disk is a deletion and gets a tombstone. The cache then records the deletion in place of the row.
+- A file on disk at a path the cache records as deleted is a re-creation: it gets an entry that replaces the tombstones this vault had seen.
+- A file on disk with neither, wherever it is in the vault, is looked up in the log. If the path is deleted there, the file is new and replaces the deletion. If its hash matches an earlier version of that path, the vault holds that version and nothing is written. Otherwise it is new and gets an entry.
+- A path in the log with no file, no cache row and no recorded deletion is simply not held. Nothing is written.
 
-Each cache row also records its `base`: the entries the file on disk was derived from. A new entry's parents are the base, not the newest entries in the log. A vault that has heard of a newer version but not yet put it on disk therefore produces a conflict when its file is edited, instead of overwriting a version nobody there saw.
+The cache is this vault's position in the log, which the log itself cannot hold because it is the same in every vault. For each path it records what is on disk here and its `base`: the entries that state was derived from. For a file, that is a row. For a path this vault has seen deleted, it is a deletion record whose base is the tombstones. A new entry's parents are the base, not the newest entries in the log. A vault that has heard of a newer version but not yet put it on disk therefore produces a conflict when its file is edited, or re-created after a deletion, instead of overwriting a version nobody there saw.
 
-The stat cache is also the record of what this vault holds. If it is lost, or the vault is restored from a backup, present files are recognised as old versions and brought forward, and absent files are treated as not held; no deletion is invented.
+The cache is also the record of what this vault holds. If it is lost, or the vault is restored from a backup, present files are recognised as old versions and brought forward, and absent files are treated as not held; no deletion is invented. One case cannot be decided without it: a file whose path the log says is deleted may be a re-creation, or an old copy the deletion never reached. The file is kept, as a new version.
 
 ### What a vault holds
 
@@ -243,6 +264,8 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
 | `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
+| `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
+| `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
 | `syncit config` | Show or change `keep_local_history`, `nickname` and `store`. |
 
 `sync`, `push`, `pull` and `move` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
@@ -263,7 +286,7 @@ A vault records no other vault. Every command that involves a second vault names
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
 | C.2 | R16, R24 | a store holds the log and blobs; both vaults sync with it |
 | D.1 | R13 | `keep_local_history` off, `store` unset |
-| D.2 | R15, R16 | `keep_local_history` on, or `store` set |
+| D.2 | R15, R16, R26 | `keep_local_history` on, or `store` set; `log` and `restore` |
 | D.3 | R17 | `snapshot` |
 | E.1 | R10, R11, R14, R18, R25 | immutable segments, atomic writes, hash checks, `status`, format version |
 

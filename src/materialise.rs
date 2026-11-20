@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const UNAVAILABLE: &str = "content not available from any source";
 
@@ -81,6 +81,8 @@ fn one(
             v.cache.rows.remove(p);
             v.event(opts, sum, "deleted", p, "");
         }
+        // No file here now reflects every head: this vault has seen them.
+        v.cache.deleted.insert(p.to_string(), heads);
         return Ok(());
     };
     // The copy name the local version was renamed to, if it was.
@@ -121,6 +123,7 @@ fn one(
             }
             place(v, &tmp, p, &h)?
         };
+        v.cache.deleted.remove(p);
         v.cache.rows.insert(
             p.to_string(),
             Row {
@@ -289,6 +292,23 @@ fn place(v: &mut Vault, tmp: &Path, p: &str, h: &str) -> Result<(u64, i64)> {
     let meta = file.symlink_metadata()?;
     v.hint(h, file);
     Ok((meta.len(), mtime_ms(&meta)))
+}
+
+/// Write content `h` at `p`, dated now, for `restore`. A file already there
+/// must be unchanged since it was scanned, as for any write; a row whose
+/// file is gone is no obstacle. False if no source has the content.
+pub fn write_now(v: &mut Vault, p: &str, h: &str) -> Result<bool> {
+    if v.root.join(p).symlink_metadata().is_ok() {
+        safe(v, p)?;
+    } else {
+        no_symlinked_parent(v, p)?;
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+    let Some(tmp) = stage(v, None, p, h, now)? else {
+        return Ok(false);
+    };
+    place(v, &tmp, p, h)?;
+    Ok(true)
 }
 
 /// Remove the folders a deletion left empty, up to the vault root.
