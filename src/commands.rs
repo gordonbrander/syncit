@@ -119,7 +119,7 @@ pub fn init(dir: &Path) -> Result<Report> {
         "{} is already a vault",
         dir.display()
     );
-    create(dir, Config::new(None, String::new()))?;
+    create(dir, Config::new(String::new()))?;
     let notes = vec![format!(
         "initialised a vault in {}",
         resolve_path(dir)?.display()
@@ -141,20 +141,19 @@ pub fn clone(src: &Path, dir: &Path) -> Result<Report> {
     );
     let empty = !dir.exists() || dir.read_dir()?.next().is_none();
     ensure!(empty, "{} exists and is not empty", dir.display());
-    let origin = root.to_str().context("the origin's path is not UTF-8")?;
-    create(dir, Config::new(Some(origin.to_string()), sub))?;
-    run(dir, None, Mode::Pull)
+    create(dir, Config::new(sub))?;
+    run(dir, &root, Mode::Pull)
 }
 
-pub fn sync(cwd: &Path, peer: Option<&Path>) -> Result<Report> {
+pub fn sync(cwd: &Path, peer: &Path) -> Result<Report> {
     run(cwd, peer, Mode::Sync)
 }
 
-pub fn push(cwd: &Path, peer: Option<&Path>) -> Result<Report> {
+pub fn push(cwd: &Path, peer: &Path) -> Result<Report> {
     run(cwd, peer, Mode::Push)
 }
 
-pub fn pull(cwd: &Path, peer: Option<&Path>) -> Result<Report> {
+pub fn pull(cwd: &Path, peer: &Path) -> Result<Report> {
     run(cwd, peer, Mode::Pull)
 }
 
@@ -165,19 +164,19 @@ fn nested(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// A run with a peer (SPEC.md section 10). `a` is the local vault.
-fn run(cwd: &Path, peer: Option<&Path>, mode: Mode) -> Result<Report> {
-    let mut a = Vault::open(cwd, true)?;
-    let peer = match (peer, &a.config.origin) {
-        (Some(peer), _) => peer.to_path_buf(),
-        (None, Some(origin)) => PathBuf::from(origin),
-        (None, None) => anyhow::bail!("no peer given, and this vault has no origin"),
-    };
+/// Open another vault for a run with `v`.
+fn other(v: &Vault, path: &Path) -> Result<Vault> {
     ensure!(
-        !nested(&find_root(&peer)?, &a.root),
+        !nested(&find_root(path)?, &v.root),
         "cannot sync a vault with itself or with a vault inside it"
     );
-    let mut b = Vault::open(&peer, false)?;
+    Vault::open(path, false)
+}
+
+/// A run with a peer (SPEC.md section 10). `a` is the local vault.
+fn run(cwd: &Path, peer: &Path, mode: Mode) -> Result<Report> {
+    let mut a = Vault::open(cwd, true)?;
+    let mut b = other(&a, peer)?;
     let mut report = Report::default();
     let (to_b, to_a) = (mode != Mode::Pull, mode != Mode::Push);
 
@@ -328,13 +327,13 @@ pub fn status(cwd: &Path) -> Result<Report> {
     Ok(report)
 }
 
-/// Command-line paths, relative to `cwd`, as vault-relative prefixes.
-fn prefixes(v: &Vault, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
+/// Command-line paths, relative to `cwd`, as prefixes relative to `root`.
+fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
     let prefix = |path: &PathBuf| {
-        let prefix = relative(&v.root, &resolve_path(&cwd.join(path))?)?;
+        let prefix = relative(root, &resolve_path(&cwd.join(path))?)?;
         ensure!(
             prefix.is_empty() || valid_path(&prefix),
-            "{} is not a path this vault can hold",
+            "{} is not a path a vault can hold",
             path.display()
         );
         Ok(prefix)
@@ -342,48 +341,58 @@ fn prefixes(v: &Vault, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
     paths.iter().map(prefix).collect()
 }
 
-/// The origin as a blob source, if it is reachable and can be locked.
-fn origin(v: &Vault) -> Option<Vault> {
-    let origin = Vault::open(Path::new(v.config.origin.as_ref()?), false).ok()?;
-    (origin.root != v.root).then_some(origin)
-}
-
+/// Start holding paths of another vault. Each path lies inside that vault,
+/// whose root is found by walking up, as `clone` does. The paths become
+/// wanted here, and a pull from that vault fetches them.
 pub fn get(cwd: &Path, paths: &[PathBuf]) -> Result<Report> {
-    let mut v = Vault::open(cwd, true)?;
-    for prefix in prefixes(&v, cwd, paths)? {
-        v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
-        v.config.include.retain(|x| !prefix_matches(&prefix, x));
-        v.config.include.push(prefix);
+    let first = paths.first().context("no path given")?;
+    let source = find_root(&cwd.join(first))?;
+    for path in paths {
+        ensure!(
+            find_root(&cwd.join(path))? == source,
+            "{} and {} are in different vaults",
+            first.display(),
+            path.display()
+        );
     }
-    v.config.save(&v.root)?;
-    let mut report = Report::default();
-    let origin = origin(&v);
-    materialise(&mut v, origin.as_ref(), &mut report.events)?;
-    conflicts(&v, &mut report);
-    report
-        .notes
-        .push("run `syncit pull` to fetch newer changes".to_string());
-    Ok(report)
+    {
+        let mut v = Vault::open(cwd, true)?;
+        ensure!(
+            !nested(&source, &v.root),
+            "{} is in this vault: give a path in the vault to get it from",
+            first.display()
+        );
+        for prefix in prefixes(&source, cwd, paths)? {
+            v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
+            v.config.include.retain(|x| !prefix_matches(&prefix, x));
+            v.config.include.push(prefix);
+        }
+        v.config.save(&v.root)?;
+    }
+    run(cwd, &source, Mode::Pull)
 }
 
-pub fn drop(cwd: &Path, paths: &[PathBuf], force: bool) -> Result<Report> {
+/// Stop holding paths, without deleting them elsewhere. Unless forced, the
+/// content of every file removed must be known to exist somewhere else: in
+/// this vault's stored blobs, its store, or the vault named by `check`.
+pub fn drop(cwd: &Path, paths: &[PathBuf], check: Option<&Path>, force: bool) -> Result<Report> {
     let mut v = Vault::open(cwd, true)?;
-    let prefixes = prefixes(&v, cwd, paths)?;
-    let origin = origin(&v);
+    let prefixes = prefixes(&v.root, cwd, paths)?;
+    let check = check.map(|path| other(&v, path)).transpose()?;
     let mut report = Report::default();
     // Unrecorded changes are recorded before anything is removed.
-    record(&mut v, origin.as_ref(), &mut report)?;
+    record(&mut v, check.as_ref(), &mut report)?;
 
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
     let held: Vec<String> = v.cache.rows.keys().filter(under).cloned().collect();
     if !force {
-        let (blobs, remote) = (v.dot().join("blobs"), v.remote());
+        let (blobs, store) = (v.dot().join("blobs"), v.store());
         let elsewhere = |hash: &String| {
             blobs.join(hash).exists()
-                || remote.as_ref().is_some_and(|r| r.join(hash).exists())
-                || origin.as_ref().is_some_and(|o| {
-                    o.cache.rows.values().any(|row| &row.hash == hash)
-                        || o.dot().join("blobs").join(hash).exists()
+                || store.as_ref().is_some_and(|s| s.join(hash).exists())
+                || check.as_ref().is_some_and(|c| {
+                    c.cache.rows.values().any(|row| &row.hash == hash)
+                        || c.dot().join("blobs").join(hash).exists()
                 })
         };
         let sole: Vec<&str> = held
@@ -391,9 +400,13 @@ pub fn drop(cwd: &Path, paths: &[PathBuf], force: bool) -> Result<Report> {
             .filter(|p| !elsewhere(&v.cache.rows[*p].hash))
             .map(String::as_str)
             .collect();
+        let hint = match check {
+            Some(_) => "Sync with it first",
+            None => "Name a vault that holds them with --check <vault>",
+        };
         ensure!(
             sole.is_empty(),
-            "nothing dropped: no other copy is known of {}. Sync first, or use --force",
+            "nothing dropped: no other copy is known of {}. {hint}, or use --force",
             sole.join(", ")
         );
     }
@@ -424,4 +437,54 @@ pub fn drop(cwd: &Path, paths: &[PathBuf], force: bool) -> Result<Report> {
         report.events.push(v.event("dropped", &path, ""));
     }
     Ok(report)
+}
+
+pub enum Setting {
+    LocalHistory(bool),
+    /// A folder, relative to the current directory, or None for no store.
+    Store(Option<PathBuf>),
+}
+
+/// Show this vault's settings, after changing one if asked.
+pub fn config(cwd: &Path, change: Option<Setting>) -> Result<Report> {
+    let mut v = Vault::open(cwd, true)?;
+    let mut notes = vec![];
+    match change {
+        None => {}
+        Some(Setting::LocalHistory(on)) => {
+            if v.config.keep_local_history && !on {
+                notes.push("versions already in .syncit/blobs/ are left there".to_string());
+            }
+            v.config.keep_local_history = on;
+        }
+        Some(Setting::Store(None)) => v.config.store = None,
+        Some(Setting::Store(Some(dir))) => {
+            let dir = resolve_path(&cwd.join(dir))?;
+            let dir = dir.to_str().context("the store's path is not UTF-8")?;
+            v.config.store = Some(dir.to_string());
+        }
+    }
+    v.config.save(&v.root)?;
+    let on_off = if v.config.keep_local_history {
+        "on"
+    } else {
+        "off"
+    };
+    let store = match (&v.config.store, v.store()) {
+        (None, _) => "none".to_string(),
+        (Some(dir), Some(_)) => dir.clone(),
+        (Some(dir), None) => format!("{dir} (not reachable; versions wait in this vault)"),
+    };
+    notes.splice(
+        0..0,
+        [
+            format!("local-history: {on_off}"),
+            format!("store: {store}"),
+        ],
+    );
+    Ok(Report {
+        notes,
+        plain: true,
+        ..Report::default()
+    })
 }

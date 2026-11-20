@@ -10,11 +10,12 @@ use std::path::Path;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub syncit: u32,
-    pub origin: Option<String>,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
-    pub keep: bool,
-    pub remote: Option<String>,
+    /// Keep every version this vault sees in `.syncit/blobs/`.
+    pub keep_local_history: bool,
+    /// A folder used as a shared blob store, as an absolute path.
+    pub store: Option<String>,
 }
 
 /// A prefix matches a path if it is `""`, equals it, or is followed by `/`.
@@ -26,14 +27,13 @@ pub fn prefix_matches(prefix: &str, path: &str) -> bool {
 }
 
 impl Config {
-    pub fn new(origin: Option<String>, include: String) -> Config {
+    pub fn new(include: String) -> Config {
         Config {
             syncit: 1,
-            origin,
             include: vec![include],
             exclude: vec![],
-            keep: false,
-            remote: None,
+            keep_local_history: false,
+            store: None,
         }
     }
 
@@ -97,7 +97,7 @@ mod tests {
         Config {
             include: include.iter().map(|s| s.to_string()).collect(),
             exclude: exclude.iter().map(|s| s.to_string()).collect(),
-            ..Config::new(None, String::new())
+            ..Config::new(String::new())
         }
     }
 

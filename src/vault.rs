@@ -153,10 +153,10 @@ impl Vault {
         self.root.join(".syncit")
     }
 
-    /// The remote blob store, if one is set and reachable.
-    pub fn remote(&self) -> Option<PathBuf> {
+    /// The blob store, if one is set and reachable.
+    pub fn store(&self) -> Option<PathBuf> {
         self.config
-            .remote
+            .store
             .as_ref()
             .map(PathBuf::from)
             .filter(|r| r.is_dir())

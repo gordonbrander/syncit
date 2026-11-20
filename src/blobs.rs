@@ -42,14 +42,14 @@ fn copy_verified(src: &Path, dest: &Path, hash: &str) -> io::Result<bool> {
 
 /// Copy the blob to `dest` from the first source that yields the right
 /// bytes: this vault's files, its blob store, the peer's files, the peer's
-/// blob store, the remote. False means no source has it, which is not an error.
+/// blob store, the store. False means no source has it, which is not an error.
 pub fn fetch(v: &Vault, peer: Option<&Vault>, hash: &str, dest: &Path) -> io::Result<bool> {
     let mut sources: Vec<PathBuf> = vec![];
     for vault in [Some(v), peer].into_iter().flatten() {
         sources.extend(vault.hints.get(hash).into_iter().flatten().cloned());
         sources.push(vault.dot().join("blobs").join(hash));
     }
-    sources.extend(v.remote().map(|r| r.join(hash)));
+    sources.extend(v.store().map(|r| r.join(hash)));
     for src in sources {
         if copy_verified(&src, dest, hash)? {
             return Ok(true);
@@ -61,10 +61,10 @@ pub fn fetch(v: &Vault, peer: Option<&Vault>, hash: &str, dest: &Path) -> io::Re
 /// Collect into `.syncit/blobs/` every version in the log that a source can
 /// supply, if this vault retains blobs.
 pub fn retain(v: &Vault, peer: Option<&Vault>) -> Result<()> {
-    if !v.config.keep && v.config.remote.is_none() {
+    if !v.config.keep_local_history && v.config.store.is_none() {
         return Ok(());
     }
-    let (blobs, remote) = (v.dot().join("blobs"), v.remote());
+    let (blobs, store) = (v.dot().join("blobs"), v.store());
     fs::create_dir_all(&blobs)?;
     fs::create_dir_all(v.dot().join("tmp"))?;
     let hashes: BTreeSet<&String> = v
@@ -74,7 +74,7 @@ pub fn retain(v: &Vault, peer: Option<&Vault>) -> Result<()> {
         .filter_map(|e| e.hash.as_ref())
         .collect();
     for hash in hashes {
-        if blobs.join(hash).exists() || remote.as_ref().is_some_and(|r| r.join(hash).exists()) {
+        if blobs.join(hash).exists() || store.as_ref().is_some_and(|r| r.join(hash).exists()) {
             continue;
         }
         let tmp = v.dot().join("tmp").join(unique());
@@ -85,21 +85,21 @@ pub fn retain(v: &Vault, peer: Option<&Vault>) -> Result<()> {
     Ok(())
 }
 
-/// Upload stored blobs to the remote, if it is reachable. Without `keep`,
-/// blobs the remote has are then removed from `.syncit/blobs/`.
+/// Upload stored blobs to the store, if it is reachable. Unless local
+/// history is kept, blobs the store has are then removed from `.syncit/blobs/`.
 pub fn flush(v: &Vault) -> Result<()> {
-    let (Some(remote), Ok(blobs)) = (v.remote(), fs::read_dir(v.dot().join("blobs"))) else {
+    let (Some(store), Ok(blobs)) = (v.store(), fs::read_dir(v.dot().join("blobs"))) else {
         return Ok(());
     };
     for blob in blobs {
         let blob = blob?;
-        let dest = remote.join(blob.file_name());
+        let dest = store.join(blob.file_name());
         if !dest.exists() {
-            let tmp = remote.join(format!("{TMP_PREFIX}{}", unique()));
+            let tmp = store.join(format!("{TMP_PREFIX}{}", unique()));
             fs::copy(blob.path(), &tmp)?;
             fs::rename(&tmp, &dest)?;
         }
-        if !v.config.keep {
+        if !v.config.keep_local_history {
             fs::remove_file(blob.path())?;
         }
     }

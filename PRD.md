@@ -87,7 +87,7 @@ A vault is a folder containing a `.syncit/` directory. There is no other kind of
 ```
 b/
   .syncit/
-    config     # format version, origin, wanted paths, remote, keep
+    config     # format version, wanted paths, store, keep_local_history
     log/       # immutable log segments, named by their hash
     cache      # local stat cache: path -> (size, mtime, hash, base)
     blobs/     # optional: content-addressed file copies
@@ -171,7 +171,7 @@ The stat cache is also the record of what this vault holds. If it is lost, or th
 - New paths from other vaults are materialised only if wanted.
 - Paths the vault already holds are always kept up to date, wanted or not.
 - A new file or folder placed in the vault outside its wanted paths becomes wanted when it is first scanned. No separate step is needed; `drop` undoes it.
-- `get <path>...` adds an include and materialises the files.
+- `get <path>...`, given paths inside another vault, adds an include for them and pulls from that vault.
 - `drop <path>...` records any pending changes, then removes the files and their cache rows, and adds an exclude.
 - Deleting a file with ordinary tools is a deletion and propagates.
 
@@ -189,17 +189,17 @@ Two independent settings in `config` decide what a vault retains:
 
 | Setting | Values | Effect |
 |---|---|---|
-| `keep` | off / on | When on, every version scanned or received is retained in `.syncit/blobs/`, and blobs offered by peers for versions it lacks are collected. |
-| `remote` | unset / store URL | When set, blobs are uploaded to the store. While the store is unreachable they wait in `.syncit/blobs/`. |
+| `keep_local_history` | off / on | When on, every version scanned or received is retained in `.syncit/blobs/`, and blobs offered by peers for versions it lacks are collected. |
+| `store` | unset / store location | When set, blobs are uploaded to the store. While the store is unreachable they wait in `.syncit/blobs/`. |
 
-With both off, the vault stores no blobs and its log records hashes only.
+With both off, the vault stores no blobs and its log records hashes only. With both on, blobs are uploaded and also kept locally. Local history is never required to be complete: a vault has the blobs it has. Both are set with `syncit config`.
 
 ### A sync run
 
 Both vaults do each step, acting on their own folder:
 
 1. Scan, and write a segment of new entries.
-2. Stash or upload blobs for the new entries, per `keep` and `remote`.
+2. Stash or upload blobs for the new entries, per `keep_local_history` and `store`.
 3. Exchange log segments.
 4. Compute current state from the merged log.
 5. Fetch the blobs needed for wanted and held paths.
@@ -220,12 +220,15 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 | Command | Does |
 |---|---|
 | `syncit init [dir]` | Make a folder a vault. |
-| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another. The vault root is found by walking up from the given path. Records the origin and the sub-path. |
-| `syncit sync [peer] [path]` | Sync both ways with the peer, by default the origin. |
-| `syncit push [peer]` / `syncit pull [peer]` | Sync one way. |
+| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another. The vault root is found by walking up from the given path. Records the sub-path as wanted, and nothing about the source. |
+| `syncit sync <vault>` | Sync both ways with another vault. |
+| `syncit push <vault>` / `syncit pull <vault>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
-| `syncit get <path>...` / `syncit drop <path>...` | Change what this vault holds. |
+| `syncit get <path in another vault>...` / `syncit drop <path>...` | Change what this vault holds. |
+| `syncit config` | Show or change `keep_local_history` and `store`. |
+
+A vault records no other vault. Every command that involves a second vault names it, so there is no default peer and no hierarchy, and nothing breaks when a folder moves.
 
 ### How the stories are met
 
@@ -237,8 +240,8 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become wanted |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
-| D.1 | R13 | `keep` off, `remote` unset |
-| D.2 | R15, R16 | `keep` on, or `remote` set |
+| D.1 | R13 | `keep_local_history` off, `store` unset |
+| D.2 | R15, R16 | `keep_local_history` on, or `store` set |
 | D.3 | R17 | `snapshot` |
 | E.1 | R10, R11, R14, R18, R25 | immutable segments, atomic writes, hash checks, `status`, format version |
 

@@ -48,22 +48,38 @@ fn cli_smoke() {
     assert!(out.contains("recorded 1,"), "{out}");
     assert_eq!(run(&a, &["status"]), (0, String::new()));
 
-    assert_eq!(run(&a, &["sync"]).0, 1, "no peer");
+    assert_eq!(run(&a, &["sync"]).0, 1, "no vault named");
+    assert_eq!(run(&a, &["config", "local-history", "maybe"]).0, 1);
+    let (code, out) = run(&a.join("sub"), &["config", "local-history", "on"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "local-history: on\nstore: none\n")
+    );
+    assert_eq!(run(&a, &["config", "store", "none"]).0, 0);
+    assert_eq!(run(&a, &["config"]).1, out);
     assert_eq!(run(&a, &["frobnicate"]).0, 1, "bad arguments");
     assert_eq!(run(tmp.path(), &["clone", "a/sub", "b"]).0, 0);
     assert_eq!(fs::read_to_string(b.join("sub/f.txt")).unwrap(), "v1");
     fs::write(a.join("sub/f.txt"), "from a").unwrap();
     fs::write(b.join("sub/f.txt"), "from b").unwrap();
-    let (code, out) = run(&b, &["sync"]);
+    let (code, out) = run(&b, &["sync", "../a"]);
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("conflict: sub/f.txt"), "{out}");
-    assert_eq!(run(&b, &["drop", "--force", "sub"]).0, 0);
-    assert_eq!(run(&b, &["get", "sub"]).0, 2, "the conflict is still open");
+    assert_eq!(run(&b, &["drop", "sub"]).0, 1, "no other copy is known");
+    assert_eq!(run(&b, &["drop", "--check", "../a", "sub"]).0, 0);
+    assert!(!b.join("sub").exists());
+    assert_eq!(
+        run(&b, &["get", "../a/sub"]).0,
+        2,
+        "the conflict is still open"
+    );
+    // Which edit won depends on the two mtimes, written a moment apart.
+    assert!(b.join("sub/f.txt").exists());
 
     let (code, help) = run(&a, &["--help"]);
     assert_eq!(code, 0);
     for command in [
-        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "drop",
+        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "drop", "config",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),
