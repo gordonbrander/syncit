@@ -2,13 +2,13 @@
 //! sync returns a `Summary` for `main` to print last.
 
 use crate::blobs::retain;
-use crate::config::{Config, prefix_matches};
+use crate::config::{Config, default_nickname, prefix_matches};
 use crate::entry::valid_path;
 use crate::log::PathState;
 use crate::materialise::{copy_name, materialise, prune};
 use crate::output::{Event, Message, Options, Summary, print_stdout, warn};
 use crate::scan::scan;
-use crate::segment;
+use crate::segment::{self, valid_nickname};
 use crate::vault::{Vault, find_root, relative, resolve_path, write_atomic};
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
@@ -22,12 +22,17 @@ enum Mode {
     Pull,
 }
 
-fn create(dir: &Path, config: Config) -> Result<()> {
+/// Make `dir` a vault that includes `include`, nicknamed after the folder.
+fn create(dir: &Path, include: String) -> Result<Config> {
+    let folder = resolve_path(dir)?;
+    let folder = folder.file_name().unwrap_or_default().to_string_lossy();
+    let config = Config::new(include, default_nickname(&folder));
     for sub in ["log", "blobs", "tmp"] {
         fs::create_dir_all(dir.join(".syncit").join(sub))?;
     }
     File::create(dir.join(".syncit/lock"))?;
-    config.save(dir)
+    config.save(dir)?;
+    Ok(config)
 }
 
 pub fn init(opts: &Options, dir: &Path) -> Result<()> {
@@ -36,8 +41,12 @@ pub fn init(opts: &Options, dir: &Path) -> Result<()> {
         "{} is already a vault",
         dir.display()
     );
-    create(dir, Config::new(String::new()))?;
-    let message = format!("initialised a vault in {}", resolve_path(dir)?.display());
+    let config = create(dir, String::new())?;
+    let message = format!(
+        "Vault initialized: {}\nNickname: {}",
+        resolve_path(dir)?.display(),
+        config.nickname
+    );
     print_stdout(&Message::Info { message }, opts.json);
     Ok(())
 }
@@ -52,7 +61,7 @@ pub fn clone(opts: &Options, src: &Path, dir: &Path) -> Result<Summary> {
     );
     let empty = !dir.exists() || dir.read_dir()?.next().is_none();
     ensure!(empty, "{} exists and is not empty", dir.display());
-    create(dir, Config::new(sub))?;
+    create(dir, sub)?;
     run(opts, dir, &root, Mode::Pull)
 }
 
@@ -203,19 +212,24 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
         }
         let read = fs::read(file.path()).map_err(anyhow::Error::from);
         match read.and_then(|bytes| Ok((segment::decode(&name, &bytes)?, bytes))) {
-            Ok((entries, bytes)) => {
+            Ok((segment, bytes)) => {
                 if !opts.dry_run {
                     write_atomic(&v.root, &dir.join(&name), &bytes)?;
                 }
-                entries.into_iter().for_each(|e| v.log.add(e));
+                for e in segment.entries {
+                    v.log.add(e, &segment.nickname);
+                }
             }
             Err(e) => v.event(opts, sum, "rejected", "", &format!("segment {name}: {e:#}")),
         }
     }
     // What a dry scan of `from` recorded is in its memory, not in a segment.
     if opts.dry_run {
-        let entries = from.log.entries.values();
-        entries.for_each(|e| v.log.add(e.clone()));
+        for (id, e) in &from.log.entries {
+            for nickname in &from.log.authors[id] {
+                v.log.add(e.clone(), nickname);
+            }
+        }
     }
     Ok(())
 }
@@ -425,24 +439,71 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     Ok(sum)
 }
 
-/// Print this vault's settings, after turning local history on or off if
-/// asked. Returns whether local history is on.
-pub fn config(opts: &Options, cwd: &Path, local_history: Option<bool>) -> Result<bool> {
+/// Which vaults recorded the current version of each file under `paths`, or
+/// of every file if there are none. Reads the log only: a change no scan has
+/// recorded is nobody's yet. Returns what it printed, as (path, nicknames).
+pub fn blame(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(String, Vec<String>)>> {
+    let v = Vault::open(opts, cwd, true)?;
+    let mut prefixes = prefixes(&v.root, cwd, paths)?;
+    if prefixes.is_empty() {
+        prefixes.push(String::new());
+    }
+    let mut found = vec![];
+    for path in v.log.paths.keys() {
+        if !prefixes.iter().any(|prefix| prefix_matches(prefix, path)) {
+            continue;
+        }
+        let PathState::Resolved { winner, .. } = v.log.resolve(path) else {
+            continue;
+        };
+        if v.log.entries[&winner].hash.is_none() {
+            continue;
+        }
+        let nicknames: Vec<String> = v.log.authors[&winner].iter().cloned().collect();
+        let blame = Message::Blame {
+            path: path.clone(),
+            nicknames: nicknames.clone(),
+        };
+        print_stdout(&blame, opts.json);
+        found.push((path.clone(), nicknames));
+    }
+    Ok(found)
+}
+
+/// A change `config` can make.
+pub enum Setting {
+    LocalHistory(bool),
+    Nickname(String),
+}
+
+/// Print this vault's settings, after changing one if asked. Returns the
+/// config as it now is.
+pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Config> {
     let mut v = Vault::open(opts, cwd, true)?;
     let was = v.config.keep_local_history;
-    if let Some(on) = local_history {
-        v.config.keep_local_history = on;
-        v.config.save(&v.root)?;
+    match change {
+        Some(Setting::LocalHistory(on)) => v.config.keep_local_history = on,
+        Some(Setting::Nickname(name)) => {
+            ensure!(
+                valid_nickname(&name),
+                "a nickname is 1 to 64 bytes, with no spaces or control characters"
+            );
+            v.config.nickname = name;
+        }
+        None => {}
     }
+    v.config.save(&v.root)?;
     let on = v.config.keep_local_history;
-    let setting = Message::Setting {
-        name: "local-history",
-        value: if on { "on" } else { "off" }.to_string(),
-    };
-    print_stdout(&setting, opts.json);
+    let settings = [
+        ("local-history", if on { "on" } else { "off" }.to_string()),
+        ("nickname", v.config.nickname.clone()),
+    ];
+    for (name, value) in settings {
+        print_stdout(&Message::Setting { name, value }, opts.json);
+    }
     if was && !on {
         let message = "versions already in .syncit/blobs/ are left there".to_string();
         print_stdout(&Message::Info { message }, opts.json);
     }
-    Ok(on)
+    Ok(v.config)
 }

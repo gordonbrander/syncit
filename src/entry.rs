@@ -76,11 +76,12 @@ mod tests {
             e.id(),
             "14e254d499907fd5a29ece8053509c7270afa9ad3be8beb60f16836aef423449"
         );
-        let (name, bytes) = segment::encode(&[e]);
-        assert_eq!(bytes, format!("{{\"syncit\":1}}\n{line}\n").into_bytes());
+        let (name, bytes) = segment::encode("notes", &[e]);
+        let header = r#"{"nickname":"notes","syncit":1}"#;
+        assert_eq!(bytes, format!("{header}\n{line}\n").into_bytes());
         assert_eq!(
             name,
-            "131647b457f74cabf5580495b318db71fc518912d8c4a8b21a1b665205374f49"
+            "12bf899655031a7997e0f0a4824dc2fe225c6b8e07157384ac2d74c4234a0522"
         );
     }
 

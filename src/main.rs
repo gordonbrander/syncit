@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use syncit::commands;
+use syncit::commands::{self, Setting};
 use syncit::output::{Message, Options, print_stderr, print_stdout};
 
 /// Two-way sync and partial replication between folders.
@@ -63,6 +63,8 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Show which vault recorded the current version of each file
+    Blame { paths: Vec<PathBuf> },
     /// Show this vault's settings, or change one
     Config {
         #[command(subcommand)]
@@ -77,6 +79,8 @@ enum SettingArg {
         #[arg(value_parser = ["on", "off"])]
         value: String,
     },
+    /// The name this vault's changes are recorded under
+    Nickname { value: String },
 }
 
 fn main() {
@@ -109,8 +113,12 @@ fn main() {
         Command::Move { paths, vault, .. } => {
             commands::move_to(opts, cwd, &paths, &vault).map(Some)
         }
+        Command::Blame { paths } => commands::blame(opts, cwd, &paths).map(|_| None),
         Command::Config { setting } => {
-            let change = setting.map(|SettingArg::LocalHistory { value }| value == "on");
+            let change = setting.map(|setting| match setting {
+                SettingArg::LocalHistory { value } => Setting::LocalHistory(value == "on"),
+                SettingArg::Nickname { value } => Setting::Nickname(value),
+            });
             commands::config(opts, cwd, change).map(|_| None)
         }
     };

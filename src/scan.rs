@@ -127,10 +127,12 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     // Segment, then config, then cache: stopped in between, the next scan
     // sees the same difference and writes the same entries again.
     if !out.entries.is_empty() && !dry {
-        let (name, bytes) = segment::encode(&out.entries);
+        let (name, bytes) = segment::encode(&v.config.nickname, &out.entries);
         write_atomic(&v.root, &v.dot().join("log").join(name), &bytes)?;
     }
-    out.entries.iter().for_each(|e| v.log.add(e.clone()));
+    for e in &out.entries {
+        v.log.add(e.clone(), &v.config.nickname);
+    }
     if config != v.config && !dry {
         config.save(&v.root)?;
     }

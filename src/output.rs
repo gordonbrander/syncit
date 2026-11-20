@@ -42,6 +42,11 @@ pub enum Message {
         name: &'static str,
         value: String,
     },
+    /// The vaults that recorded the current version of a file.
+    Blame {
+        path: String,
+        nicknames: Vec<String>,
+    },
     Info {
         message: String,
     },
@@ -99,6 +104,7 @@ impl Display for Message {
                 ..
             } => write!(f, "{} (conflict: {message})", head(side, "U", path)),
             Message::Setting { name, value } => write!(f, "{name}: {value}"),
+            Message::Blame { path, nicknames } => write!(f, "{} {path}", nicknames.join(",")),
             Message::Info { message } => write!(f, "{message}"),
             Message::Warning { message } => write!(f, "warning: {message}"),
             Message::Error { message } => write!(f, "error: {message}"),
@@ -271,6 +277,17 @@ mod tests {
         assert_eq!(
             line(&conflict, false),
             "<- U n.txt (conflict: n-12345678.txt)"
+        );
+        let blame = Message::Blame {
+            path: "a/f.txt".into(),
+            nicknames: vec!["drive".into(), "notes".into()],
+        };
+        assert_eq!(
+            both(&blame),
+            (
+                "drive,notes a/f.txt".into(),
+                r#"{"type":"blame","path":"a/f.txt","nicknames":["drive","notes"]}"#.into()
+            )
         );
         let warning = Message::Warning {
             message: "w".into(),

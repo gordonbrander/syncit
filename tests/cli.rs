@@ -57,13 +57,29 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["sync"]).0, 1, "no vault named");
     assert_eq!(run(&a, &["config", "local-history", "maybe"]).0, 1);
     let (code, out) = run(&a.join("sub"), &["config", "local-history", "on"]);
-    assert_eq!((code, out.as_str()), (0, "local-history: on\n"));
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "local-history: on\nnickname: a\n")
+    );
     assert_eq!(
         run(&a, &["config", "store", "none"]).0,
         1,
         "no such setting"
     );
     assert_eq!(run(&a, &["config"]).1, out);
+    assert_eq!(run(&a, &["blame"]), (0, "a sub/f.txt\n".to_string()));
+    assert_eq!(run(&a, &["config", "nickname", "two words"]).0, 1);
+    let (code, out) = run(&a, &["config", "nickname", "desk"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "local-history: on\nnickname: desk\n")
+    );
+    let (code, out) = run(&a, &["--json", "blame", "sub"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out,
+        "{\"type\":\"blame\",\"path\":\"sub/f.txt\",\"nicknames\":[\"a\"]}\n"
+    );
     assert_eq!(run(&a, &["frobnicate"]).0, 1, "bad arguments");
     assert_eq!(run(tmp.path(), &["clone", "a/sub", "b"]).0, 0);
     assert_eq!(fs::read_to_string(b.join("sub/f.txt")).unwrap(), "v1");
@@ -137,7 +153,8 @@ fn cli_smoke() {
     let (code, help) = run(&a, &["--help"]);
     assert_eq!(code, 0);
     for command in [
-        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "config",
+        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "blame",
+        "config",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),

@@ -36,26 +36,37 @@ Entries are stored in segments.
 A segment is a JSON Lines file:
 
 ```
-{"syncit":1}
+{"nickname":"notes","syncit":1}
 {"hash":"9c1f…","mtime":1763600000000,"parents":["3f9a…"],"path":"foo/bar/x.txt"}
 {"hash":null,"mtime":1763600005000,"parents":["77b0…"],"path":"old.txt"}
 ```
 
-- The first line is the format version.
+- The first line is the header: the format version, and the nickname of the vault that scanned.
 - **An entry's id is the SHA-256 of its line's bytes, without the newline.**
-- Each line is in canonical form: keys sorted alphabetically, no whitespace, integers as plain digits, strings with minimal escaping and non-ASCII characters written literally. These are the RFC 8785 (JCS) rules restricted to the types used here, and match the DAG-JSON convention.
+- Each line, the header included, is in canonical form: keys sorted alphabetically, no whitespace, integers as plain digits, strings with minimal escaping and non-ASCII characters written literally. These are the RFC 8785 (JCS) rules restricted to the types used here, and match the DAG-JSON convention.
 - Every logical entry therefore has exactly one id, and two vaults recording the same change produce the same entry.
-- Entries within a segment are sorted by path, so the same scan result gives the same segment.
+- Entries within a segment are sorted by path, so the same scan result in the same vault gives the same segment. Two vaults recording the same change write different segments, which hold the same entry.
 - A segment's name is the SHA-256 of the whole file. Once written it never changes.
 - A scan that finds no changes writes no segment.
 - The same entry may appear in several segments; it is one entry.
+
+### Nickname
+
+The nickname says which vault recorded a segment's entries, for people to read (`syncit blame`).
+
+- It is a label and not an identity. It is chosen by the vault's user, by default the folder's name. It need not be unique, a copied vault duplicates it, and nothing verifies it.
+- **No rule reads it.** It is outside every entry, so it does not affect entry ids, causality, the winner or conflicts. The statement above stands: there is no replica id.
+- It is 1 to 64 bytes of UTF-8 with no whitespace and no control characters, so that it can be printed as it is.
+- Renaming a vault changes the segments it writes from then on. Earlier segments are immutable and keep the old nickname.
+- An entry found in several segments was recorded by each of their vaults.
 
 ## Validation
 
 A segment arrives from another vault and is not trusted. It is rejected whole if:
 
-- its hash does not match its name, or its version is not 1;
-- any line is not a JSON object with exactly the four fields and the types above;
+- its hash does not match its name;
+- its first line is not a JSON object with exactly the fields `nickname` and `syncit`, its version is not 1, or its nickname is not valid (see "Nickname");
+- any other line is not a JSON object with exactly the four fields and the types above;
 - any line is not in canonical form (re-serialising it gives different bytes);
 - any path is absolute, has an empty, `.` or `..` component, or lies under `.syncit/`;
 - any `parents` array is unsorted or has duplicates.
@@ -154,14 +165,14 @@ The open part is the mechanism. Dropping old entries leaves parents that name ab
 
 ## Planned extension: signed segments
 
-Not in version 1. This is the intended shape, to be designed together with network transport.
+Not in version 1. This is the intended shape, to be designed together with network transport. Version 1 has the nickname, which gives unverified attribution; signing would make attribution verifiable and leaves the nickname as it is.
 
-- Each machine generates an Ed25519 keypair on first run. iroh uses the same key type for node ids.
+- An Ed25519 keypair signs segments. iroh uses the same key type for node ids.
 - The key gives attribution and authenticity. **It is never used for causality**, because a key can be duplicated by a restore, a copied vault or a cloned disk. Parents carry causality, so a duplicated key is harmless.
-- The signature is inside the segment: a `key` field in the first line, and a final `{"sig":…}` line covering all bytes above it. The segment's name covers the signature.
+- The signature is inside the segment: a `key` field in the first line, and a final `{"sig":…}` line covering all bytes above it. The header is canonical, so the signed bytes are determined by the content. The segment's name covers the signature.
 
   ```
-  {"key":"<public key>","syncit":2}
+  {"key":"<public key>","nickname":"notes","syncit":2}
   {"hash":"9c1f…","mtime":1763600000000,"parents":["3f9a…"],"path":"foo/bar/x.txt"}
   {"sig":"<signature over all bytes above>"}
   ```
@@ -170,7 +181,13 @@ Not in version 1. This is the intended shape, to be designed together with netwo
 - An entry found in several segments has several attested authors.
 - Signing does not change entries or their ids, so a later format version can read version 1 segments as they are.
 
-Unresolved: where keys are stored and what happens when one is lost; which keys a vault accepts; and compaction, which would replace the original signatures with the compactor's.
+Unresolved:
+
+- Whether the key belongs to a vault or to a device. A vault key travels with the folder, so a secret sits on every drive and is copied with it, and a run that scans both vaults signs with each vault's key. A device key stays on the machine, where the operating system can store it, but then a vault's name is a claim the device makes and not something the key proves.
+- Where keys are stored and what happens when one is lost.
+- Which keys a vault accepts. Until that is decided a signature gives attribution, not authorisation.
+- How people name keys: a table of local petnames is the likely answer, with the nickname as the name a vault proposes for itself.
+- Compaction, which would replace the original signatures with the compactor's.
 
 ## Open questions
 

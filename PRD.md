@@ -229,6 +229,8 @@ In a push or pull, both vaults still scan, but only the receiving vault takes se
 
 A vault has no identity. Two copies of one folder, or a vault restored from a backup, are ordinary vaults. If both are edited, their entries share a parent and neither replaces the other, so they conflict in the usual way.
 
+A vault does have a nickname: a label, by default its folder's name, written into each segment it records so that `syncit blame` can say which vault recorded a version. It is not an identity. It need not be unique, a copied vault duplicates it, nothing verifies it, and no rule of the log reads it.
+
 ### Commands
 
 | Command | Does |
@@ -240,7 +242,8 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
 | `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
-| `syncit config` | Show or change `keep_local_history` and `store`. |
+| `syncit blame [path]...` | Show which vault recorded the current version of each file. |
+| `syncit config` | Show or change `keep_local_history`, `nickname` and `store`. |
 
 `sync`, `push`, `pull` and `move` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
 

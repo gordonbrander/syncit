@@ -2,14 +2,45 @@
 
 use crate::entry::{Entry, sha256};
 use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 
-pub const HEADER: &str = r#"{"syncit":1}"#;
+// The first line. Fields are in alphabetical order, as in `Entry`, so that
+// serde_json writes the canonical form.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Header {
+    nickname: String,
+    syncit: u32,
+}
+
+impl Header {
+    fn line(&self) -> String {
+        serde_json::to_string(self).expect("a header always serialises")
+    }
+}
+
+/// A decoded segment: its entries, and the nickname of the vault that wrote it.
+#[derive(Debug)]
+pub struct Segment {
+    pub nickname: String,
+    pub entries: Vec<Entry>,
+}
+
+/// A nickname is a label, printed as it is: 1 to 64 bytes, with no whitespace
+/// and no control characters.
+pub fn valid_nickname(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+}
 
 /// Returns the segment's name and bytes. Entries are written sorted by path.
-pub fn encode(entries: &[Entry]) -> (String, Vec<u8>) {
+pub fn encode(nickname: &str, entries: &[Entry]) -> (String, Vec<u8>) {
     let mut sorted: Vec<&Entry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut text = format!("{HEADER}\n");
+    let header = Header {
+        nickname: nickname.to_string(),
+        syncit: 1,
+    };
+    let mut text = header.line() + "\n";
     for e in sorted {
         text.push_str(&e.line());
         text.push('\n');
@@ -18,13 +49,20 @@ pub fn encode(entries: &[Entry]) -> (String, Vec<u8>) {
 }
 
 /// Validate an untrusted segment whole (CRDT.md, "Validation").
-pub fn decode(name: &str, bytes: &[u8]) -> Result<Vec<Entry>> {
+pub fn decode(name: &str, bytes: &[u8]) -> Result<Segment> {
     ensure!(sha256(bytes) == name, "content does not match its name");
     let text = std::str::from_utf8(bytes).context("not UTF-8")?;
     let body = text.strip_suffix('\n').context("no final newline")?;
     let mut lines = body.split('\n');
-    ensure!(lines.next() == Some(HEADER), "not a version 1 segment");
-    lines.map(Entry::decode).collect()
+    let first = lines.next().unwrap_or_default();
+    let header: Header = serde_json::from_str(first).context("not a segment header")?;
+    ensure!(header.line() == first, "header is not in canonical form");
+    ensure!(header.syncit == 1, "not a version 1 segment");
+    ensure!(valid_nickname(&header.nickname), "invalid nickname");
+    Ok(Segment {
+        nickname: header.nickname,
+        entries: lines.map(Entry::decode).collect::<Result<_>>()?,
+    })
 }
 
 #[cfg(test)]
@@ -47,9 +85,13 @@ mod tests {
             entry("a/z", None),
             entry("a", Some("y")),
         ];
-        let (name, bytes) = encode(&entries);
+        let (name, bytes) = encode("notes", &entries);
         assert_eq!(name, sha256(&bytes));
-        let back = decode(&name, &bytes).unwrap();
+        let Segment {
+            nickname,
+            entries: back,
+        } = decode(&name, &bytes).unwrap();
+        assert_eq!(nickname, "notes");
         let paths: Vec<&str> = back.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["a", "a/z", "b"]);
         for e in &entries {
@@ -61,9 +103,40 @@ mod tests {
         format!(r#"{{"hash":{hash},"mtime":{mtime},"parents":{parents},"path":{path}}}"#)
     }
 
-    fn check(body: &str) -> Result<Vec<Entry>> {
-        let text = format!("{HEADER}\n{body}\n");
+    const HEADER: &str = r#"{"nickname":"notes","syncit":1}"#;
+
+    fn whole(text: &str) -> Result<Segment> {
         decode(&sha256(text.as_bytes()), text.as_bytes())
+    }
+
+    fn check(body: &str) -> Result<Segment> {
+        whole(&format!("{HEADER}\n{body}\n"))
+    }
+
+    #[test]
+    fn header_rejects() {
+        assert!(whole(&format!("{HEADER}\n")).is_ok(), "no entries");
+        let long = format!(r#"{{"nickname":"{}","syncit":1}}"#, "n".repeat(65));
+        for (what, header) in [
+            ("no nickname", r#"{"syncit":1}"#),
+            (
+                "extra field",
+                r#"{"key":"k","nickname":"notes","syncit":1}"#,
+            ),
+            ("key order", r#"{"syncit":1,"nickname":"notes"}"#),
+            ("whitespace", r#"{"nickname":"notes", "syncit":1}"#),
+            ("empty nickname", r#"{"nickname":"","syncit":1}"#),
+            ("space in nickname", r#"{"nickname":"my notes","syncit":1}"#),
+            ("control character", r#"{"nickname":"a\u001bb","syncit":1}"#),
+            ("long nickname", long.as_str()),
+            ("nickname is a number", r#"{"nickname":7,"syncit":1}"#),
+        ] {
+            assert!(
+                whole(&format!("{header}\n")).is_err(),
+                "{what} was accepted"
+            );
+        }
+        assert!(valid_nickname("gordons-mbp:notes") && valid_nickname("ノート"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
-use syncit::commands::{self as cmd};
+use syncit::commands::{self as cmd, Setting};
 use syncit::output::{Options, Summary};
 
 const O: &Options = &Options {
@@ -333,7 +333,7 @@ fn story_d2_history() {
     assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
     assert!(is(&a, "f.txt", "v3") && is(&b, "f.txt", "v3"));
     // Turned off, nothing more is kept, and what was kept stays.
-    cmd::config(O, &b, Some(false)).unwrap();
+    cmd::config(O, &b, Some(Setting::LocalHistory(false))).unwrap();
     put(&b, "f.txt", "v4", 3);
     cmd::sync(O, &b, &a).unwrap();
     assert_eq!(names(&b.join(".syncit/blobs")).len(), 3);
@@ -676,16 +676,19 @@ fn hostile_segment() {
     };
     let hash = sha256(b"good");
     let escape = plant(format!(
-        "{{\"syncit\":1}}\n{{\"hash\":\"{hash}\",\"mtime\":1,\"parents\":[],\"path\":\"../evil.txt\"}}\n"
+        "{{\"nickname\":\"a\",\"syncit\":1}}\n{{\"hash\":\"{hash}\",\"mtime\":1,\"parents\":[],\"path\":\"../evil.txt\"}}\n"
     ));
     plant(
-        "{\"syncit\":1}\n{\"hash\":null, \"mtime\":1,\"parents\":[],\"path\":\"x\"}\n".to_string(),
+        "{\"nickname\":\"a\",\"syncit\":1}\n{\"hash\":null, \"mtime\":1,\"parents\":[],\"path\":\"x\"}\n"
+            .to_string(),
     );
+    // A segment from before nicknames.
+    plant("{\"syncit\":1}\n".to_string());
     fs::write(a.join(".syncit/log/not-a-hash"), "junk").unwrap();
     let b = tmp.path().join("b");
     cmd::init(O, &b).unwrap();
     let report = cmd::sync(O, &b, &a).unwrap();
-    assert_eq!((report.rejected, report.exit_code()), (3, 2));
+    assert_eq!((report.rejected, report.exit_code()), (4, 2));
     assert!(!b.join(".syncit/log").join(&escape).exists());
     assert!(is(&b, "f.txt", "good"));
     assert_eq!(names(&b.join(".syncit/log")).len(), 1);
@@ -852,17 +855,77 @@ fn move_refuses() {
 #[test]
 fn config_command() {
     let (_tmp, a) = vault(&[("sub/f.txt", "v1")]);
-    let config = |change| cmd::config(O, &a.join("sub"), change).unwrap();
-    assert!(!config(None));
-    assert!(config(Some(true)));
+    let config = |change| cmd::config(O, &a.join("sub"), change);
+    let history = |change: Option<bool>| {
+        let change = change.map(Setting::LocalHistory);
+        config(change).unwrap().keep_local_history
+    };
+    assert!(!history(None));
+    assert!(history(Some(true)));
     assert!(Config::load(&a).unwrap().keep_local_history);
     // The setting takes effect.
     cmd::snapshot(O, &a).unwrap();
     assert!(a.join(".syncit/blobs").join(sha256(b"v1")).exists());
-    assert!(!config(Some(false)));
+    assert!(!history(Some(false)));
     assert!(!Config::load(&a).unwrap().keep_local_history);
     assert!(a.join(".syncit/blobs").join(sha256(b"v1")).exists());
-    assert!(!config(None));
+    assert!(!history(None));
+
+    // A vault is nicknamed after its folder until it is renamed.
+    assert_eq!(config(None).unwrap().nickname, "a");
+    let renamed = config(Some(Setting::Nickname("laptop:notes".into()))).unwrap();
+    assert_eq!(renamed.nickname, "laptop:notes");
+    assert_eq!(Config::load(&a).unwrap().nickname, "laptop:notes");
+    for bad in ["", "two words", "bell\u{7}", &"n".repeat(65)] {
+        let refused = config(Some(Setting::Nickname(bad.into()))).is_err();
+        assert!(refused, "{bad:?}");
+    }
+    assert_eq!(config(None).unwrap().nickname, "laptop:notes");
+}
+
+#[test]
+fn blame_names_the_recording_vault() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("sub/g.txt", "g")]);
+    let blame = |dir: &Path, list: &[&str]| cmd::blame(O, dir, &paths(list)).unwrap();
+    let by = |path: &str, who: &[&str]| {
+        let who = who.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        (path.to_string(), who)
+    };
+    // A vault that only receives a file records nothing about it.
+    assert_eq!(
+        blame(&b, &[]),
+        [by("f.txt", &["a"]), by("sub/g.txt", &["a"])]
+    );
+
+    put(&b, "f.txt", "v2", 1);
+    put(&b, "gone.txt", "x", 1);
+    cmd::sync(O, &b, &a).unwrap();
+    fs::remove_file(b.join("gone.txt")).unwrap();
+    // Recorded identically in both vaults: one entry, two recorders.
+    put(&a, "same.txt", "same", 2);
+    put(&b, "same.txt", "same", 2);
+    cmd::sync(O, &b, &a).unwrap();
+    let all = [
+        by("f.txt", &["b"]),
+        by("same.txt", &["a", "b"]),
+        by("sub/g.txt", &["a"]),
+    ];
+    assert_eq!(blame(&a, &[]), all, "a deleted file is left out");
+    assert_eq!(blame(&b, &[]), all);
+    assert_eq!(blame(&a, &["sub"]), [by("sub/g.txt", &["a"])]);
+    assert_eq!(blame(&a.join("sub"), &["g.txt"]), [by("sub/g.txt", &["a"])]);
+
+    // A renamed vault's new changes carry the new name; old ones keep the old.
+    cmd::config(O, &a, Some(Setting::Nickname("drive".into()))).unwrap();
+    put(&a, "f.txt", "v3", 3);
+    cmd::sync(O, &b, &a).unwrap();
+    assert_eq!(
+        blame(&b, &["f.txt", "sub"]),
+        [by("f.txt", &["drive"]), by("sub/g.txt", &["a"])]
+    );
+    // An edit no scan has recorded is not attributed.
+    put(&b, "f.txt", "v4", 4);
+    assert_eq!(blame(&b, &["f.txt"]), [by("f.txt", &["drive"])]);
 }
 
 #[test]

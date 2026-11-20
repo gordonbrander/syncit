@@ -46,6 +46,7 @@ A sync run, done by each vault on its own folder (`PRD.md`, "A sync run"):
 | entry id | SHA-256 of the entry's canonical line |
 | tombstone | an entry whose `hash` is `null`: the path was deleted |
 | segment | an immutable file of entries, the output of one scan, named by its SHA-256 |
+| nickname | a vault's label, by default its folder's name, written into each segment it records. Not an identity |
 | head | an entry of a path that no other entry names as a parent |
 | winner | the head every vault agrees to show, chosen by `(is file, mtime, id)` |
 | loser | a distinct file content among the heads that is not the winner's |
@@ -78,7 +79,7 @@ Version 1 is done when all of these hold:
 1. Every milestone box in section 15 is ticked.
 2. `cargo test` passes, and every test named in section 14 exists.
 3. `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` pass.
-4. `cargo run -- --help` lists the ten commands of section 11.
+4. `cargo run -- --help` lists the eleven commands of section 11.
 
 ## 2. Scope of version 1
 
@@ -175,14 +176,16 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
   "syncit": 1,
   "include": [""],
   "exclude": [],
-  "keep_local_history": false
+  "keep_local_history": false,
+  "nickname": "notes"
 }
 ```
 
 - `syncit`: format version (`R25`). A command refuses to run on a vault, or with a peer, whose version is not 1.
 - `include`, `exclude`: wanted-path prefixes, vault-relative, `/`-separated. `""` is the vault root.
 - `keep_local_history`: retain every version this vault sees in `.syncit/blobs/` (`R15`). Local history is whatever blobs are there; it is never required to be complete.
-- Written pretty-printed. Unknown fields are an error. `keep_local_history` is changed with `syncit config` (section 11). Milestone 9 adds a `store` field beside it.
+- `nickname`: the label written into the header of every segment this vault records (`CRDT.md`, "Nickname"). `init` and `clone` set it to the folder's name, with whitespace and control characters replaced by `-`, cut to 64 bytes, or to `vault` if that leaves nothing. It is a label only: `blame` prints it and no other code reads it.
+- Written pretty-printed. Unknown fields are an error. `keep_local_history` and `nickname` are changed with `syncit config` (section 11). Milestone 9 adds a `store` field beside them.
 - A vault records nothing about other vaults. There is no origin or default peer: any vault syncs with any other, and folders may move.
 
 **Wanted** (`PRD.md`, "What a vault holds"): a prefix matches a path if it is `""`, equals the path, or is followed in the path by `/`. Among all matching prefixes in both lists, the longest decides: wanted if it came from `include`. If none matches, the path is not wanted. A prefix is never in both lists.
@@ -211,7 +214,9 @@ Format, canonical form and validation are in `CRDT.md`, "Segments" and "Validati
 - Encode an entry with `serde_json::to_string`. Decode by parsing the line into `Entry`, re-encoding, and requiring the bytes to equal the line. This one check enforces key order, absence of whitespace, number form, string escaping, presence of all four fields and absence of others.
 - Then check the field contents: `hash` and each parent are 64 lowercase hex characters; `parents` is strictly ascending by byte order; `path` passes path validation.
 - Path validation: not empty, does not start with `/`, no component that is empty, `.` or `..`, first component is not `.syncit`.
-- The file is: the exact line `{"syncit":1}`, then zero or more entry lines, each line ended by one `\n`. No blank lines, no missing final newline.
+- The file is: the header line, then zero or more entry lines, each line ended by one `\n`. No blank lines, no missing final newline.
+- The header is `{"nickname":"<nickname>","syncit":1}`. It is encoded and checked as an entry is: parse it into a struct with exactly those two fields, re-encode, and require the same bytes. Then check that `syncit` is 1 and the nickname is valid: 1 to 64 bytes, no whitespace, no control characters.
+- Decoding returns the nickname with the entries. The log keeps, for each entry id, the set of nicknames of the segments it was found in.
 - A writer sorts entries by path (byte order) and writes at most one entry per path.
 - The canonical string form must match RFC 8785: `"` and `\` are escaped with a backslash; U+0008, U+0009, U+000A, U+000C and U+000D are written `\b`, `\t`, `\n`, `\f`, `\r`; other characters below U+0020 are written `\u00xx` with lowercase hex; everything else, including `/`, U+007F and all non-ASCII, is written literally. `serde_json` is expected to do exactly this. Test `canonical_escaping` pins it; if it fails, write the string encoder by hand.
 
@@ -220,8 +225,8 @@ Test vector:
 ```
 entry line:  {"hash":null,"mtime":1763600005000,"parents":[],"path":"old.txt"}
 entry id:    14e254d499907fd5a29ece8053509c7270afa9ad3be8beb60f16836aef423449
-segment:     {"syncit":1}\n<entry line>\n
-segment name: 131647b457f74cabf5580495b318db71fc518912d8c4a8b21a1b665205374f49
+segment:     {"nickname":"notes","syncit":1}\n<entry line>\n
+segment name: 12bf899655031a7997e0f0a4824dc2fe225c6b8e07157384ac2d74c4234a0522
 ```
 
 ### .syncitignore
@@ -490,7 +495,9 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit status` | Dry scan and `resolve`. Writes nothing at all. (`R18`) |
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
+| `syncit blame [path]...` | See below. |
 | `syncit config [local-history on\|off]` | See below. (`R15`) |
+| `syncit config nickname <name>` | See below. |
 
 `get` and `move` take one or more paths. The steps below run once over all the paths together: `move` makes its checks for every file before removing anything, so it either moves them all or refuses.
 
@@ -519,12 +526,23 @@ A failure in steps 2, 3 or 5 is exit code 1.
 
 There is no way to stop holding a path without naming a vault that takes it. An earlier `drop` command did that and was removed; see section 17.
 
+### blame
+
+`syncit blame [path]...` prints which vaults recorded the current version of each file. The paths are in this vault, relative to the current directory; with none, every path in the log is considered.
+
+1. Open and lock the vault. Nothing is scanned and nothing is written.
+2. For each path in the log at or under a given path, in sorted order: `resolve` it. Skip it unless it is `Resolved` with a winner that is a file.
+3. Print a `blame` message with the path and the nicknames of the segments holding the winner, sorted. There is usually one. There are several when vaults recorded the identical entry, as they do for a conflict copy each of them created.
+
+It reads the log only. A vault that receives a file records nothing, so it is never named for it; an edit that no scan has recorded is not attributed to anyone. It has no summary and exits 0.
+
 ### config
 
-- `syncit config` prints the vault's setting, as a `setting` message: `local-history: on|off`.
+- `syncit config` prints the vault's settings, as `setting` messages: `local-history: on|off`, then `nickname: <nickname>`.
 - `syncit config local-history on|off` sets `keep_local_history`. Turning it off deletes nothing; blobs already stored stay until the user removes them.
+- `syncit config nickname <name>` sets `nickname`, and fails if the name is not a valid nickname (section 5). Segments already written keep the old one.
 
-Each form prints the setting afterwards and exits 0. Local history is the only setting until milestone 9 adds `store`.
+Each form prints the settings afterwards and exits 0. Milestone 9 adds `store`.
 
 ## 12. Output and exit codes
 
@@ -539,7 +557,7 @@ How it is built:
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
 - `Options` holds the process-wide settings (`json`, and `dry_run` of section 10) and is passed to everything that can print or write.
-- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status` and `config` have no summary.
+- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame` and `config` have no summary.
 
 ### Messages
 
@@ -548,6 +566,7 @@ How it is built:
 | `event` | `kind`, `vault`, `path`, `note` | a marker, a letter and the path, below | stdout |
 | `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
 | `setting` | `name`, `value` | `<name>: <value>` | stdout |
+| `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
 | `info` | `message` | the message | stdout |
 | `summary` | the counts | `recorded 3, added 1, …` | stdout |
 | `warning` | `message` | `warning: <message>` | stderr |
@@ -598,7 +617,7 @@ The same run's first and last lines with `--json`:
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Completed; nothing needs attention. `init`, `status` and `config` always exit 0 unless they fail. |
+| 0 | Completed; nothing needs attention. `init`, `status`, `blame` and `config` always exit 0 unless they fail. |
 | 1 | Failed: bad arguments, not a vault, vault in use, version mismatch, corrupt local file, a refused `move`. |
 | 2 | Completed, but there are conflicts or pending, skipped, incomplete or rejected items. |
 
@@ -628,6 +647,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `entry_id_vector` | the test vector in section 5 |
 | `canonical_escaping` | a path containing `"`, `\`, U+0001, U+000A, `é`, `/` and U+007F encodes per section 5 and round-trips |
 | `segment_round_trip` | encode then decode returns the entries; entries are sorted by path; the name is the hash |
+| `header_rejects` | a segment whose first line lacks the nickname, has another field, is out of key order, has whitespace, or has a nickname that is empty, over 64 bytes, not a string, or contains a space or a control character |
+| `nickname_default` | the folder name becomes a valid nickname: spaces replaced, cut to 64 bytes on a character boundary, `vault` when empty |
 | `segment_rejects` | one case per bullet of `CRDT.md` "Validation": wrong name, version 2, extra field, missing field, wrong type, whitespace, key order, uppercase hex, absolute path, `..`, empty component, `.syncit/x`, unsorted parents, duplicate parents, missing final newline |
 | `resolve_worked_cases` | every row of `CRDT.md` "Worked cases" that concerns the log |
 | `resolve_order_independent` | the same entries split into segments in several ways and loaded in several orders give the same `PathState` for every path |
@@ -677,7 +698,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `corrupt_blob_source` | a peer file changed behind its cache is not installed (`R11`) |
 | `copy_deleted_stays_deleted` | deleting a conflict copy and syncing does not bring it back |
 | `move_refuses` | `move` refuses, removing nothing, when the target does not want a path (and then sends nothing), when the target holds a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
-| `config_command` | `config` prints the setting, turns it on and off, and the setting takes effect |
+| `config_command` | `config` prints the settings, turns local history on and off, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
+| `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | `store_layout` | a store has `format`, `log/` and `blobs/`; an empty directory is initialised on first write; a non-empty directory without `format`, and one with version 2, are refused and left untouched |
 | `store_hostile` | a bad segment and a wrong blob planted in a store are rejected and not installed; the rest of the run completes |
 | `store_configured_gets_log` | `config store` sets and clears the setting, keeping a directory path in absolute form; with `store` set, every run and snapshot leaves the vault's segments in the store as well as its blobs; they wait locally while it is unreachable |
@@ -721,6 +743,7 @@ Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warning
 - [x] **6. Partial vaults.** Wanted paths in materialise, `clone` of a sub-folder, `get`, `move`. Tests: `story_a3`, `story_a4`, `story_a5`, `move_refuses`.
 - [x] **7. Local history.** `.syncit/blobs/`, `keep_local_history`, `retain`, `config`. Tests: `story_d1`, `story_d2`, `config_command`.
 - [x] **8. Hardening.** Locking, ignore file, symlink checks, version checks, output format and exit codes. Tests: `hostile_segment`, `symlink_escape`, `ignored_files`, `version_mismatch`, and the remaining parts of `lost_cache` and `story_d3`.
+- [x] **8a. Nicknames.** The segment header with a nickname, the `nickname` setting and `config nickname`, the log's record of which vaults recorded each entry, and `blame`. Tests: `header_rejects`, `nickname_default`, `blame_names_the_recording_vault`, and the nickname parts of `config_command`, `message_forms` and `cli_smoke`.
 - [ ] **9. Stores.** Everything under "Stores" in section 8 and "A run with a store" in section 10, for directory stores: the layout, the `store` setting and `config store`, `flush`, the store as a blob source, and `sync`, `push`, `pull` and `move` with a store. Tests: `story_c2_sync_through_store`, `store_layout`, `store_hostile`, `store_configured_gets_log`.
 - [ ] **10. S3 stores.** The second kind of store, behind the same four operations. Test: `s3_store`.
 
@@ -735,6 +758,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Store | a log and blobs with no working folder (section 8): one mechanism for keeping history (`R16`) and for syncing through a third place (`R24`). A directory, or an S3 bucket |
 | Origin | none. A vault records no other vault; `sync`, `push`, `pull` and `get` name one. Nothing breaks when a folder moves |
 | Settings | changed with `syncit config`, not by editing the file |
+| Attribution | each vault has a nickname, by default its folder's name, written into the header of the segments it records; `blame` prints it. A label: not unique, not verified, read by no rule. Hostnames and absolute paths are not recorded, since the log is permanent and replicated |
 | Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
 | `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target wants every file and, after the push, holds the same content at every path |
 | File metadata | regular files only; symlinks skipped with a warning; permissions and extended attributes not recorded |
@@ -756,7 +780,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 - Wildcards in the ignore file, and per-folder ignore files.
 - A stored heads file, if loading the whole log becomes slow.
 - Compaction and blob garbage collection.
-- Signed segments, and vaults reached over a network (SSH, iroh). Stores cover the case of syncing through a third place.
+- Signed segments, and vaults reached over a network (SSH, iroh). Stores cover the case of syncing through a third place. Nicknames give unverified attribution meanwhile; `CRDT.md`, "Planned extension", lists what signing still has to decide.
 - A `size` field in entries.
 - Unicode normalisation of paths.
 - A guard against mass deletion (`R23`). A whole vault on an unmounted drive cannot trigger one, because `.syncit/` is missing too; a missing mount *inside* a vault can.

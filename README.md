@@ -235,7 +235,10 @@ syncit config
 
 ```
 local-history: off
+nickname: Documents
 ```
+
+(`nickname` is explained under "Who changed what".)
 
 ### Turning history on and off
 
@@ -260,6 +263,29 @@ Snapshots are delivered with the next sync, so your history is as fine-grained a
 ### Getting an old version back
 
 This version of syncit stores old versions but has no command to restore one. Each stored version is a plain file in `.syncit/blobs/`, named by the SHA-256 of its content. You can open or copy it directly.
+
+## Who changed what
+
+Every vault has a nickname, and each change it records carries that nickname to every other vault. `blame` shows which vault recorded the current version of each file:
+
+```sh
+syncit blame
+```
+
+```
+laptop notes.txt
+drive photos/2024/beach.jpg
+```
+
+Give it paths to look at only those files or folders. A file edited but not yet synced or snapshotted is still listed under whoever recorded it last.
+
+A vault's nickname starts as its folder's name, so `~/Documents` and `/Volumes/Backup/Documents` are both `Documents` until you rename one:
+
+```sh
+syncit config nickname laptop
+```
+
+The new name is used for changes recorded from then on; earlier ones keep the old name. A nickname has no spaces. It is only a label: it need not be unique, nothing checks it, and other vaults see it, so pick something you don't mind sharing.
 
 ## Ignoring files
 
@@ -310,7 +336,7 @@ syncit --json push /Volumes/Backup/Documents
 {"type":"summary","recorded":1,"added":0,"updated":1,"deleted":0,"conflicts":0,"pending":0,"skipped":0,"incomplete":0,"rejected":0}
 ```
 
-The types are `event`, `conflict`, `summary`, `setting` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
+The types are `event`, `conflict`, `summary`, `setting`, `blame` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
 
 ## Commands
 
@@ -325,8 +351,10 @@ The types are `event`, `conflict`, `summary`, `setting` and `info` on standard o
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | start holding those files here, and fetch them |
 | `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
-| `syncit config` | show this vault's setting |
+| `syncit blame [path]...` | show which vault recorded the current version of each file |
+| `syncit config` | show this vault's settings |
 | `syncit config local-history on\|off` | keep old versions inside the vault, or stop |
+| `syncit config nickname <name>` | name this vault in the changes it records |
 
 A `<vault>` is the path of any folder in the other vault.
 

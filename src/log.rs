@@ -12,6 +12,9 @@ use std::path::Path;
 pub struct Log {
     pub entries: BTreeMap<Id, Entry>,
     pub paths: BTreeMap<String, BTreeSet<Id>>,
+    /// For each entry, the nicknames of the segments holding it: the vaults
+    /// that recorded it. A label for people; no rule reads it.
+    pub authors: BTreeMap<Id, BTreeSet<String>>,
 }
 
 /// The result of the read rules for one path.
@@ -34,8 +37,13 @@ pub struct Loser {
 }
 
 impl Log {
-    pub fn add(&mut self, entry: Entry) {
+    /// Add an entry found in a segment written by the vault `nickname`.
+    pub fn add(&mut self, entry: Entry, nickname: &str) {
         let id = entry.id();
+        self.authors
+            .entry(id.clone())
+            .or_default()
+            .insert(nickname.to_string());
         self.paths
             .entry(entry.path.clone())
             .or_default()
@@ -51,11 +59,11 @@ impl Log {
         for file in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
             let file = file?.path();
             let name = file.file_name().unwrap_or_default().to_string_lossy();
-            let entries = fs::read(&file)
+            let segment = fs::read(&file)
                 .map_err(anyhow::Error::from)
                 .and_then(|bytes| segment::decode(&name, &bytes));
-            match entries {
-                Ok(entries) => entries.into_iter().for_each(|e| log.add(e)),
+            match segment {
+                Ok(s) => s.entries.into_iter().for_each(|e| log.add(e, &s.nickname)),
                 Err(e) if strict => bail!("corrupt segment {}: {e:#}", file.display()),
                 Err(e) => warn(opts, format!("ignoring segment {}: {e:#}", file.display())),
             }
@@ -139,7 +147,7 @@ mod tests {
 
     fn log(entries: &[&Entry]) -> Log {
         let mut log = Log::default();
-        entries.iter().for_each(|e| log.add((*e).clone()));
+        entries.iter().for_each(|e| log.add((*e).clone(), "v"));
         log
     }
 
@@ -191,8 +199,9 @@ mod tests {
 
         // The same edit in two vaults is one entry.
         let mut twice = log(&[&a, &b]);
-        twice.add(b.clone());
+        twice.add(b.clone(), "w");
         assert_eq!(twice.entries.len(), 2);
+        assert_eq!(twice.authors[&b.id()].len(), 2, "recorded by both");
         expect(&twice, &[&b], &b, &[], false);
 
         // Restored from backup at A, then edited, while A <- B <- C exists.
@@ -296,11 +305,9 @@ mod tests {
                 }
                 let mut log = Log::default();
                 for chunk in entries.chunks(size) {
-                    let (name, bytes) = segment::encode(chunk);
-                    segment::decode(&name, &bytes)
-                        .unwrap()
-                        .into_iter()
-                        .for_each(|e| log.add(e));
+                    let (name, bytes) = segment::encode("v", chunk);
+                    let entries = segment::decode(&name, &bytes).unwrap().entries;
+                    entries.into_iter().for_each(|e| log.add(e, "v"));
                 }
                 assert_eq!(states(&log), reference, "segments of {size}, turn {turn}");
             }
