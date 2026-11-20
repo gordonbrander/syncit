@@ -39,7 +39,6 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - Merging the contents of conflicting files.
 - A background daemon or file watcher; syncit runs when invoked.
 - Mapping a sub-folder of one vault onto a different path in another.
-- Encryption of blobs or logs.
 - A hub-only mode with a privileged central vault.
 
 ## Requirements
