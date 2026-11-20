@@ -296,7 +296,7 @@ A file entry's `mtime` is the file's mtime in milliseconds. Stat the file before
 
 The segment is written before the cache is saved. If the run stops between the two, the next scan sees the same difference and writes an entry with the same path, hash, mtime and parents, which is the same entry. For a deletion it writes a second tombstone beside the first, which is harmless: two tombstone heads are the same version.
 
-`scan` has a dry mode that returns what it would write and changes nothing. `status` uses it.
+`scan` has a dry mode that writes nothing: no segment, no config, no cache, and scratch files are left alone. The vault value in memory is brought up to date all the same, so what follows sees the state a real scan would leave. `status` and `--dry-run` (section 10) use it.
 
 ## 8. Blobs
 
@@ -442,6 +442,19 @@ Save the cache once, after all paths.
 
 Scanning precedes exchange, so entries are written from what each vault held before it learned anything new (`PRD.md`, "A sync run").
 
+### Dry run
+
+`sync`, `push`, `pull` and `move` take `--dry-run`. It is the same procedure with every write to either vault left out; the vault values in memory are updated as usual, so each step sees what the real run would see and prints the same lines. `Options.dry_run` carries the flag.
+
+- Scan: dry mode (section 7).
+- Exchange: a segment is validated and its entries added to the receiver's log in memory, not stored. What the other vault's dry scan recorded exists only in its memory, so the receiver also takes every entry of the other vault's in-memory log.
+- `retain()` does nothing.
+- Materialise: the safety checks run. Where the real run would fetch a blob, the dry run asks only whether a source file for it exists; it does not hash it, so a corrupt source reads as available. Nothing is written, renamed or deleted, and the cache is not saved. Cache rows are updated in memory.
+
+- `move` (section 11): every check runs, on the in-memory state, so a move that would be refused is refused with the same error. The config and cache are not saved and no file is removed; the `moved` events are printed.
+
+The output is the line `dry run: nothing is changed` (an `info` message), then exactly what the real run would print, summary included. The exit code is the real run's. Both vaults are locked and every changed file is hashed, as in a real run.
+
 ### A run with a store
 
 > **Milestone 9, not built.** Version 1 as built has no store: no `store` setting, no store argument, and local history is the only place old versions are kept. This subsection is the design to build.
@@ -470,13 +483,13 @@ The vault is found by walking up from the current directory to the first folder 
 |---|---|
 | `syncit init [dir]` | `dir` defaults to `.`. Error if `dir/.syncit` exists. Create `.syncit/` with `log/`, `blobs/`, `tmp/` and a config of `include: [""]`. Existing files are untouched and recorded by the first scan. |
 | `syncit clone <src> <dir>` | Find the vault root `R` above `src`; `sub` is `src` relative to `R` (`""` if equal). `dir` must not exist or must be empty. Create it as a vault with `include: [sub]`. Then run `pull` from `R`. Nothing about `R` is recorded. (`R4`) |
-| `syncit sync <vault>` | Section 10, both directions. (`R1`, `R12`) |
-| `syncit push <vault>` | Section 10; only the peer receives. (`R2`) |
-| `syncit pull <vault>` | Section 10; only the local vault receives. (`R2`) |
+| `syncit sync [--dry-run] <vault>` | Section 10, both directions. (`R1`, `R12`) |
+| `syncit push [--dry-run] <vault>` | Section 10; only the peer receives. (`R2`) |
+| `syncit pull [--dry-run] <vault>` | Section 10; only the local vault receives. (`R2`) |
 | `syncit snapshot` | Scan, `retain()`. No peer. (`R17`) |
 | `syncit status` | Dry scan and `resolve`. Writes nothing at all. (`R18`) |
 | `syncit get <path>...` | See below. (`R7`) |
-| `syncit move <path>... <vault>` | See below. (`R7`) |
+| `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
 | `syncit config [local-history on\|off]` | See below. (`R15`) |
 
 `get` and `move` take one or more paths. The steps below run once over all the paths together: `move` makes its checks for every file before removing anything, so it either moves them all or refuses.
@@ -525,7 +538,7 @@ How it is built:
 
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
-- `Options` holds the process-wide settings (today only `json`) and is passed to everything that can print.
+- `Options` holds the process-wide settings (`json`, and `dry_run` of section 10) and is passed to everything that can print or write.
 - What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status` and `config` have no summary.
 
 ### Messages
@@ -673,6 +686,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `cli_smoke` | the built binary runs every command and returns the documented exit codes; results are on stdout and warnings and errors on stderr; with `--json` every line of both streams is an object with a `type`, and the last stdout line of a run is the summary; `push` to a partial vault warns and `sync` does not |
 | `message_forms` | each message type's text form and JSON form; the summary's counts and exit code |
 | `push_counts_unwanted` | the files a push would not deliver: those the target neither holds nor wants, and those it ignores |
+| `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion and a conflict, and for `move`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` that would be refused is refused |
 
 ### Requirement coverage
 

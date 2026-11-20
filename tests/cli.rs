@@ -69,8 +69,13 @@ fn cli_smoke() {
     assert_eq!(fs::read_to_string(b.join("sub/f.txt")).unwrap(), "v1");
     fs::write(a.join("sub/f.txt"), "from a").unwrap();
     fs::write(b.join("sub/f.txt"), "from b").unwrap();
+    let (code, planned) = run(&b, &["sync", "--dry-run", "../a"]);
+    assert_eq!(code, 2, "{planned}");
+    assert_eq!(fs::read_to_string(a.join("sub/f.txt")).unwrap(), "from a");
+    assert_eq!(run(&b, &["status", "--dry-run"]).0, 1, "not for status");
     let (code, out) = run(&b, &["sync", "../a"]);
     assert_eq!(code, 2, "{out}");
+    assert_eq!(planned, format!("dry run: nothing is changed\n{out}"));
     assert!(out.contains("-> U sub/f.txt (conflict: sub/f-"), "{out}");
     assert_eq!(run(&b, &["move", "sub"]).0, 1, "no vault named");
     let (code, out) = run(&b, &["move", "sub", "../a"]);

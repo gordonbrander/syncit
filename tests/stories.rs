@@ -8,7 +8,10 @@ use std::time::{Duration, UNIX_EPOCH};
 use syncit::commands::{self as cmd};
 use syncit::output::{Options, Summary};
 
-const O: &Options = &Options { json: false };
+const O: &Options = &Options {
+    json: false,
+    dry_run: false,
+};
 use syncit::config::Config;
 use syncit::entry::sha256;
 use syncit::log::Log;
@@ -928,4 +931,74 @@ fn push_counts_unwanted() {
         ["d/tmp/t.txt", "f.txt", "music/m.mp3"]
     );
     assert!(cmd::unwanted(&vc, &va).is_empty());
+}
+
+/// Every file and folder under `dir`, `.syncit/` included, with its bytes.
+fn all(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+    for item in fs::read_dir(dir).unwrap() {
+        let path = item.unwrap().path();
+        if path.is_dir() {
+            all(&path, out);
+        } else {
+            out.insert(path.clone(), fs::read(&path).unwrap());
+        }
+    }
+    out.insert(dir.to_path_buf(), vec![]);
+}
+
+#[test]
+fn dry_run_matches_real_run() {
+    let dry = &Options {
+        json: false,
+        dry_run: true,
+    };
+    type Run = fn(&Options, &Path, &Path) -> anyhow::Result<Summary>;
+    for run in [cmd::sync as Run, cmd::push, cmd::pull] {
+        let files = [
+            ("notes.txt", "base"),
+            ("gone.txt", "x"),
+            ("d/both.txt", "base"),
+        ];
+        let (tmp, a, b) = pair(&files);
+        configure(&b, |c| c.keep_local_history = true);
+        put(&a, "notes.txt", "edited in a", 1);
+        put(&a, "new/in-a.txt", "new", 1);
+        fs::remove_file(a.join("gone.txt")).unwrap();
+        put(&b, "new-in-b.txt", "new", 1);
+        put(&a, "d/both.txt", "from a", 1);
+        put(&b, "d/both.txt", "from b", 2);
+
+        let listing = || {
+            let mut out = BTreeMap::new();
+            all(tmp.path(), &mut out);
+            out
+        };
+        let before = listing();
+        let planned = run(dry, &a, &b).unwrap();
+        assert!(before == listing(), "a dry run wrote something");
+        let done = run(O, &a, &b).unwrap();
+        assert!(before != listing());
+        assert!(done.conflicts == 1 && done.recorded == 6, "{done:?}");
+        assert_eq!(planned, done);
+    }
+
+    // `move`, both when it would go through and when it would be refused.
+    let (tmp, a, b) = pair(&[("keep.txt", "k"), ("big/one.bin", "1")]);
+    put(&a, "big/two.bin", "2", 1);
+    let c = tmp.path().join("c");
+    cmd::clone(O, &a.join("keep.txt"), &c).unwrap();
+    let listing = || {
+        let mut out = BTreeMap::new();
+        all(tmp.path(), &mut out);
+        out
+    };
+    let before = listing();
+    let refused = cmd::move_to(dry, &a, &paths(&["big"]), &c).unwrap_err();
+    assert!(refused.to_string().contains("does not want"), "{refused}");
+    let planned = cmd::move_to(dry, &a, &paths(&["big"]), &b).unwrap();
+    assert!(before == listing(), "a dry run wrote something");
+    let done = cmd::move_to(O, &a, &paths(&["big"]), &b).unwrap();
+    assert!(done.has("moved", "big/one.bin") && done.has("moved", "big/two.bin"));
+    assert!(!a.join("big").exists() && is(&b, "big/two.bin", "2"));
+    assert_eq!(planned, done);
 }

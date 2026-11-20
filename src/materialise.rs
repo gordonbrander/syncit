@@ -1,6 +1,6 @@
 //! Materialise: bring the working folder to the state the log describes.
 
-use crate::blobs::{fetch, hash_file};
+use crate::blobs::{available, fetch, hash_file};
 use crate::cache::{Row, mtime_ms};
 use crate::entry::Id;
 use crate::log::{Loser, PathState};
@@ -40,6 +40,9 @@ pub fn materialise(
             v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
         }
     }
+    if opts.dry_run {
+        return Ok(());
+    }
     v.cache.save(&v.root)
 }
 
@@ -71,13 +74,17 @@ fn one(
     let Some(h) = w.hash else {
         if row.is_some() {
             safe(v, p)?;
-            fs::remove_file(&file)?;
+            if !opts.dry_run {
+                fs::remove_file(&file)?;
+                prune(&v.root, &file);
+            }
             v.cache.rows.remove(p);
-            prune(&v.root, &file);
             v.event(opts, sum, "deleted", p, "");
         }
         return Ok(());
     };
+    // The copy name the local version was renamed to, if it was.
+    let mut renamed = None;
     if row.as_ref().is_none_or(|row| row.hash != h) {
         safe(v, p)?;
         // A local version that lost a conflict and has not been surfaced
@@ -94,18 +101,26 @@ fn one(
                 "the conflict copy name {c} is taken"
             );
         }
-        let Some(tmp) = stage(v, peer, p, &h, w.mtime)? else {
-            v.event(opts, sum, "pending", p, UNAVAILABLE);
-            return Ok(());
-        };
-        if let (Some(c), Some(row)) = (&copy, &row) {
-            if let Err(e) = fs::rename(&file, v.root.join(c)) {
-                let _ = fs::remove_file(&tmp);
-                return Err(e.into());
+        let (size, mtime) = if opts.dry_run {
+            if !available(v, peer, &h) {
+                v.event(opts, sum, "pending", p, UNAVAILABLE);
+                return Ok(());
             }
-            v.hint(&row.hash, v.root.join(c));
-        }
-        let (size, mtime) = place(v, &tmp, p, &h)?;
+            (0, w.mtime) // in memory only
+        } else {
+            let Some(tmp) = stage(v, peer, p, &h, w.mtime)? else {
+                v.event(opts, sum, "pending", p, UNAVAILABLE);
+                return Ok(());
+            };
+            if let (Some(c), Some(row)) = (&copy, &row) {
+                if let Err(e) = fs::rename(&file, v.root.join(c)) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e.into());
+                }
+                v.hint(&row.hash, v.root.join(c));
+            }
+            place(v, &tmp, p, &h)?
+        };
         v.cache.rows.insert(
             p.to_string(),
             Row {
@@ -122,8 +137,9 @@ fn one(
             p,
             "",
         );
+        renamed = copy;
     }
-    copies_and_base(opts, v, peer, p, &h, heads, &losers, sum);
+    copies_and_base(opts, v, peer, p, &h, heads, &losers, renamed, sum);
     Ok(())
 }
 
@@ -138,13 +154,14 @@ fn copies_and_base(
     h: &str,
     heads: Vec<Id>,
     losers: &[Loser],
+    renamed: Option<String>,
     sum: &mut Summary,
 ) {
     let mut visible = vec![h];
     for l in losers {
         let c = copy_name(p, &l.hash);
         let file = v.root.join(&c);
-        let surfaced = if v.log.paths.contains_key(&c) {
+        let surfaced = if v.log.paths.contains_key(&c) || renamed.as_ref() == Some(&c) {
             true // surfaced before; a copy the user deleted stays deleted
         } else if file.symlink_metadata().is_ok() {
             let same = hash_file(&file).is_ok_and(|x| x == l.hash);
@@ -153,12 +170,12 @@ fn copies_and_base(
             }
             same
         } else {
-            match write_copy(v, peer, &c, l) {
+            match write_copy(opts, v, peer, &c, l) {
                 Ok(true) => v.event(opts, sum, "copied", &c, ""),
                 Ok(false) => v.event(opts, sum, "pending", &c, UNAVAILABLE),
                 Err(e) => v.event(opts, sum, "skipped", &c, &format!("{e:#}")),
             }
-            file.symlink_metadata().is_ok()
+            opts.dry_run || file.symlink_metadata().is_ok()
         };
         if surfaced {
             visible.push(&l.hash);
@@ -178,9 +195,18 @@ fn copies_and_base(
 
 /// A conflict copy is an ordinary file with no cache row: the next scan
 /// records it.
-fn write_copy(v: &mut Vault, peer: Option<&Vault>, c: &str, l: &Loser) -> Result<bool> {
+fn write_copy(
+    opts: &Options,
+    v: &mut Vault,
+    peer: Option<&Vault>,
+    c: &str,
+    l: &Loser,
+) -> Result<bool> {
     ensure!(!v.skips(c), "the conflict copy name is ignored");
     no_symlinked_parent(v, c)?;
+    if opts.dry_run {
+        return Ok(available(v, peer, &l.hash));
+    }
     let Some(tmp) = stage(v, peer, c, &l.hash, l.mtime)? else {
         return Ok(false);
     };

@@ -9,6 +9,8 @@ use std::fmt::{self, Display};
 pub struct Options {
     /// Print JSON Lines instead of text.
     pub json: bool,
+    /// Run in full but write nothing to either vault.
+    pub dry_run: bool,
 }
 
 /// Something that happened to one file.

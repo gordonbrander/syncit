@@ -192,6 +192,22 @@ M notes.txt
 | `! … (incomplete)` | an earlier sync was interrupted; sync again |
 | `U … (conflict: …)` | both versions are on disk, waiting for you |
 
+`status` looks only at this folder. To see what a sync with another folder would do, in both directions, add `--dry-run`. It prints what the sync would print and changes nothing in either folder:
+
+```sh
+syncit sync --dry-run /Volumes/Backup/Documents
+```
+
+```
+dry run: nothing is changed
+<- M notes.txt
+<- D old.txt
+-> A todo.txt
+recorded 3, added 1, updated 1, deleted 1, conflicts 0, pending 0, skipped 0
+```
+
+`push`, `pull` and `move` take `--dry-run` too. For `move` it shows which files would be removed here, or the error if the move would be refused.
+
 ## Reading the output
 
 Every line about a file has a letter, then the file's path in its vault. When a command involves another vault, the line starts with an arrow: `->` for a file in your vault, `<-` for a file in the other one. `status` and `snapshot` look only at your vault and print no arrow.
@@ -302,13 +318,13 @@ The types are `event`, `conflict`, `summary`, `setting` and `info` on standard o
 |---|---|
 | `syncit init [dir]` | make a folder a vault |
 | `syncit clone <vault or sub-folder> <dir>` | make a new vault from another, or from part of one |
-| `syncit sync <vault>` | sync both ways with another vault |
-| `syncit push <vault>` | send changes only |
-| `syncit pull <vault>` | receive changes only |
+| `syncit sync <vault>` | sync both ways with another vault; `--dry-run` only shows what would happen |
+| `syncit push <vault>` | send changes only; takes `--dry-run` |
+| `syncit pull <vault>` | receive changes only; takes `--dry-run` |
 | `syncit status` | show what is waiting; change nothing |
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | start holding those files here, and fetch them |
-| `syncit move <path>... <vault>` | send these files to another vault, then remove them here |
+| `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
 | `syncit config` | show this vault's setting |
 | `syncit config local-history on\|off` | keep old versions inside the vault, or stop |
 

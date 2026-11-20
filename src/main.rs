@@ -25,11 +25,26 @@ enum Command {
     /// Create a vault from another vault, or from a sub-folder of one
     Clone { src: PathBuf, dir: PathBuf },
     /// Sync both ways with another vault
-    Sync { vault: PathBuf },
+    Sync {
+        vault: PathBuf,
+        /// Show what would happen; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Send this vault's changes to another vault
-    Push { vault: PathBuf },
+    Push {
+        vault: PathBuf,
+        /// Show what would happen; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Take another vault's changes into this one
-    Pull { vault: PathBuf },
+    Pull {
+        vault: PathBuf,
+        /// Show what would happen; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Record the folder's current state without syncing
     Snapshot,
     /// Show unrecorded changes, pending files and open conflicts
@@ -44,6 +59,9 @@ enum Command {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         vault: PathBuf,
+        /// Show what would happen; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show this vault's settings, or change one
     Config {
@@ -67,18 +85,30 @@ fn main() {
         exit(if e.use_stderr() { 1 } else { 0 })
     });
     let cwd = Path::new(".");
-    let opts = &Options { json: cli.json };
+    let dry_run = match cli.command {
+        Command::Sync { dry_run, .. }
+        | Command::Push { dry_run, .. }
+        | Command::Pull { dry_run, .. }
+        | Command::Move { dry_run, .. } => dry_run,
+        _ => false,
+    };
+    let opts = &Options {
+        json: cli.json,
+        dry_run,
+    };
     // Commands that run a sync return a summary, printed last.
     let result = match cli.command {
         Command::Init { dir } => commands::init(opts, &dir).map(|_| None),
         Command::Clone { src, dir } => commands::clone(opts, &src, &dir).map(Some),
-        Command::Sync { vault } => commands::sync(opts, cwd, &vault).map(Some),
-        Command::Push { vault } => commands::push(opts, cwd, &vault).map(Some),
-        Command::Pull { vault } => commands::pull(opts, cwd, &vault).map(Some),
+        Command::Sync { vault, .. } => commands::sync(opts, cwd, &vault).map(Some),
+        Command::Push { vault, .. } => commands::push(opts, cwd, &vault).map(Some),
+        Command::Pull { vault, .. } => commands::pull(opts, cwd, &vault).map(Some),
         Command::Snapshot => commands::snapshot(opts, cwd).map(Some),
         Command::Status => commands::status(opts, cwd).map(|_| None),
         Command::Get { paths } => commands::get(opts, cwd, &paths).map(Some),
-        Command::Move { paths, vault } => commands::move_to(opts, cwd, &paths, &vault).map(Some),
+        Command::Move { paths, vault, .. } => {
+            commands::move_to(opts, cwd, &paths, &vault).map(Some)
+        }
         Command::Config { setting } => {
             let change = setting.map(|SettingArg::LocalHistory { value }| value == "on");
             commands::config(opts, cwd, change).map(|_| None)

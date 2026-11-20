@@ -1,6 +1,7 @@
 //! Blobs: file contents addressed by SHA-256, and where to find them.
 
 use crate::entry::hex;
+use crate::output::Options;
 use crate::vault::{Vault, unique};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -44,12 +45,7 @@ fn copy_verified(src: &Path, dest: &Path, hash: &str) -> io::Result<bool> {
 /// bytes: this vault's files, its stored blobs, the peer's files, the peer's
 /// stored blobs. False means no source has it, which is not an error.
 pub fn fetch(v: &Vault, peer: Option<&Vault>, hash: &str, dest: &Path) -> io::Result<bool> {
-    let mut sources: Vec<PathBuf> = vec![];
-    for vault in [Some(v), peer].into_iter().flatten() {
-        sources.extend(vault.hints.get(hash).into_iter().flatten().cloned());
-        sources.push(vault.dot().join("blobs").join(hash));
-    }
-    for src in sources {
+    for src in sources(v, peer, hash) {
         if copy_verified(&src, dest, hash)? {
             return Ok(true);
         }
@@ -57,10 +53,26 @@ pub fn fetch(v: &Vault, peer: Option<&Vault>, hash: &str, dest: &Path) -> io::Re
     Ok(false)
 }
 
+fn sources(v: &Vault, peer: Option<&Vault>, hash: &str) -> Vec<PathBuf> {
+    let mut sources: Vec<PathBuf> = vec![];
+    for vault in [Some(v), peer].into_iter().flatten() {
+        sources.extend(vault.hints.get(hash).into_iter().flatten().cloned());
+        sources.push(vault.dot().join("blobs").join(hash));
+    }
+    sources
+}
+
+/// Whether `fetch` would find the blob, for a dry run.
+// ponytail: checks that a source exists, not its bytes; a corrupt source
+// reads as available here and as pending in the real run. Hash it if that matters.
+pub fn available(v: &Vault, peer: Option<&Vault>, hash: &str) -> bool {
+    sources(v, peer, hash).iter().any(|src| src.is_file())
+}
+
 /// Collect into `.syncit/blobs/` every version in the log that a source can
-/// supply, if this vault keeps local history.
-pub fn retain(v: &Vault, peer: Option<&Vault>) -> Result<()> {
-    if !v.config.keep_local_history {
+/// supply, if this vault keeps local history. A dry run collects nothing.
+pub fn retain(opts: &Options, v: &Vault, peer: Option<&Vault>) -> Result<()> {
+    if !v.config.keep_local_history || opts.dry_run {
         return Ok(());
     }
     let blobs = v.dot().join("blobs");

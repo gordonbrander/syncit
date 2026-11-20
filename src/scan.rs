@@ -22,7 +22,8 @@ pub struct Scan {
     pub skipped: Vec<String>,
 }
 
-/// Scan the vault. A dry scan returns what it would write and changes nothing.
+/// Scan the vault. A dry scan writes nothing: the vault value is brought up
+/// to date in memory only.
 pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let (mut files, mut odd) = (BTreeSet::new(), 0);
@@ -123,22 +124,21 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     unwanted.sort_by_key(|p| p.len());
     unwanted.iter().for_each(|p| config.auto_include(p));
 
-    if dry {
-        return Ok(out);
-    }
     // Segment, then config, then cache: stopped in between, the next scan
     // sees the same difference and writes the same entries again.
-    if !out.entries.is_empty() {
+    if !out.entries.is_empty() && !dry {
         let (name, bytes) = segment::encode(&out.entries);
         write_atomic(&v.root, &v.dot().join("log").join(name), &bytes)?;
-        out.entries.iter().for_each(|e| v.log.add(e.clone()));
     }
-    if config != v.config {
+    out.entries.iter().for_each(|e| v.log.add(e.clone()));
+    if config != v.config && !dry {
         config.save(&v.root)?;
-        v.config = config;
     }
+    v.config = config;
     cache.scanned = now;
-    cache.save(&v.root)?;
+    if !dry {
+        cache.save(&v.root)?;
+    }
     v.cache = cache;
     Ok(out)
 }

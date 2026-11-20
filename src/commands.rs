@@ -91,10 +91,19 @@ fn run(opts: &Options, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
     let mut a = Vault::open(opts, cwd, true)?;
     let mut b = other(opts, &mut a, peer)?;
     let mut sum = Summary::default();
+    announce(opts);
     record(opts, &mut a, Some(&b), &mut sum)?;
     record(opts, &mut b, Some(&a), &mut sum)?;
     exchange(opts, &mut a, &mut b, mode, &mut sum)?;
     Ok(sum)
+}
+
+/// Say that this is a dry run, if it is.
+fn announce(opts: &Options) {
+    if opts.dry_run {
+        let message = "dry run: nothing is changed".to_string();
+        print_stdout(&Message::Info { message }, opts.json);
+    }
 }
 
 /// The files `from` holds that `to` would not take.
@@ -143,10 +152,10 @@ fn exchange(
     // Both retain before either materialises, so that a version is saved
     // before it is replaced.
     if to_b {
-        retain(b, Some(a))?;
+        retain(opts, b, Some(a))?;
     }
     if to_a {
-        retain(a, Some(b))?;
+        retain(opts, a, Some(b))?;
     }
     if to_b {
         materialise(opts, b, Some(a), sum)?;
@@ -168,7 +177,7 @@ fn exchange(
 
 /// Scan, then retain blobs for what the scan recorded.
 fn record(opts: &Options, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary) -> Result<()> {
-    let scanned = scan(opts, v, false)?;
+    let scanned = scan(opts, v, opts.dry_run)?;
     sum.recorded += scanned.entries.len();
     for path in &scanned.skipped {
         v.event(
@@ -179,7 +188,7 @@ fn record(opts: &Options, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary
             "changed while it was being read",
         );
     }
-    retain(v, peer)
+    retain(opts, v, peer)
 }
 
 /// Take every segment the other vault has and this one lacks. A segment is
@@ -195,11 +204,18 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
         let read = fs::read(file.path()).map_err(anyhow::Error::from);
         match read.and_then(|bytes| Ok((segment::decode(&name, &bytes)?, bytes))) {
             Ok((entries, bytes)) => {
-                write_atomic(&v.root, &dir.join(&name), &bytes)?;
+                if !opts.dry_run {
+                    write_atomic(&v.root, &dir.join(&name), &bytes)?;
+                }
                 entries.into_iter().for_each(|e| v.log.add(e));
             }
             Err(e) => v.event(opts, sum, "rejected", "", &format!("segment {name}: {e:#}")),
         }
+    }
+    // What a dry scan of `from` recorded is in its memory, not in a segment.
+    if opts.dry_run {
+        let entries = from.log.entries.values();
+        entries.for_each(|e| v.log.add(e.clone()));
     }
     Ok(())
 }
@@ -328,6 +344,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     let prefixes = prefixes(&v.root, cwd, paths)?;
     let mut t = other(opts, &mut v, target)?;
     let mut sum = Summary::default();
+    announce(opts);
     record(opts, &mut v, Some(&t), &mut sum)?;
     record(opts, &mut t, Some(&v), &mut sum)?;
 
@@ -375,14 +392,18 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
         v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
         v.config.exclude.push(prefix);
     }
-    v.config.save(&v.root)?;
+    if !opts.dry_run {
+        v.config.save(&v.root)?;
+    }
     // Rows go before files: a file with no row is held again after the next
     // scan, but a row with no file would be recorded as a deletion.
     let rows: Vec<_> = held
         .into_iter()
         .filter_map(|path| v.cache.rows.remove_entry(&path))
         .collect();
-    v.cache.save(&v.root)?;
+    if !opts.dry_run {
+        v.cache.save(&v.root)?;
+    }
     for (path, row) in rows {
         let file = v.root.join(&path);
         if !v.cache.matches(&row, &file) {
@@ -395,8 +416,10 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
             );
             continue;
         }
-        fs::remove_file(&file)?;
-        prune(&v.root, &file);
+        if !opts.dry_run {
+            fs::remove_file(&file)?;
+            prune(&v.root, &file);
+        }
         v.event(opts, &mut sum, "moved", &path, "");
     }
     Ok(sum)

@@ -242,6 +242,8 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 | `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
 | `syncit config` | Show or change `keep_local_history` and `store`. |
 
+`sync`, `push`, `pull` and `move` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
+
 Every command prints as it works: results on stdout, one line per file, and warnings and errors on stderr. `--json` makes every line a JSON object, for scripts.
 
 A vault records no other vault. Every command that involves a second vault names it, so there is no default peer and no hierarchy, and nothing breaks when a folder moves.
