@@ -2,9 +2,9 @@
 
 use crate::blobs::{fetch, hash_file};
 use crate::cache::{Row, mtime_ms};
-use crate::commands::Event;
 use crate::entry::Id;
 use crate::log::{Loser, PathState};
+use crate::output::{Options, Summary};
 use crate::vault::{TMP_PREFIX, Vault, unique};
 use anyhow::{Context, Result, bail, ensure};
 use std::fs::{self, File};
@@ -26,23 +26,34 @@ pub fn copy_name(path: &str, hash: &str) -> String {
 }
 
 /// Visit every path in the log. The peer is only a blob source.
-pub fn materialise(v: &mut Vault, peer: Option<&Vault>, events: &mut Vec<Event>) -> Result<()> {
+pub fn materialise(
+    opts: &Options,
+    v: &mut Vault,
+    peer: Option<&Vault>,
+    sum: &mut Summary,
+) -> Result<()> {
     let paths: Vec<String> = v.log.paths.keys().cloned().collect();
     for path in paths {
         // A path that fails a safety check or hits a filesystem error is
         // left as it was, and the run goes on.
-        if let Err(e) = one(v, peer, &path, events) {
-            events.push(v.event("skipped", &path, &format!("{e:#}")));
+        if let Err(e) = one(opts, v, peer, &path, sum) {
+            v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
         }
     }
     v.cache.save(&v.root)
 }
 
-fn one(v: &mut Vault, peer: Option<&Vault>, p: &str, events: &mut Vec<Event>) -> Result<()> {
+fn one(
+    opts: &Options,
+    v: &mut Vault,
+    peer: Option<&Vault>,
+    p: &str,
+    sum: &mut Summary,
+) -> Result<()> {
     let (heads, winner, losers) = match v.log.resolve(p) {
         PathState::Absent => return Ok(()),
         PathState::Incomplete => {
-            events.push(v.event("incomplete", p, "waiting for missing history"));
+            v.event(opts, sum, "incomplete", p, "waiting for missing history");
             return Ok(());
         }
         PathState::Resolved {
@@ -53,7 +64,7 @@ fn one(v: &mut Vault, peer: Option<&Vault>, p: &str, events: &mut Vec<Event>) ->
         } => (heads, winner, losers),
     };
     let row = v.cache.rows.get(p).cloned();
-    if (row.is_none() && !v.config.wanted(p)) || v.skips(p) {
+    if v.declines(p) {
         return Ok(());
     }
     let (file, w) = (v.root.join(p), v.log.entries[&winner].clone());
@@ -63,7 +74,7 @@ fn one(v: &mut Vault, peer: Option<&Vault>, p: &str, events: &mut Vec<Event>) ->
             fs::remove_file(&file)?;
             v.cache.rows.remove(p);
             prune(&v.root, &file);
-            events.push(v.event("deleted", p, ""));
+            v.event(opts, sum, "deleted", p, "");
         }
         return Ok(());
     };
@@ -84,7 +95,7 @@ fn one(v: &mut Vault, peer: Option<&Vault>, p: &str, events: &mut Vec<Event>) ->
             );
         }
         let Some(tmp) = stage(v, peer, p, &h, w.mtime)? else {
-            events.push(v.event("pending", p, UNAVAILABLE));
+            v.event(opts, sum, "pending", p, UNAVAILABLE);
             return Ok(());
         };
         if let (Some(c), Some(row)) = (&copy, &row) {
@@ -104,22 +115,30 @@ fn one(v: &mut Vault, peer: Option<&Vault>, p: &str, events: &mut Vec<Event>) ->
                 base: vec![],
             },
         );
-        events.push(v.event(if row.is_some() { "updated" } else { "added" }, p, ""));
+        v.event(
+            opts,
+            sum,
+            if row.is_some() { "updated" } else { "added" },
+            p,
+            "",
+        );
     }
-    copies_and_base(v, peer, p, &h, heads, &losers, events);
+    copies_and_base(opts, v, peer, p, &h, heads, &losers, sum);
     Ok(())
 }
 
 /// The winner's content is the file at `p`: write the conflict copies and
 /// set the row's base to the heads now visible in this vault.
+#[allow(clippy::too_many_arguments)]
 fn copies_and_base(
+    opts: &Options,
     v: &mut Vault,
     peer: Option<&Vault>,
     p: &str,
     h: &str,
     heads: Vec<Id>,
     losers: &[Loser],
-    events: &mut Vec<Event>,
+    sum: &mut Summary,
 ) {
     let mut visible = vec![h];
     for l in losers {
@@ -130,14 +149,14 @@ fn copies_and_base(
         } else if file.symlink_metadata().is_ok() {
             let same = hash_file(&file).is_ok_and(|x| x == l.hash);
             if !same {
-                events.push(v.event("skipped", &c, "the conflict copy name is taken"));
+                v.event(opts, sum, "skipped", &c, "the conflict copy name is taken");
             }
             same
         } else {
             match write_copy(v, peer, &c, l) {
-                Ok(true) => events.push(v.event("copied", &c, "")),
-                Ok(false) => events.push(v.event("pending", &c, UNAVAILABLE)),
-                Err(e) => events.push(v.event("skipped", &c, &format!("{e:#}"))),
+                Ok(true) => v.event(opts, sum, "copied", &c, ""),
+                Ok(false) => v.event(opts, sum, "pending", &c, UNAVAILABLE),
+                Err(e) => v.event(opts, sum, "skipped", &c, &format!("{e:#}")),
             }
             file.symlink_metadata().is_ok()
         };

@@ -1,12 +1,16 @@
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use syncit::commands::{self, Setting};
+use syncit::commands;
+use syncit::output::{Message, Options, print_stderr, print_stdout};
 
 /// Two-way sync and partial replication between folders.
 #[derive(Parser)]
 #[command(name = "syncit", version)]
 struct Cli {
+    /// Print JSON Lines instead of text
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -35,16 +39,11 @@ enum Command {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
-    /// Stop holding paths in this vault, without deleting them elsewhere
-    Drop {
-        /// A vault that holds the files, so that dropping them is safe
-        #[arg(long, value_name = "VAULT")]
-        check: Option<PathBuf>,
-        /// Drop even when no other copy of the content is known
-        #[arg(long)]
-        force: bool,
+    /// Move files to another vault: send them, check they arrived, remove them here
+    Move {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        vault: PathBuf,
     },
     /// Show this vault's settings, or change one
     Config {
@@ -60,8 +59,6 @@ enum SettingArg {
         #[arg(value_parser = ["on", "off"])]
         value: String,
     },
-    /// Send old versions to a shared folder: a path, or `none`
-    Store { path: PathBuf },
 }
 
 fn main() {
@@ -70,36 +67,33 @@ fn main() {
         exit(if e.use_stderr() { 1 } else { 0 })
     });
     let cwd = Path::new(".");
+    let opts = &Options { json: cli.json };
+    // Commands that run a sync return a summary, printed last.
     let result = match cli.command {
-        Command::Init { dir } => commands::init(&dir),
-        Command::Clone { src, dir } => commands::clone(&src, &dir),
-        Command::Sync { vault } => commands::sync(cwd, &vault),
-        Command::Push { vault } => commands::push(cwd, &vault),
-        Command::Pull { vault } => commands::pull(cwd, &vault),
-        Command::Snapshot => commands::snapshot(cwd),
-        Command::Status => commands::status(cwd),
-        Command::Get { paths } => commands::get(cwd, &paths),
-        Command::Drop {
-            check,
-            force,
-            paths,
-        } => commands::drop(cwd, &paths, check.as_deref(), force),
-        Command::Config { setting } => commands::config(
-            cwd,
-            setting.map(|setting| match setting {
-                SettingArg::LocalHistory { value } => Setting::LocalHistory(value == "on"),
-                SettingArg::Store { path } if path.as_os_str() == "none" => Setting::Store(None),
-                SettingArg::Store { path } => Setting::Store(Some(path)),
-            }),
-        ),
+        Command::Init { dir } => commands::init(opts, &dir).map(|_| None),
+        Command::Clone { src, dir } => commands::clone(opts, &src, &dir).map(Some),
+        Command::Sync { vault } => commands::sync(opts, cwd, &vault).map(Some),
+        Command::Push { vault } => commands::push(opts, cwd, &vault).map(Some),
+        Command::Pull { vault } => commands::pull(opts, cwd, &vault).map(Some),
+        Command::Snapshot => commands::snapshot(opts, cwd).map(Some),
+        Command::Status => commands::status(opts, cwd).map(|_| None),
+        Command::Get { paths } => commands::get(opts, cwd, &paths).map(Some),
+        Command::Move { paths, vault } => commands::move_to(opts, cwd, &paths, &vault).map(Some),
+        Command::Config { setting } => {
+            let change = setting.map(|SettingArg::LocalHistory { value }| value == "on");
+            commands::config(opts, cwd, change).map(|_| None)
+        }
     };
     match result {
-        Ok(report) => {
-            print!("{report}");
-            exit(report.exit_code());
+        Ok(None) => {}
+        Ok(Some(summary)) => {
+            let code = summary.exit_code();
+            print_stdout(&Message::Summary(summary), opts.json);
+            exit(code);
         }
         Err(e) => {
-            eprintln!("error: {e:#}");
+            let message = format!("{e:#}");
+            print_stderr(&Message::Error { message }, opts.json);
             exit(1);
         }
     }

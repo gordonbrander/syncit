@@ -1,9 +1,9 @@
 //! A vault: a folder with `.syncit/`, opened and locked.
 
 use crate::cache::Cache;
-use crate::commands::Event;
 use crate::config::{Config, prefix_matches};
 use crate::log::Log;
+use crate::output::{Event, Message, Options, Summary, print_stdout};
 use anyhow::{Context, Result, anyhow, ensure};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -111,7 +111,7 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
 impl Vault {
     /// Find, lock and load the vault at or above `start`. `strict` is for the
     /// vault a command runs in; a peer's log is read leniently.
-    pub fn open(start: &Path, strict: bool) -> Result<Vault> {
+    pub fn open(opts: &Options, start: &Path, strict: bool) -> Result<Vault> {
         let root = find_root(start)?;
         let dot = root.join(".syncit");
         let lock = File::options()
@@ -132,7 +132,7 @@ impl Vault {
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
-            log: Log::load(&dot.join("log"), strict)?,
+            log: Log::load(opts, &dot.join("log"), strict)?,
             hints: HashMap::new(),
             root,
             config,
@@ -154,26 +154,33 @@ impl Vault {
         self.root.join(".syncit")
     }
 
-    /// The blob store, if one is set and reachable.
-    pub fn store(&self) -> Option<PathBuf> {
-        self.config
-            .store
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|r| r.is_dir())
-    }
-
     pub fn hint(&mut self, hash: &str, file: PathBuf) {
         self.hints.entry(hash.to_string()).or_default().push(file);
     }
 
-    pub fn event(&self, kind: &'static str, path: &str, note: &str) -> Event {
-        Event {
-            vault: self.root.clone(),
+    /// Print what happened to one file, and count it.
+    pub fn event(
+        &self,
+        opts: &Options,
+        sum: &mut Summary,
+        kind: &'static str,
+        path: &str,
+        note: &str,
+    ) {
+        let event = Event {
             kind,
+            vault: self.root.display().to_string(),
             path: path.to_string(),
             note: note.to_string(),
-        }
+        };
+        print_stdout(&Message::Event(event.clone()), opts.json);
+        sum.record(event);
+    }
+
+    /// Whether this vault would not take a new file at this path: it neither
+    /// holds nor wants it, or it skips it.
+    pub fn declines(&self, path: &str) -> bool {
+        (!self.cache.rows.contains_key(path) && !self.config.wanted(path)) || self.skips(path)
     }
 
     /// Whether a scan would not look at this path: it is ignored, belongs to a

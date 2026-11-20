@@ -1,6 +1,7 @@
 //! The log: a set of entries, and the read rules over it (CRDT.md).
 
 use crate::entry::{Entry, Id};
+use crate::output::{Options, warn};
 use crate::segment;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,7 +46,7 @@ impl Log {
     /// Read every segment in `dir`. A bad segment is an error when `strict`
     /// (this vault's own log) and is ignored with a warning otherwise (a
     /// peer's log, which is not trusted).
-    pub fn load(dir: &Path, strict: bool) -> Result<Log> {
+    pub fn load(opts: &Options, dir: &Path, strict: bool) -> Result<Log> {
         let mut log = Log::default();
         for file in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
             let file = file?.path();
@@ -56,7 +57,7 @@ impl Log {
             match entries {
                 Ok(entries) => entries.into_iter().for_each(|e| log.add(e)),
                 Err(e) if strict => bail!("corrupt segment {}: {e:#}", file.display()),
-                Err(e) => eprintln!("warning: ignoring segment {}: {e:#}", file.display()),
+                Err(e) => warn(opts, format!("ignoring segment {}: {e:#}", file.display())),
             }
         }
         Ok(log)

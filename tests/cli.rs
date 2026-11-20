@@ -18,7 +18,7 @@ fn names(dir: &Path) -> BTreeSet<String> {
 #[test]
 fn cli_smoke() {
     let tmp = TempDir::new().unwrap();
-    let run = |dir: &Path, args: &[&str]| {
+    let both = |dir: &Path, args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_syncit"))
             .args(args)
             .current_dir(dir)
@@ -27,7 +27,13 @@ fn cli_smoke() {
         (
             out.status.code().unwrap(),
             String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
         )
+    };
+    // Stdout only, for the many checks that need nothing else.
+    let run = |dir: &Path, args: &[&str]| {
+        let (code, out, _) = both(dir, args);
+        (code, out)
     };
     let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
     fs::create_dir_all(a.join("sub")).unwrap();
@@ -38,7 +44,10 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["init"]).0, 1, "already a vault");
     let (code, out) = run(&a, &["status"]);
     assert_eq!(code, 0);
-    assert!(out.contains("  new: sub/f.txt"), "{out}");
+    assert!(
+        out.starts_with("? ") && out.ends_with("/a/sub/f.txt\n"),
+        "{out}"
+    );
     assert!(
         names(&a.join(".syncit/log")).is_empty(),
         "status writes nothing"
@@ -51,11 +60,12 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["sync"]).0, 1, "no vault named");
     assert_eq!(run(&a, &["config", "local-history", "maybe"]).0, 1);
     let (code, out) = run(&a.join("sub"), &["config", "local-history", "on"]);
+    assert_eq!((code, out.as_str()), (0, "local-history: on\n"));
     assert_eq!(
-        (code, out.as_str()),
-        (0, "local-history: on\nstore: none\n")
+        run(&a, &["config", "store", "none"]).0,
+        1,
+        "no such setting"
     );
-    assert_eq!(run(&a, &["config", "store", "none"]).0, 0);
     assert_eq!(run(&a, &["config"]).1, out);
     assert_eq!(run(&a, &["frobnicate"]).0, 1, "bad arguments");
     assert_eq!(run(tmp.path(), &["clone", "a/sub", "b"]).0, 0);
@@ -64,9 +74,14 @@ fn cli_smoke() {
     fs::write(b.join("sub/f.txt"), "from b").unwrap();
     let (code, out) = run(&b, &["sync", "../a"]);
     assert_eq!(code, 2, "{out}");
-    assert!(out.contains("conflict: sub/f.txt"), "{out}");
-    assert_eq!(run(&b, &["drop", "sub"]).0, 1, "no other copy is known");
-    assert_eq!(run(&b, &["drop", "--check", "../a", "sub"]).0, 0);
+    assert!(out.contains("/sub/f.txt (conflict: sub/f-"), "{out}");
+    assert_eq!(run(&b, &["move", "sub"]).0, 1, "no vault named");
+    let (code, out) = run(&b, &["move", "sub", "../a"]);
+    assert_eq!(code, 2, "moved; the conflict is still open: {out}");
+    assert!(
+        out.contains("\nR ") && out.contains("/b/sub/f.txt\n"),
+        "{out}"
+    );
     assert!(!b.join("sub").exists());
     assert_eq!(
         run(&b, &["get", "../a/sub"]).0,
@@ -76,10 +91,54 @@ fn cli_smoke() {
     // Which edit won depends on the two mtimes, written a moment apart.
     assert!(b.join("sub/f.txt").exists());
 
+    // Results on stdout, warnings and errors on stderr. c holds only d/ of a.
+    fs::create_dir(a.join("d")).unwrap();
+    fs::write(a.join("d/g.txt"), "g").unwrap();
+    std::os::unix::fs::symlink("g.txt", a.join("d/link")).unwrap();
+    assert_eq!(run(tmp.path(), &["clone", "a/d", "c"]).0, 0);
+    let (code, out, err) = both(&a, &["push", "../c"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("warning: skipped 1 symbolic links"), "{err}");
+    assert!(
+        err.contains("/c does not want 2 files (sub/); they were not copied"),
+        "{err}"
+    );
+    assert!(
+        !out.contains("warning") && out.starts_with("recorded 0,"),
+        "{out}"
+    );
+    let (_, _, err) = both(&a, &["sync", "../c"]);
+    assert!(!err.contains("does not want"), "only push says so: {err}");
+    let (code, out, err) = both(&a, &["status", "--json"]);
+    assert!(
+        code == 0 && out.starts_with(r#"{"type":"conflict","#),
+        "{out}{err}"
+    );
+
+    // --json: every line of both streams is an object with a type.
+    fs::write(a.join("d/g.txt"), "g2").unwrap();
+    let (code, out, err) = both(&a, &["--json", "push", "../c"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let types = |text: &str| -> Vec<String> {
+        let kind = |line| {
+            let value: serde_json::Value = serde_json::from_str(line).expect(line);
+            value["type"].as_str().expect(line).to_string()
+        };
+        text.lines().map(kind).collect()
+    };
+    assert_eq!(types(&out), ["event", "summary"], "{out}");
+    assert_eq!(types(&err), ["warning", "warning"], "{err}");
+    assert!(out.contains(r#""kind":"updated""#) && out.contains(r#""path":"d/g.txt""#));
+    let (code, out, err) = both(&a, &["--json", "sync", "../nowhere"]);
+    assert_eq!((code, out.as_str()), (1, ""));
+    assert_eq!(types(&err), ["error"], "{err}");
+    let (code, _, err) = both(&a, &["sync", "../nowhere"]);
+    assert!(code == 1 && err.starts_with("error: "), "{err}");
+
     let (code, help) = run(&a, &["--help"]);
     assert_eq!(code, 0);
     for command in [
-        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "drop", "config",
+        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "config",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),

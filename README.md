@@ -41,11 +41,12 @@ syncit clone ~/Documents /Volumes/Backup/Documents
 ```
 
 ```
-/Volumes/Backup/Documents:
-  added: letters/anna.txt
-  added: notes.txt
+A /Volumes/Backup/Documents/letters/anna.txt
+A /Volumes/Backup/Documents/notes.txt
 recorded 2, added 2, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
 ```
+
+Each line is one file: `A` added, `M` modified, `D` deleted. The last line sums up the run.
 
 Now work in either folder. When you want them to agree, go into one and name the other:
 
@@ -55,10 +56,8 @@ syncit sync /Volumes/Backup/Documents
 ```
 
 ```
-/Volumes/Backup/Documents:
-  updated: notes.txt
-/Users/me/Documents:
-  added: todo.txt
+M /Volumes/Backup/Documents/notes.txt
+A /Users/me/Documents/todo.txt
 recorded 2, added 1, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
 ```
 
@@ -91,6 +90,12 @@ syncit pull /Volumes/Backup/Documents    # take changes from there; send nothing
 
 Use `push` to back up without bringing anything onto your machine, and `pull` to update from a folder you don't want to change.
 
+If the other folder holds only [part of a larger archive](#working-with-part-of-a-larger-backup), `push` tells you what it did not take:
+
+```
+warning: /Volumes/Small does not want 4 files (new.txt, notes.txt, photos/, todo.txt); they were not copied
+```
+
 ## Working with part of a larger backup
 
 Say a backup drive holds a large archive and you only want one folder of it on your laptop. Clone that sub-folder:
@@ -109,8 +114,7 @@ syncit get /Volumes/Backup/Archive/music
 ```
 
 ```
-/Users/me/Archive:
-  added: music/m.mp3
+A /Users/me/Archive/music/m.mp3
 recorded 0, added 1, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
 ```
 
@@ -118,33 +122,40 @@ It lands at the same place here, `~/Archive/music`, and is synced from then on. 
 
 **Add your own.** Create a new folder anywhere in the vault and it is synced from then on, like everything else. There is no extra step.
 
-**Free up space.** To remove files from this folder but keep them in the archive, use `drop`, and say which vault still has them:
+**Free up space.** To send files to the archive and remove them from this folder, use `move`. Give the files or folders, then the vault to move them to:
 
 ```sh
-syncit drop --check /Volumes/Backup/Archive music photos/2024/raw
+syncit move music photos/2024/raw /Volumes/Backup/Archive
 ```
 
-> **Deleting is not dropping.** If you delete a file with Finder or `rm`, that is a real deletion, and the next sync deletes it from the other folder too. `drop` removes it *only here*.
+```
+M /Volumes/Backup/Archive/music/m.mp3
+R /Users/me/Archive/music/m.mp3
+R /Users/me/Archive/photos/2024/raw/1.dng
+recorded 1, added 0, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
+```
 
-`drop` first records any unsaved changes, then removes a file only if its current version is in the vault you named. If something has not been synced there yet, nothing is dropped and the files are listed; sync and try again. Without `--check`, `drop` goes ahead only for files whose versions this vault keeps in its [history](#keeping-old-versions):
+`move` sends your changes there as `push` does, including edits you haven't synced yet. It then checks that every file arrived, and only then removes them here (the `R` lines). They stay in the archive, and later syncs neither bring them back nor delete them. `syncit get` brings them back.
+
+> **Deleting is not moving.** If you delete a file with Finder or `rm`, that is a real deletion, and the next sync deletes it from the other folder too. `move` removes it *only here*.
+
+If the other vault holds only part of the archive and these files are not part of it, nothing is sent and nothing is removed:
 
 ```
-error: nothing dropped: no other copy is known of music/m.mp3. Name a vault that holds them with --check <vault>, or use --force
+error: nothing moved: /Volumes/Small does not want photos/2024/a.jpg
 ```
 
-`--force` skips the check, if you really mean it. `syncit get` brings dropped files back.
+The same goes if the other vault has its own newer version of a file: nothing is removed. Sync with it, then move again.
 
 ## In case of conflict, keeps both
 
 If the same file was edited in two folders since they last synced, syncit keeps both. The newer one keeps the name; the other is saved as a copy next to it:
 
 ```
-/Users/me/Documents:
-  updated: notes.txt
-/Volumes/Backup/Documents:
-  copied: notes-b842127a.txt
-conflict: notes.txt — kept the newer version, other saved as notes-b842127a.txt
-recorded 2, added 1, updated 1, deleted 0, conflicts 1, pending 0, skipped 0
+M /Volumes/Backup/Documents/notes.txt
+C /Users/me/Documents/notes-b842127a.txt
+U /Users/me/Documents/notes.txt (conflict: notes-b842127a.txt)
+recorded 2, added 0, updated 1, deleted 0, conflicts 1, pending 0, skipped 0
 ```
 
 Both folders end up with the same two files. To settle it:
@@ -154,12 +165,12 @@ Both folders end up with the same two files. To settle it:
 3. Run `syncit sync`. The conflict is closed in every folder.
 4. Delete the `notes-…` copy when you no longer need it. It is an ordinary file, and deleting it deletes it everywhere on the next sync.
 
-The `conflict:` line is repeated on every sync until you edit the file. If you delete the copy before syncing in step 3, it may reappear once from the other folder; delete it again and it stays gone.
+The `U … (conflict: …)` line is repeated on every sync until you edit the file. If you delete the copy before syncing in step 3, it may reappear once from the other folder; delete it again and it stays gone.
 
 **Edited in one place, deleted in another.** The edit wins and the file is kept everywhere:
 
 ```
-conflict: todo.txt — kept the file; it was deleted in another vault
+U /Users/me/Documents/todo.txt (conflict: deleted in another vault)
 ```
 
 Delete it again if that is what you want, or edit it to keep it; either one clears the message.
@@ -169,21 +180,38 @@ Delete it again if that is what you want, or edit it to keep it; either one clea
 `syncit status` shows what is waiting, and changes nothing:
 
 ```
-/Users/me/Documents:
-  new: todo.txt
-  modified: notes.txt
+? /Users/me/Documents/todo.txt
+M /Users/me/Documents/notes.txt
 ```
 
 | Line | Meaning |
 |---|---|
-| `new`, `modified`, `deleted` | changes here that the next sync will send |
-| `behind` | a newer version is known but not yet in this folder |
-| `incomplete` | an earlier sync was interrupted; sync again |
-| `conflict` | both versions are on disk, waiting for you |
+| `?` | a new file here, which the next sync will send |
+| `M`, `D` | modified or deleted here; the next sync will send that |
+| `! … (behind)` | a newer version is known but not yet in this folder |
+| `! … (incomplete)` | an earlier sync was interrupted; sync again |
+| `U … (conflict: …)` | both versions are on disk, waiting for you |
+
+## Reading the output
+
+Every line about a file starts with a letter, then the file's full path:
+
+| Letter | Meaning |
+|---|---|
+| `A` | added |
+| `M` | modified |
+| `D` | deleted |
+| `C` | a conflict copy was written |
+| `R` | removed from this folder by `move` |
+| `U` | a conflict is open |
+| `?` | new and not yet recorded (`status` only) |
+| `!` | needs a look; the reason follows in parentheses |
+
+Lines are printed as things happen, so a long sync shows its progress.
 
 ## Keeping old versions
 
-By default syncit keeps only the latest version of each file and uses no extra disk space. Two settings change that. Each vault has its own; they are never synced. See them with:
+By default syncit keeps only the latest version of each file and uses no extra disk space. One setting changes that. Each vault has its own; it is never synced. See it with:
 
 ```sh
 syncit config
@@ -191,10 +219,9 @@ syncit config
 
 ```
 local-history: off
-store: none
 ```
 
-### History inside the vault
+### Turning history on and off
 
 ```sh
 syncit config local-history on
@@ -203,25 +230,6 @@ syncit config local-history on
 Every version of every file this vault sees from now on, whether saved here or received from another folder, is stored in `.syncit/blobs/`. A good choice for the copy on a large backup drive.
 
 History is simply what has been collected: turn it on late and it starts from there. Turn it off with `syncit config local-history off`. syncit stops storing new versions; the ones already stored stay where they are, and you can delete the contents of `.syncit/blobs/` yourself to get the space back.
-
-### History in a shared store
-
-```sh
-syncit config store /Volumes/Vault/syncit-store
-```
-
-Old versions are sent to that folder. Several vaults can share one store.
-
-If the store isn't reachable, say the drive is unplugged, versions wait inside the vault and are moved to the store the next time syncit runs and finds it:
-
-```
-local-history: off
-store: /Volumes/Vault/syncit-store (not reachable; versions wait in this vault)
-```
-
-Stop using it with `syncit config store none`.
-
-The two settings are independent. With a store only, versions leave the vault once they are in the store. With both, they are sent to the store and also kept locally.
 
 ### Snapshots
 
@@ -235,7 +243,7 @@ Snapshots are delivered with the next sync, so your history is as fine-grained a
 
 ### Getting an old version back
 
-This version of syncit stores old versions but has no command to restore one. Each stored version is a plain file in `.syncit/blobs/` or the store, named by the SHA-256 of its content. You can open or copy it directly.
+This version of syncit stores old versions but has no command to restore one. Each stored version is a plain file in `.syncit/blobs/`, named by the SHA-256 of its content. You can open or copy it directly.
 
 ## Ignoring files
 
@@ -267,11 +275,26 @@ There are no wildcards. Ignored files are never sent, never overwritten and neve
 
 ### In scripts
 
+Results go to standard output; warnings and errors go to standard error.
+
 | Exit code | Meaning |
 |---|---|
 | 0 | done, nothing needs attention |
-| 1 | failed: not a vault, vault in use, bad arguments, a refused `drop` |
+| 1 | failed: not a vault, vault in use, bad arguments, a refused `move` |
 | 2 | done, but something needs a look: a conflict, or a file that was skipped or is still pending |
+
+Add `--json` to any command and every line, on both streams, is a JSON object with a `type`:
+
+```sh
+syncit --json push /Volumes/Backup/Documents
+```
+
+```
+{"type":"event","kind":"updated","vault":"/Volumes/Backup/Documents","path":"notes.txt","note":""}
+{"type":"summary","recorded":1,"added":0,"updated":1,"deleted":0,"conflicts":0,"pending":0,"skipped":0,"incomplete":0,"rejected":0}
+```
+
+The types are `event`, `conflict`, `summary`, `setting` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
 
 ## Commands
 
@@ -285,10 +308,9 @@ There are no wildcards. Ignored files are never sent, never overwritten and neve
 | `syncit status` | show what is waiting; change nothing |
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | start holding those files here, and fetch them |
-| `syncit drop [--check <vault>] [--force] <path>...` | stop holding these paths, without deleting them elsewhere |
-| `syncit config` | show this vault's settings |
+| `syncit move <path>... <vault>` | send these files to another vault, then remove them here |
+| `syncit config` | show this vault's setting |
 | `syncit config local-history on\|off` | keep old versions inside the vault, or stop |
-| `syncit config store <folder>\|none` | send old versions to a shared folder, or stop |
 
 A `<vault>` is the path of any folder in the other vault.
 

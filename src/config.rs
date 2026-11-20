@@ -14,8 +14,6 @@ pub struct Config {
     pub exclude: Vec<String>,
     /// Keep every version this vault sees in `.syncit/blobs/`.
     pub keep_local_history: bool,
-    /// A folder used as a shared blob store, as an absolute path.
-    pub store: Option<String>,
 }
 
 /// A prefix matches a path if it is `""`, equals it, or is followed by `/`.
@@ -33,7 +31,6 @@ impl Config {
             include: vec![include],
             exclude: vec![],
             keep_local_history: false,
-            store: None,
         }
     }
 
@@ -79,7 +76,7 @@ impl Config {
             .chain(path.match_indices('/').map(|(i, _)| i))
             .chain([path.len()]);
         // Every prefix is listed only when the path itself is excluded
-        // (a dropped file put back): then it moves from exclude to include.
+        // (a moved file put back): then it moves from exclude to include.
         let prefix = ends
             .map(|i| &path[..i])
             .find(|q| !listed(q))

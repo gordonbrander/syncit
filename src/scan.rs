@@ -3,6 +3,7 @@
 use crate::blobs::hash_file;
 use crate::cache::{Row, mtime_ms};
 use crate::entry::{Entry, Id};
+use crate::output::{Options, warn};
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault, write_atomic};
 use anyhow::{Context, Result};
@@ -22,14 +23,15 @@ pub struct Scan {
 }
 
 /// Scan the vault. A dry scan returns what it would write and changes nothing.
-pub fn scan(v: &mut Vault, dry: bool) -> Result<Scan> {
+pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let (mut files, mut odd) = (BTreeSet::new(), 0);
-    walk(v, &v.root, "", dry, &mut files, &mut odd)?;
+    walk(opts, v, &v.root, "", dry, &mut files, &mut odd)?;
     if odd > 0 {
-        eprintln!(
-            "warning: skipped {odd} symbolic links or special files in {}",
-            v.root.display()
+        let root = v.root.display();
+        warn(
+            opts,
+            format!("skipped {odd} symbolic links or special files in {root}"),
         );
     }
 
@@ -144,6 +146,7 @@ pub fn scan(v: &mut Vault, dry: bool) -> Result<Scan> {
 /// Collect the vault-relative paths of the regular files under `dir`.
 /// An unreadable directory is an error: its files must not read as deleted.
 fn walk(
+    opts: &Options,
     v: &Vault,
     dir: &Path,
     prefix: &str,
@@ -154,9 +157,9 @@ fn walk(
     for item in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
         let item = item?;
         let Some(name) = item.file_name().to_str().map(String::from) else {
-            eprintln!(
-                "warning: skipped a name that is not UTF-8 in {}",
-                dir.display()
+            warn(
+                opts,
+                format!("skipped a name that is not UTF-8 in {}", dir.display()),
             );
             continue;
         };
@@ -168,10 +171,12 @@ fn walk(
         let kind = item.file_type()?;
         if name.eq_ignore_ascii_case(".syncit") {
             if !prefix.is_empty() {
-                eprintln!(
-                    "warning: {} is a vault inside this one; its files are synced as part of {}",
-                    dir.display(),
-                    v.root.display()
+                let (inner, outer) = (dir.display(), v.root.display());
+                warn(
+                    opts,
+                    format!(
+                        "{inner} is a vault inside this one; its files are synced as part of {outer}"
+                    ),
                 );
             }
             continue;
@@ -180,7 +185,7 @@ fn walk(
             continue;
         }
         if kind.is_dir() {
-            walk(v, &item.path(), &path, dry, files, odd)?;
+            walk(opts, v, &item.path(), &path, dry, files, odd)?;
         } else if !kind.is_file() {
             *odd += 1;
         } else if !name.starts_with(TMP_PREFIX) {

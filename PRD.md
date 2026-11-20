@@ -10,7 +10,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 
 - **A.1** As someone with an archive on a backup drive, I want to check it out to my computer, edit files, and sync back, so the archive gets my edits.
 - **A.2** As the same person, I want files I add to my working copy to appear in the archive when I sync, so new work is backed up without extra steps.
-- **A.3** When my working copy holds files I no longer need locally, I want to drop them without deleting them from the archive, so I can free space and keep the archive whole.
+- **A.3** When my working copy holds files I no longer need locally, I want to move them to the archive and stop holding them here, without deleting them from the archive, so I can free space and keep the archive whole.
 - **A.4** As someone with a large archive, I want to check out a single sub-folder, edit and add files in it, and sync back, so I only carry what I'm working on.
 - **A.5** As the same person, I want to check out several sub-folders, and also add a new top-level folder locally, so that both my edits and the new folder reach the archive.
 - **B.1** When two folders have both been edited since they last synced, I want them brought into agreement with every conflicting version kept as a visible file, so no edit is silently lost and I can see what to reconcile.
@@ -117,7 +117,7 @@ The log is a grow-only set of entries. `CRDT.md` specifies it in full. Each entr
 - An entry's id is the hash of its canonical bytes. Two byte-identical entries are the same entry.
 - Entries are written in segments. A segment is an immutable JSON Lines file named by its hash, holding the entries one scan produced.
 - Merging two logs is set union: copy the segments you don't have.
-- Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot` and `drop`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
+- Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot` and `move`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
 - A vault holds the log entries of every vault it has heard from, directly or through a relay.
 
 ### Current state
@@ -171,9 +171,9 @@ The stat cache is also the record of what this vault holds. If it is lost, or th
 
 - New paths from other vaults are materialised only if wanted.
 - Paths the vault already holds are always kept up to date, wanted or not.
-- A new file or folder placed in the vault outside its wanted paths becomes wanted when it is first scanned. No separate step is needed; `drop` undoes it.
+- A new file or folder placed in the vault outside its wanted paths becomes wanted when it is first scanned. No separate step is needed; `move` undoes it.
 - `get <path>...`, given paths inside another vault, adds an include for them and pulls from that vault.
-- `drop <path>...` records any pending changes, then removes the files and their cache rows, and adds an exclude.
+- `move <path>... <vault>` pushes to that vault, checks that every file arrived, then removes the files and their cache rows here and adds an exclude. It refuses, removing nothing, if the target does not want the files or does not end up holding them. There is no way to stop holding a path without naming a vault that takes it.
 - Deleting a file with ordinary tools is a deletion and propagates.
 
 ### Blobs
@@ -196,6 +196,8 @@ Two independent settings in `config` decide what a vault retains:
 With both off, the vault stores no blobs and its log records hashes only. With both on, blobs are uploaded and also kept locally. Local history is never required to be complete: a vault has the blobs it has. Both are set with `syncit config`.
 
 ### Stores
+
+Stores are not in the first build, which keeps history locally or not at all. They are specified here and in `SPEC.md` (milestones 9 and 10), and arrive whole: the `store` setting and syncing through a store together.
 
 A store is a log and a set of blobs with no working folder: the part of a vault that replicates, kept somewhere every vault can reach. It can be a folder, such as a shared or external drive, or an S3 bucket.
 
@@ -237,8 +239,10 @@ A vault has no identity. Two copies of one folder, or a vault restored from a ba
 | `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
-| `syncit get <path in another vault>...` / `syncit drop <path>...` | Change what this vault holds. |
+| `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
 | `syncit config` | Show or change `keep_local_history` and `store`. |
+
+Every command prints as it works: results on stdout, one line per file, and warnings and errors on stderr. `--json` makes every line a JSON object, for scripts.
 
 A vault records no other vault. Every command that involves a second vault names it, so there is no default peer and no hierarchy, and nothing breaks when a folder moves.
 
@@ -247,7 +251,7 @@ A vault records no other vault. Every command that involves a second vault names
 | Story | Requirements | Mechanism |
 |---|---|---|
 | A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
-| A.3 | R5, R7 | `drop` removes cache rows, so absence is "not held" |
+| A.3 | R5, R7 | `move` removes cache rows, so absence is "not held" |
 | A.4 | R4, R5 | `clone` of a sub-path; same directory structure |
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become wanted |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
@@ -291,7 +295,6 @@ The design keeps three things separate that sync tools usually fuse: what happen
 - **Case-insensitive filesystems.** How two paths differing only in case are handled on macOS and Windows.
 - **Vaults that are not mounted paths.** The proposal assumes a vault is reachable as a directory. Stores cover syncing through a bucket. Syncing two vaults directly over SSH or iroh is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
 - **Ignore list.** Settled for version 1: `.syncitignore` at the vault root, an ordinary file that syncs with the rest. Wildcards and per-folder lists are open.
-- **`drop` safety.** Whether it refuses when no other reachable source holds the content.
 - **Mass-delete guard.** Whether R23 is on by default, and at what threshold.
 - **Tie-break timestamp.** File mtime reflects when the edit happened but can be set arbitrarily; scan time cannot be forged but reflects when the tool ran.
 - **Conflict-copy names.** Behaviour when a short hash collides with an existing unrelated file, and for names with several extensions such as `.tar.gz`.

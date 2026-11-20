@@ -1,102 +1,19 @@
-//! One function per command. Each returns a `Report` for `main` to print.
+//! One function per command. Each prints as it goes; a command that runs a
+//! sync returns a `Summary` for `main` to print last.
 
-use crate::blobs::{flush, retain};
+use crate::blobs::retain;
 use crate::config::{Config, prefix_matches};
 use crate::entry::valid_path;
 use crate::log::PathState;
 use crate::materialise::{copy_name, materialise, prune};
+use crate::output::{Event, Message, Options, Summary, print_stdout, warn};
 use crate::scan::scan;
 use crate::segment;
 use crate::vault::{Vault, find_root, relative, resolve_path, write_atomic};
 use anyhow::{Context, Result, ensure};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-
-#[derive(Debug)]
-pub struct Event {
-    pub vault: PathBuf,
-    pub kind: &'static str,
-    pub path: String,
-    pub note: String,
-}
-
-#[derive(Debug, Default)]
-pub struct Report {
-    pub events: Vec<Event>,
-    /// Path to a description of its open conflict.
-    pub conflicts: BTreeMap<String, String>,
-    /// Entries written by scans.
-    pub recorded: usize,
-    pub notes: Vec<String>,
-    /// No summary line and exit code 0: `init` and `status`.
-    pub plain: bool,
-}
-
-impl Report {
-    pub fn count(&self, kind: &str) -> usize {
-        self.events.iter().filter(|e| e.kind == kind).count()
-    }
-
-    pub fn has(&self, kind: &str, path: &str) -> bool {
-        self.events.iter().any(|e| e.kind == kind && e.path == path)
-    }
-
-    /// 2 if something needs attention, else 0.
-    pub fn exit_code(&self) -> i32 {
-        let open = ["pending", "skipped", "incomplete", "rejected"]
-            .iter()
-            .any(|k| self.count(k) > 0);
-        if !self.plain && (open || !self.conflicts.is_empty()) {
-            2
-        } else {
-            0
-        }
-    }
-}
-
-impl fmt::Display for Report {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut vaults: Vec<&Path> = vec![];
-        for e in &self.events {
-            if !vaults.contains(&e.vault.as_path()) {
-                vaults.push(&e.vault);
-            }
-        }
-        for vault in vaults {
-            writeln!(f, "{}:", vault.display())?;
-            let mut events: Vec<&Event> = self.events.iter().filter(|e| e.vault == vault).collect();
-            events.sort_by(|a, b| a.path.cmp(&b.path));
-            for e in events {
-                let note = if e.note.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — {}", e.note)
-                };
-                writeln!(f, "  {}: {}{note}", e.kind, e.path)?;
-            }
-        }
-        for (path, what) in &self.conflicts {
-            writeln!(f, "conflict: {path} — {what}")?;
-        }
-        if !self.plain {
-            let n = |kind| self.count(kind);
-            writeln!(
-                f,
-                "recorded {}, added {}, updated {}, deleted {}, conflicts {}, pending {}, skipped {}",
-                self.recorded,
-                n("added"),
-                n("updated"),
-                n("deleted"),
-                self.conflicts.len(),
-                n("pending"),
-                n("skipped")
-            )?;
-        }
-        self.notes.iter().try_for_each(|note| writeln!(f, "{note}"))
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -113,25 +30,19 @@ fn create(dir: &Path, config: Config) -> Result<()> {
     config.save(dir)
 }
 
-pub fn init(dir: &Path) -> Result<Report> {
+pub fn init(opts: &Options, dir: &Path) -> Result<()> {
     ensure!(
         !dir.join(".syncit").exists(),
         "{} is already a vault",
         dir.display()
     );
     create(dir, Config::new(String::new()))?;
-    let notes = vec![format!(
-        "initialised a vault in {}",
-        resolve_path(dir)?.display()
-    )];
-    Ok(Report {
-        notes,
-        plain: true,
-        ..Report::default()
-    })
+    let message = format!("initialised a vault in {}", resolve_path(dir)?.display());
+    print_stdout(&Message::Info { message }, opts.json);
+    Ok(())
 }
 
-pub fn clone(src: &Path, dir: &Path) -> Result<Report> {
+pub fn clone(opts: &Options, src: &Path, dir: &Path) -> Result<Summary> {
     let src = resolve_path(src)?;
     let root = find_root(&src)?;
     let sub = relative(&root, &src)?;
@@ -142,19 +53,19 @@ pub fn clone(src: &Path, dir: &Path) -> Result<Report> {
     let empty = !dir.exists() || dir.read_dir()?.next().is_none();
     ensure!(empty, "{} exists and is not empty", dir.display());
     create(dir, Config::new(sub))?;
-    run(dir, &root, Mode::Pull)
+    run(opts, dir, &root, Mode::Pull)
 }
 
-pub fn sync(cwd: &Path, peer: &Path) -> Result<Report> {
-    run(cwd, peer, Mode::Sync)
+pub fn sync(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
+    run(opts, cwd, peer, Mode::Sync)
 }
 
-pub fn push(cwd: &Path, peer: &Path) -> Result<Report> {
-    run(cwd, peer, Mode::Push)
+pub fn push(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
+    run(opts, cwd, peer, Mode::Push)
 }
 
-pub fn pull(cwd: &Path, peer: &Path) -> Result<Report> {
-    run(cwd, peer, Mode::Pull)
+pub fn pull(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
+    run(opts, cwd, peer, Mode::Pull)
 }
 
 /// Whether the folders are the same or one contains the other. Such vaults
@@ -165,69 +76,113 @@ fn nested(a: &Path, b: &Path) -> bool {
 }
 
 /// Open another vault for a run with `v`.
-fn other(v: &Vault, path: &Path) -> Result<Vault> {
+fn other(opts: &Options, v: &Vault, path: &Path) -> Result<Vault> {
     ensure!(
         !nested(&find_root(path)?, &v.root),
         "cannot sync a vault with itself or with a vault inside it"
     );
-    Vault::open(path, false)
+    Vault::open(opts, path, false)
 }
 
 /// A run with a peer (SPEC.md section 10). `a` is the local vault.
-fn run(cwd: &Path, peer: &Path, mode: Mode) -> Result<Report> {
-    let mut a = Vault::open(cwd, true)?;
-    let mut b = other(&a, peer)?;
-    let mut report = Report::default();
-    let (to_b, to_a) = (mode != Mode::Pull, mode != Mode::Push);
+fn run(opts: &Options, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
+    let mut a = Vault::open(opts, cwd, true)?;
+    let mut b = other(opts, &a, peer)?;
+    let mut sum = Summary::default();
+    record(opts, &mut a, Some(&b), &mut sum)?;
+    record(opts, &mut b, Some(&a), &mut sum)?;
+    exchange(opts, &mut a, &mut b, mode, &mut sum)?;
+    Ok(sum)
+}
 
-    record(&mut a, Some(&b), &mut report)?;
-    record(&mut b, Some(&a), &mut report)?;
+/// The files `from` holds that `to` would not take.
+pub fn unwanted(from: &Vault, to: &Vault) -> Vec<String> {
+    let declined = |p: &&String| to.declines(p);
+    from.cache.rows.keys().filter(declined).cloned().collect()
+}
+
+/// The part of a run after both vaults are scanned.
+fn exchange(
+    opts: &Options,
+    a: &mut Vault,
+    b: &mut Vault,
+    mode: Mode,
+    sum: &mut Summary,
+) -> Result<()> {
+    let (to_b, to_a) = (mode != Mode::Pull, mode != Mode::Push);
+    // A push says "put my files there": say so when some are not taken.
+    let files = unwanted(a, b);
+    if mode == Mode::Push && !files.is_empty() {
+        let top = |p: &String| match p.split_once('/') {
+            Some((dir, _)) => format!("{dir}/"),
+            None => p.clone(),
+        };
+        let tops: BTreeSet<String> = files.iter().map(top).collect();
+        let mut names: Vec<String> = tops.iter().take(5).cloned().collect();
+        if tops.len() > 5 {
+            names.push(format!("and {} more", tops.len() - 5));
+        }
+        warn(
+            opts,
+            format!(
+                "{} does not want {} files ({}); they were not copied",
+                b.root.display(),
+                files.len(),
+                names.join(", ")
+            ),
+        );
+    }
     if to_b {
-        receive(&mut b, &a, &mut report)?;
+        receive(opts, b, a, sum)?;
     }
     if to_a {
-        receive(&mut a, &b, &mut report)?;
+        receive(opts, a, b, sum)?;
     }
     // Both retain before either materialises, so that a version is saved
     // before it is replaced.
     if to_b {
-        retain(&b, Some(&a))?;
+        retain(b, Some(a))?;
     }
     if to_a {
-        retain(&a, Some(&b))?;
+        retain(a, Some(b))?;
     }
     if to_b {
-        materialise(&mut b, Some(&a), &mut report.events)?;
+        materialise(opts, b, Some(a), sum)?;
     }
     if to_a {
-        materialise(&mut a, Some(&b), &mut report.events)?;
+        materialise(opts, a, Some(b), sum)?;
     }
-    flush(&a)?;
-    flush(&b)?;
+    // A conflict open in both vaults is reported once, for the local one.
+    let mut seen = BTreeSet::new();
+    if to_a {
+        conflicts(opts, a, &mut seen);
+    }
     if to_b {
-        conflicts(&b, &mut report);
+        conflicts(opts, b, &mut seen);
     }
-    if to_a {
-        conflicts(&a, &mut report);
-    }
-    Ok(report)
+    sum.conflicts += seen.len();
+    Ok(())
 }
 
 /// Scan, then retain blobs for what the scan recorded.
-fn record(v: &mut Vault, peer: Option<&Vault>, report: &mut Report) -> Result<()> {
-    let scanned = scan(v, false)?;
-    report.recorded += scanned.entries.len();
+fn record(opts: &Options, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary) -> Result<()> {
+    let scanned = scan(opts, v, false)?;
+    sum.recorded += scanned.entries.len();
     for path in &scanned.skipped {
-        report
-            .events
-            .push(v.event("skipped", path, "changed while it was being read"));
+        v.event(
+            opts,
+            sum,
+            "skipped",
+            path,
+            "changed while it was being read",
+        );
     }
     retain(v, peer)
 }
 
 /// Take every segment the other vault has and this one lacks. A segment is
 /// validated before it is stored; one that fails is reported and left out.
-pub fn receive(v: &mut Vault, from: &Vault, report: &mut Report) -> Result<()> {
+pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -> Result<()> {
     let dir = v.dot().join("log");
     for file in fs::read_dir(from.dot().join("log"))? {
         let file = file?;
@@ -241,18 +196,15 @@ pub fn receive(v: &mut Vault, from: &Vault, report: &mut Report) -> Result<()> {
                 write_atomic(&v.root, &dir.join(&name), &bytes)?;
                 entries.into_iter().for_each(|e| v.log.add(e));
             }
-            Err(e) => report.events.push(v.event(
-                "rejected",
-                &format!("segment {name}"),
-                &format!("{e:#}"),
-            )),
+            Err(e) => v.event(opts, sum, "rejected", "", &format!("segment {name}: {e:#}")),
         }
     }
     Ok(())
 }
 
-/// Report each open conflict among the paths this vault holds or wants.
-fn conflicts(v: &Vault, report: &mut Report) {
+/// Print each open conflict among the paths this vault holds or wants that
+/// is not in `seen`, and add it there.
+fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
     for path in v.log.paths.keys() {
         let PathState::Resolved {
             losers,
@@ -264,67 +216,61 @@ fn conflicts(v: &Vault, report: &mut Report) {
         };
         if (losers.is_empty() && !lost_delete)
             || !(v.cache.rows.contains_key(path) || v.config.wanted(path))
+            || !seen.insert(path.clone())
         {
             continue;
         }
-        let copies: Vec<String> = losers.iter().map(|l| copy_name(path, &l.hash)).collect();
-        let mut what = match copies.len() {
-            0 => "kept the file".to_string(),
-            1 => format!("kept the newer version, other saved as {}", copies[0]),
-            _ => format!(
-                "kept the newest version, others saved as {}",
-                copies.join(", ")
-            ),
-        };
+        let mut what: Vec<String> = losers.iter().map(|l| copy_name(path, &l.hash)).collect();
         if lost_delete {
-            what += "; it was deleted in another vault";
+            what.push("deleted in another vault".to_string());
         }
-        report.conflicts.insert(path.clone(), what);
+        let conflict = Message::Conflict {
+            vault: v.root.display().to_string(),
+            path: path.clone(),
+            message: what.join(", "),
+        };
+        print_stdout(&conflict, opts.json);
     }
 }
 
-pub fn snapshot(cwd: &Path) -> Result<Report> {
-    let mut v = Vault::open(cwd, true)?;
-    let mut report = Report::default();
-    record(&mut v, None, &mut report)?;
-    flush(&v)?;
-    Ok(report)
+pub fn snapshot(opts: &Options, cwd: &Path) -> Result<Summary> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    let mut sum = Summary::default();
+    record(opts, &mut v, None, &mut sum)?;
+    Ok(sum)
 }
 
 /// What a scan would record and what a sync would do. Writes nothing.
-pub fn status(cwd: &Path) -> Result<Report> {
-    let mut v = Vault::open(cwd, true)?;
-    let mut report = Report {
-        plain: true,
-        ..Report::default()
-    };
-    let scanned = scan(&mut v, true)?;
+/// Returns what it printed, as (kind, path).
+pub fn status(opts: &Options, cwd: &Path) -> Result<Vec<(&'static str, String)>> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    let scanned = scan(opts, &mut v, true)?;
+    let mut found: Vec<(&'static str, String)> = vec![];
     for (path, kind) in &scanned.changes {
-        report.events.push(v.event(kind, path, ""));
+        found.push((kind, path.clone()));
     }
     let changed: BTreeSet<&String> = scanned.changes.iter().map(|(path, _)| path).collect();
     for path in v.log.paths.keys() {
         let row = v.cache.rows.get(path);
         match v.log.resolve(path) {
             PathState::Absent => {}
-            PathState::Incomplete => {
-                report
-                    .events
-                    .push(v.event("incomplete", path, "waiting for missing history"))
-            }
+            PathState::Incomplete => found.push(("incomplete", path.clone())),
             PathState::Resolved { winner, .. } => {
                 let on_disk = row.map(|row| &row.hash);
-                let concerns = (row.is_some() || v.config.wanted(path))
-                    && !v.skips(path)
-                    && !changed.contains(path);
+                let concerns = !v.declines(path) && !changed.contains(path);
                 if concerns && v.log.entries[&winner].hash.as_ref() != on_disk {
-                    report.events.push(v.event("behind", path, ""));
+                    found.push(("behind", path.clone()));
                 }
             }
         }
     }
-    conflicts(&v, &mut report);
-    Ok(report)
+    for (kind, path) in &found {
+        v.event(opts, &mut Summary::default(), kind, path, "");
+    }
+    let mut seen = BTreeSet::new();
+    conflicts(opts, &v, &mut seen);
+    found.extend(seen.into_iter().map(|path| ("conflict", path)));
+    Ok(found)
 }
 
 /// Command-line paths, relative to `cwd`, as prefixes relative to `root`.
@@ -344,7 +290,7 @@ fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
 /// Start holding paths of another vault. Each path lies inside that vault,
 /// whose root is found by walking up, as `clone` does. The paths become
 /// wanted here, and a pull from that vault fetches them.
-pub fn get(cwd: &Path, paths: &[PathBuf]) -> Result<Report> {
+pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
     let first = paths.first().context("no path given")?;
     let source = find_root(&cwd.join(first))?;
     for path in paths {
@@ -356,7 +302,7 @@ pub fn get(cwd: &Path, paths: &[PathBuf]) -> Result<Report> {
         );
     }
     {
-        let mut v = Vault::open(cwd, true)?;
+        let mut v = Vault::open(opts, cwd, true)?;
         ensure!(
             !nested(&source, &v.root),
             "{} is in this vault: give a path in the vault to get it from",
@@ -369,47 +315,57 @@ pub fn get(cwd: &Path, paths: &[PathBuf]) -> Result<Report> {
         }
         v.config.save(&v.root)?;
     }
-    run(cwd, &source, Mode::Pull)
+    run(opts, cwd, &source, Mode::Pull)
 }
 
-/// Stop holding paths, without deleting them elsewhere. Unless forced, the
-/// content of every file removed must be known to exist somewhere else: in
-/// this vault's stored blobs, its store, or the vault named by `check`.
-pub fn drop(cwd: &Path, paths: &[PathBuf], check: Option<&Path>, force: bool) -> Result<Report> {
-    let mut v = Vault::open(cwd, true)?;
+/// Move files to another vault: push to it, confirm each file arrived, then
+/// stop holding them here. Nothing is removed unless every file is confirmed.
+pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> Result<Summary> {
+    let mut v = Vault::open(opts, cwd, true)?;
     let prefixes = prefixes(&v.root, cwd, paths)?;
-    let check = check.map(|path| other(&v, path)).transpose()?;
-    let mut report = Report::default();
-    // Unrecorded changes are recorded before anything is removed.
-    record(&mut v, check.as_ref(), &mut report)?;
+    let mut t = other(opts, &v, target)?;
+    let mut sum = Summary::default();
+    record(opts, &mut v, Some(&t), &mut sum)?;
+    record(opts, &mut t, Some(&v), &mut sum)?;
 
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
     let held: Vec<String> = v.cache.rows.keys().filter(under).cloned().collect();
-    if !force {
-        let (blobs, store) = (v.dot().join("blobs"), v.store());
-        let elsewhere = |hash: &String| {
-            blobs.join(hash).exists()
-                || store.as_ref().is_some_and(|s| s.join(hash).exists())
-                || check.as_ref().is_some_and(|c| {
-                    c.cache.rows.values().any(|row| &row.hash == hash)
-                        || c.dot().join("blobs").join(hash).exists()
-                })
-        };
-        let sole: Vec<&str> = held
-            .iter()
-            .filter(|p| !elsewhere(&v.cache.rows[*p].hash))
-            .map(String::as_str)
-            .collect();
-        let hint = match check {
-            Some(_) => "Sync with it first",
-            None => "Name a vault that holds them with --check <vault>",
-        };
-        ensure!(
-            sole.is_empty(),
-            "nothing dropped: no other copy is known of {}. {hint}, or use --force",
-            sole.join(", ")
-        );
-    }
+    ensure!(
+        !held.is_empty(),
+        "nothing to move: no files here under the given paths"
+    );
+    let unwanted: Vec<&str> = held
+        .iter()
+        .filter(|p| t.declines(p))
+        .map(String::as_str)
+        .collect();
+    ensure!(
+        unwanted.is_empty(),
+        "nothing moved: {} does not want {}",
+        t.root.display(),
+        unwanted.join(", ")
+    );
+
+    exchange(opts, &mut v, &mut t, Mode::Push, &mut sum)?;
+    let arrived =
+        |p: &&String| t.cache.rows.get(*p).map(|row| &row.hash) == Some(&v.cache.rows[*p].hash);
+    let target = t.root.display().to_string();
+    let missing: Vec<String> = held
+        .iter()
+        .filter(|p| !arrived(p))
+        .map(|p| {
+            let said = |e: &&Event| e.vault == target && &e.path == p;
+            match sum.events.iter().find(said) {
+                Some(e) => format!("{p} ({}: {})", e.kind, e.note),
+                None => format!("{p} (it holds a different version; sync first)"),
+            }
+        })
+        .collect();
+    ensure!(
+        missing.is_empty(),
+        "nothing moved: {target} does not hold {}",
+        missing.join(", ")
+    );
 
     for prefix in prefixes {
         v.config.include.retain(|x| !prefix_matches(&prefix, x));
@@ -427,64 +383,40 @@ pub fn drop(cwd: &Path, paths: &[PathBuf], check: Option<&Path>, force: bool) ->
     for (path, row) in rows {
         let file = v.root.join(&path);
         if !v.cache.matches(&row, &file) {
-            report
-                .events
-                .push(v.event("skipped", &path, "changed since it was scanned"));
+            v.event(
+                opts,
+                &mut sum,
+                "skipped",
+                &path,
+                "changed since it was scanned",
+            );
             continue;
         }
         fs::remove_file(&file)?;
         prune(&v.root, &file);
-        report.events.push(v.event("dropped", &path, ""));
+        v.event(opts, &mut sum, "moved", &path, "");
     }
-    Ok(report)
+    Ok(sum)
 }
 
-pub enum Setting {
-    LocalHistory(bool),
-    /// A folder, relative to the current directory, or None for no store.
-    Store(Option<PathBuf>),
-}
-
-/// Show this vault's settings, after changing one if asked.
-pub fn config(cwd: &Path, change: Option<Setting>) -> Result<Report> {
-    let mut v = Vault::open(cwd, true)?;
-    let mut notes = vec![];
-    match change {
-        None => {}
-        Some(Setting::LocalHistory(on)) => {
-            if v.config.keep_local_history && !on {
-                notes.push("versions already in .syncit/blobs/ are left there".to_string());
-            }
-            v.config.keep_local_history = on;
-        }
-        Some(Setting::Store(None)) => v.config.store = None,
-        Some(Setting::Store(Some(dir))) => {
-            let dir = resolve_path(&cwd.join(dir))?;
-            let dir = dir.to_str().context("the store's path is not UTF-8")?;
-            v.config.store = Some(dir.to_string());
-        }
+/// Print this vault's settings, after turning local history on or off if
+/// asked. Returns whether local history is on.
+pub fn config(opts: &Options, cwd: &Path, local_history: Option<bool>) -> Result<bool> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    let was = v.config.keep_local_history;
+    if let Some(on) = local_history {
+        v.config.keep_local_history = on;
+        v.config.save(&v.root)?;
     }
-    v.config.save(&v.root)?;
-    let on_off = if v.config.keep_local_history {
-        "on"
-    } else {
-        "off"
+    let on = v.config.keep_local_history;
+    let setting = Message::Setting {
+        name: "local-history",
+        value: if on { "on" } else { "off" }.to_string(),
     };
-    let store = match (&v.config.store, v.store()) {
-        (None, _) => "none".to_string(),
-        (Some(dir), Some(_)) => dir.clone(),
-        (Some(dir), None) => format!("{dir} (not reachable; versions wait in this vault)"),
-    };
-    notes.splice(
-        0..0,
-        [
-            format!("local-history: {on_off}"),
-            format!("store: {store}"),
-        ],
-    );
-    Ok(Report {
-        notes,
-        plain: true,
-        ..Report::default()
-    })
+    print_stdout(&setting, opts.json);
+    if was && !on {
+        let message = "versions already in .syncit/blobs/ are left there".to_string();
+        print_stdout(&Message::Info { message }, opts.json);
+    }
+    Ok(on)
 }

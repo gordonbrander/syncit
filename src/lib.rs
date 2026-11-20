@@ -7,6 +7,7 @@ pub mod config;
 pub mod entry;
 pub mod log;
 pub mod materialise;
+pub mod output;
 pub mod scan;
 pub mod segment;
 pub mod vault;
