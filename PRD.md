@@ -67,6 +67,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - **R24** A store holds the log as well as blobs, so vaults that never see each other can sync through it. `R16` and `R24` are one mechanism. (C.1, C.2)
 - **R17** Record a snapshot of the current state without syncing. (D.3)
 - **R26** List the recorded versions of a file, and bring one back: as a copy beside the file, or in place of it. (D.2)
+- **R27** Show what a vault holds, lacks and excludes of everything the log knows, alone or against another vault, without changing anything. (A.3, A.4, A.5)
 - **R18** Report pending local changes, files waiting on unavailable content, and open conflicts, without changing anything. (E.1)
 - **R20** Exclude files by an ignore list. (A.5, E.1)
 - **R25** The on-disk format carries a version, so a later change such as a different hash function can be detected and migrated instead of misread. (E.1)
@@ -261,6 +262,7 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
 | `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
+| `syncit ls [path]... [--vs <vault>]` | List each file as held, missing, behind, excluded, ignored or deleted here, and with `--vs` in another vault too. Writes nothing. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
 | `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
@@ -278,7 +280,7 @@ A vault records no other vault. Every command that involves a second vault names
 |---|---|---|
 | A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
 | A.3 | R5, R7 | `move` removes cache rows, so absence is "not held" |
-| A.4 | R4, R5 | `clone` of a sub-path; same directory structure |
+| A.4 | R4, R5, R27 | `clone` of a sub-path; same directory structure; `ls` shows what is held and what is excluded |
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become included |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |

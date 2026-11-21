@@ -505,6 +505,7 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit status` | Dry scan and `resolve`. Writes nothing at all. (`R18`) |
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
+| `syncit ls [path]... [--vs <vault>]` | See below. (`R27`) |
 | `syncit blame [path]...` | See below. |
 | `syncit log [path]...` | See below. (`R26`) |
 | `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
@@ -547,6 +548,31 @@ There is no way to stop holding a path without naming a vault that takes it. An 
 3. Print a `blame` message with the path and the nicknames of the segments holding the winner, sorted. There is usually one. There are several when vaults recorded the identical entry, as they do for a conflict copy each of them created.
 
 It reads the log only. A vault that receives a file records nothing, so it is never named for it; an edit that no scan has recorded is not attributed to anyone. It has no summary and exits 0.
+
+### ls
+
+`syncit ls [path]... [--vs <vault>]` prints what this vault holds of every file the log knows, and with `--vs` what the other vault holds too. The paths are files or folders in this vault, relative to the current directory, that need not exist on disk; with none, the vault root is listed. A path outside this vault is an error that points to `--vs`. The vault given to `--vs` is resolved as for `sync`.
+
+1. Open and lock the vault, and the other vault as a run does (section 10, step 1).
+2. Dry-scan each vault (section 7), so that changes no scan has recorded count. With two vaults, add the other's entries to this vault's log in memory, so that both are compared with the same winner.
+3. For each path whose state is `Resolved`, find each vault's state against the winner, which is a file with hash `h` or a tombstone. The first rule that applies decides:
+
+   | State | Rule | Mark |
+   |---|---|---|
+   | `ignored` | the vault ignores the path (`skips`) | `-` |
+   | `held` | its row has hash `h` | `✓` |
+   | `behind` | its row has another hash, or the winner is a tombstone | `○` |
+   | `excluded` | no row, and the path is excluded | `-` |
+   | `deleted` | no row, and the winner is a tombstone | `✗` |
+   | `missing` | no row | `○` |
+
+   A path whose winner is a tombstone is listed only if a vault is `behind`, that is, still has the file: the log keeps deletions for ever, and a settled one is `log`'s to show. Such a line has `deleted` set. A path that is `Absent` or `Incomplete` is not listed; missing history is `status`'s to report.
+4. For each given path in turn, list what lies under it, in path order. A given path that is a file is one line. A folder below the given path whose files, more than one, are all in the same state (in both vaults) is one line: its path with a trailing `/`, and the number of files. Any other folder is listed child by child, by the same rule.
+5. Print a `holding` message for each line.
+
+`syncit ls --help` carries the legend: each mark, and what each pair of marks means with `--vs` (for example `✗ ○  deleted in ours, sync removes it in theirs`). The README names the marks and points there.
+
+`ls` writes nothing to either vault, has no summary and exits 0. It is the one command that collects before printing, because a folder's line depends on every file in it.
 
 ### log
 
@@ -600,7 +626,7 @@ How it is built:
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
 - `Options` holds the process-wide settings (`json`, and `dry_run` of section 10) and is passed to everything that can print or write.
-- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
+- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `ls`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages
 
@@ -610,6 +636,7 @@ How it is built:
 | `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
 | `setting` | `name`, `value` | `<name>: <value>` | stdout |
 | `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
+| `holding` | `path`, `files`, `ours`, `theirs` when there are two vaults, and `deleted` (true, or left out) when the winner is a tombstone | `<mark> [<mark> ]<path>`, then ` (<n> files)` for a folder, then in brackets `behind` and `ignored` where a vault is in that state, with `ours`, `theirs` or `ours and theirs` before it when there are two vaults. `behind` is followed by `: deleted elsewhere` when the winner is a tombstone and no vault on the line is `deleted`. The marks are in `ls`, section 11 | stdout |
 | `version` | `path`, `hash`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
 | `info` | `message` | the message | stdout |
 | `summary` | the counts | `recorded 3, added 1, …` | stdout |
@@ -661,7 +688,7 @@ The same run's first and last lines with `--json`:
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Completed; nothing needs attention. `init`, `status`, `blame`, `log`, `restore` and `config` always exit 0 unless they fail. |
+| 0 | Completed; nothing needs attention. `init`, `status`, `ls`, `blame`, `log`, `restore` and `config` always exit 0 unless they fail. |
 | 1 | Failed: bad arguments, not a vault, vault in use, version mismatch, corrupt local file, a refused `move`. |
 | 2 | Completed, but there are conflicts or pending, skipped, incomplete or rejected items. |
 
@@ -729,6 +756,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `new_file_at_existing_path` | a file created in a partial vault at a path another vault already has: equal content is adopted or merges silently, different content is an ordinary conflict with a copy |
 | `recreate_after_delete` | a file deleted, synced, and created again at the same path, with an old version's bytes or new ones, in the vault that deleted it or the one that received the deletion, and with the cache lost: it stays in both vaults as one head whose parents are the tombstones, with no conflict; both vaults hold a deletion record in between |
 | `recreate_against_unseen_recreation` | a path deleted here, re-created in another vault whose content has not arrived, then re-created here with an old version's bytes: a conflict with a copy, not an old file brought forward |
+| `ls_states` | `ls` in a partial vault and against the archive: held, behind, missing, excluded and ignored, in ours and in theirs; unrecorded edits and new files count; a folder in one state is one line with a count; a path argument lists that folder's children or that file; a deleted path is listed, as deleted in one vault and behind in the other, only while a vault still has the file, and with one vault as behind; neither vault is changed |
 | `log_lists_versions` | `log` lists a path's entries newest first with the recording vault, marks the current one, lists a deletion, finds a path with no file, and reports content as available only where a working file or a kept blob has it |
 | `restore_version` | `restore` writes the copy and leaves the file alone; again is a no-op; the copy syncs as a new file and, moved over the file, as an edit; `--in-place` records unrecorded edits first and then the old version on top of them; over a deleted file it stays in both vaults with no conflict; refused for an unknown or empty hash, content not kept, a taken copy name, and a path not on disk here |
 | `lost_cache` | delete `.syncit/cache`, sync: no entries written for unchanged files, no deletions invented, old files brought forward |
@@ -781,6 +809,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | R20 | 5, 7 | `ignored_files`, `ignore_file_syncs` |
 | R25 | 5, 10 | `version_mismatch`, `segment_rejects` |
 | R26 | 7, 11 | `log_lists_versions`, `restore_version`, `recreate_after_delete` |
+| R27 | 11 | `ls_states` |
 
 ## 15. Milestones
 
@@ -797,6 +826,7 @@ Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warning
 - [x] **8a. Nicknames.** The segment header with a nickname, the `nickname` setting and `config nickname`, the log's record of which vaults recorded each entry, and `blame`. Tests: `header_rejects`, `nickname_default`, `blame_names_the_recording_vault`, and the nickname parts of `config_command`, `message_forms` and `cli_smoke`.
 - [x] **8b. Restore.** Deletion records in the cache (sections 5, 7 and 9), the `version` message, and the commands `log` and `restore`. Tests: `recreate_after_delete`, `recreate_against_unseen_recreation`, `log_lists_versions`, `restore_version`, and the `version` parts of `message_forms` and `cli_smoke`.
 - [x] **8c. One vocabulary for partial replication.** Included, excluded, held and ignored (the glossary) in code, messages and documents; the scan includes every file on disk, with or without a row (section 7). Tests: `interrupted_move`, `push_counts_excluded`, `includes_cases`.
+- [x] **8d. ls.** The `holding` message and the command `ls`, with its `--help` legend. Tests: `ls_states`, and the `holding` parts of `message_forms` and `cli_smoke`.
 - [ ] **9. Stores.** Everything under "Stores" in section 8 and "A run with a store" in section 10, for directory stores: the layout, the `store` setting and `config store`, `flush`, the store as a blob source, and `sync`, `push`, `pull` and `move` with a store. Tests: `story_c2_sync_through_store`, `store_layout`, `store_hostile`, `store_configured_gets_log`.
 - [ ] **10. S3 stores.** The second kind of store, behind the same four operations. Test: `s3_store`.
 
@@ -821,6 +851,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Case-insensitive filesystems | no special handling; a case collision surfaces as "untracked file in the way" and nothing is overwritten |
 | Conflict-copy name clash | the existing file is left alone; the conflict is reported and stays open |
 | A file on disk outside the included paths | added to `include` by the scan, whether new or already held (section 7): the filter follows the disk, so data is kept. `move` undoes it |
+| Seeing a partial vault | `ls`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
 | Terms for partial replication | three independent facts, one word each: included or excluded (the filter), held (the cache), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
 | Tie-break timestamp | file mtime |
 | Empty directories | not tracked; directories emptied by a deletion are removed |

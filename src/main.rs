@@ -63,6 +63,27 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// List what this vault holds, lacks and excludes of every file
+    #[command(after_help = "\
+Marks:
+  ✓  up to date
+  ○  out of date
+  -  excluded or ignored
+  ✗  deleted
+
+With --vs there are two marks: ours, then theirs.
+  ✓ -  up to date in ours, excluded in theirs
+  - ✓  excluded in ours, get brings it from theirs
+  ○ ✓  out of date in ours, sync brings it from theirs
+  ✗ ○  deleted in ours, sync removes it in theirs
+  ○ ✗  deleted in theirs, sync removes it in ours")]
+    Ls {
+        /// Files or folders in this vault to list [default: .]
+        paths: Vec<PathBuf>,
+        /// Compare with another vault: ours first, theirs second
+        #[arg(long = "vs", value_name = "VAULT")]
+        vs: Option<PathBuf>,
+    },
     /// Show which vault recorded the current version of each file
     Blame { paths: Vec<PathBuf> },
     /// List the recorded versions of files, newest first
@@ -124,6 +145,7 @@ fn main() {
         Command::Move { paths, vault, .. } => {
             commands::move_to(opts, cwd, &paths, &vault).map(Some)
         }
+        Command::Ls { paths, vs } => commands::ls(opts, cwd, &paths, vs.as_deref()).map(|_| None),
         Command::Blame { paths } => commands::blame(opts, cwd, &paths).map(|_| None),
         Command::Log { paths } => commands::log(opts, cwd, &paths).map(|_| None),
         Command::Restore {
