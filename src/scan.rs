@@ -38,8 +38,12 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     }
 
     let (mut cache, mut config, mut out) = (v.cache.clone(), v.config.clone(), Scan::default());
-    let mut unwanted = vec![];
+    let mut excluded = vec![];
     for path in &files {
+        // A file on disk is included, whether or not the vault knew it.
+        if !config.includes(path) {
+            excluded.push(path.clone());
+        }
         let file = v.root.join(path);
         let row = cache.rows.get(path).cloned();
         if let (Some(row), Ok(meta)) = (&row, file.symlink_metadata())
@@ -59,9 +63,6 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             }
             Some(row) => (row.base, "modified"),
             None => {
-                if !config.wanted(path) {
-                    unwanted.push(path.clone());
-                }
                 if let Some(base) = cache.deleted.remove(path) {
                     // Re-created where this vault saw a deletion: the new
                     // version replaces the tombstones it had seen.
@@ -134,8 +135,8 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     }
 
     // Shortest first, so one dragged-in folder yields one include.
-    unwanted.sort_by_key(|p| p.len());
-    unwanted.iter().for_each(|p| config.auto_include(p));
+    excluded.sort_by_key(|p| p.len());
+    excluded.iter().for_each(|p| config.auto_include(p));
 
     // Segment, then config, then cache: stopped in between, the next scan
     // sees the same difference and writes the same entries again.

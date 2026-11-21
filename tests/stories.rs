@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use syncit::commands::{self as cmd, Setting};
-use syncit::output::{Options, Summary};
+use syncit::output::{Holding, Options, Summary};
 
 const O: &Options = &Options {
     json: false,
@@ -207,7 +207,7 @@ fn story_a5_get_and_new_folder() {
     // A second folder.
     cmd::get(O, &b, &[a.join("other")]).unwrap();
     assert!(is(&b, "other/y.txt", "y") && !b.join("foo/bar/big").exists());
-    // New files outside the wanted paths: the three examples of section 7.
+    // New files outside the included paths: the three examples of section 7.
     put(&b, "zap/x/y.txt", "new", 1);
     put(&b, "zap/x/z.txt", "new too", 1);
     put(&b, "foo/new.txt", "n", 1);
@@ -226,7 +226,7 @@ fn story_a5_get_and_new_folder() {
     assert_eq!(config.exclude, ["foo/bar/big"]);
     // A file added to the new folder elsewhere arrives here.
     put(&a, "zap/later.txt", "later", 2);
-    put(&a, "foo/elsewhere.txt", "not wanted in b", 2);
+    put(&a, "foo/elsewhere.txt", "excluded in b", 2);
     cmd::sync(O, &b, &a).unwrap();
     assert!(is(&b, "zap/later.txt", "later"));
     assert!(!b.join("foo/elsewhere.txt").exists() && !b.join("foo/bar/big/f.bin").exists());
@@ -1030,13 +1030,13 @@ fn move_refuses() {
             .unwrap_err()
             .to_string()
     };
-    // The target does not want the path: nothing is sent, nothing removed.
+    // The target excludes the path: nothing is sent, nothing removed.
     let c = tmp.path().join("c");
     cmd::clone(O, &a.join("d"), &c).unwrap();
     put(&b, "f.txt", "edit", 1);
     let error = err(&b, &["d", "f.txt"], &c);
     assert!(
-        error.contains("does not want f.txt") && !error.contains("d/g.txt"),
+        error.contains("excludes f.txt") && !error.contains("d/g.txt"),
         "{error}"
     );
     assert!(is(&b, "f.txt", "edit") && is(&b, "d/g.txt", "g") && !c.join("f.txt").exists());
@@ -1069,6 +1069,32 @@ fn move_refuses() {
     // Nothing reads as deleted afterwards.
     assert_eq!(cmd::sync(O, &b, &a).unwrap().recorded, 0);
     assert!(is(&a, "f.txt", "edit"));
+}
+
+#[test]
+fn interrupted_move() {
+    // A move stopped after it saved the filter and before it removed the
+    // files: the folder is excluded and its files are still held.
+    let (_tmp, a, b) = pair(&[("d/g.txt", "g"), ("d/h.txt", "h"), ("f.txt", "f")]);
+    configure(&b, |c| c.exclude.push("d".into()));
+    // The next scan includes what is on disk: nothing is lost.
+    assert_eq!(cmd::snapshot(O, &b).unwrap().recorded, 0);
+    let config = Config::load(&b).unwrap();
+    assert!(config.includes("d/g.txt") && config.includes("d/h.txt"));
+    assert!(is(&b, "d/g.txt", "g") && is(&b, "d/h.txt", "h"));
+    // The files are synced as before, in both directions.
+    put(&a, "d/g.txt", "edit", 1);
+    assert_eq!(cmd::sync(O, &b, &a).unwrap().exit_code(), 0);
+    assert!(is(&b, "d/g.txt", "edit") && is(&a, "d/h.txt", "h"));
+    // Moving again finishes the job and leaves one exclude.
+    let report = cmd::move_to(O, &b, &paths(&["d"]), &a).unwrap();
+    assert!(report.has("moved", "d/g.txt") && report.has("moved", "d/h.txt"));
+    let config = Config::load(&b).unwrap();
+    assert_eq!(
+        (config.include, config.exclude),
+        (vec![String::new()], vec!["d".to_string()])
+    );
+    assert!(!b.join("d").exists() && is(&a, "d/g.txt", "edit") && is(&a, "d/h.txt", "h"));
 }
 
 #[test]
@@ -1196,7 +1222,7 @@ fn version_mismatch() {
 }
 
 #[test]
-fn push_counts_unwanted() {
+fn push_counts_excluded() {
     let (tmp, a) = vault(&[("d/g.txt", "g"), ("music/m.mp3", "m"), ("f.txt", "f")]);
     let c = tmp.path().join("c");
     cmd::clone(O, &a.join("d"), &c).unwrap();
@@ -1207,12 +1233,117 @@ fn push_counts_unwanted() {
         Vault::open(O, &a, true).unwrap(),
         Vault::open(O, &c, true).unwrap(),
     );
-    // Not wanted, or ignored there; a path it holds or wants is taken.
+    // Excluded there, or ignored there; a path it includes is taken.
+    assert_eq!(cmd::excluded(&va, &vc), ["f.txt", "music/m.mp3"]);
+    assert_eq!(cmd::ignored(&va, &vc), ["d/tmp/t.txt"]);
+    assert!(cmd::excluded(&vc, &va).is_empty());
+}
+
+#[test]
+fn ls_states() {
+    let (tmp, a) = vault(&[
+        ("d/g.txt", "g"),
+        ("d/sub/1.txt", "1"),
+        ("d/sub/2.txt", "2"),
+        ("f.txt", "f"),
+        ("music/m.mp3", "m"),
+        ("music/n.mp3", "n"),
+    ]);
+    let c = tmp.path().join("c");
+    cmd::clone(O, &a.join("d"), &c).unwrap();
+    let line = |path: &str, files, ours, theirs| Holding {
+        path: path.into(),
+        files,
+        ours,
+        theirs,
+        deleted: false,
+    };
+    // A line for a deleted path that a vault still has the file of.
+    let gone = |path: &str, ours, theirs| Holding {
+        deleted: true,
+        ..line(path, 1, ours, theirs)
+    };
+    // One vault: a folder in one state is one line; the rest is excluded.
     assert_eq!(
-        cmd::unwanted(&va, &vc),
-        ["d/tmp/t.txt", "f.txt", "music/m.mp3"]
+        cmd::ls(O, &c, &[], None).unwrap(),
+        [
+            line("d/", 3, "held", None),
+            line("f.txt", 1, "excluded", None),
+            line("music/", 2, "excluded", None),
+        ]
     );
-    assert!(cmd::unwanted(&vc, &va).is_empty());
+    // A path lists that folder's children, or that file.
+    assert_eq!(
+        cmd::ls(O, &c, &paths(&["music", "d/g.txt"]), None).unwrap(),
+        [
+            line("music/m.mp3", 1, "excluded", None),
+            line("music/n.mp3", 1, "excluded", None),
+            line("d/g.txt", 1, "held", None),
+        ]
+    );
+    // A path outside the vault is refused, and says how to compare.
+    let error = cmd::ls(O, &c, std::slice::from_ref(&a), None).unwrap_err();
+    assert!(format!("{error:#}").contains("--vs <vault>"), "{error:#}");
+    // Unrecorded changes count: an edit, a new file and a deletion there, a
+    // new file and a deletion here, and a file that is ignored here. A
+    // deleted path is listed while the other vault still has the file.
+    fs::remove_file(c.join("d/sub/1.txt")).unwrap();
+    put(&a, "d/g.txt", "edit", 1);
+    put(&a, "d/tmp/t.txt", "t", 1);
+    fs::remove_file(a.join("f.txt")).unwrap();
+    put(&c, "d/new.txt", "n", 1);
+    fs::write(c.join(".syncitignore"), "d/tmp\n.syncitignore\n").unwrap();
+    let listing = || {
+        let mut out = BTreeMap::new();
+        all(tmp.path(), &mut out);
+        out
+    };
+    let before = listing();
+    assert_eq!(
+        cmd::ls(O, &c, &[], Some(&a)).unwrap(),
+        [
+            line("d/g.txt", 1, "behind", Some("held")),
+            line("d/new.txt", 1, "held", Some("missing")),
+            gone("d/sub/1.txt", "deleted", Some("behind")),
+            line("d/sub/2.txt", 1, "held", Some("held")),
+            line("d/tmp/t.txt", 1, "ignored", Some("held")),
+            line("music/", 2, "excluded", Some("held")),
+        ]
+    );
+    // The other way round, and limited to a file or a folder here.
+    assert_eq!(
+        cmd::ls(O, &a, &paths(&["d/g.txt"]), Some(&c)).unwrap(),
+        [line("d/g.txt", 1, "held", Some("behind"))]
+    );
+    assert_eq!(
+        cmd::ls(O, &a, &paths(&["music"]), Some(&c)).unwrap(),
+        [
+            line("music/m.mp3", 1, "held", Some("excluded")),
+            line("music/n.mp3", 1, "held", Some("excluded")),
+        ]
+    );
+    assert_eq!(
+        cmd::ls(O, &a, &paths(&["d/sub/1.txt"]), Some(&c)).unwrap(),
+        [gone("d/sub/1.txt", "behind", Some("deleted"))]
+    );
+    // With no vault that has the file, a deleted path is not listed.
+    assert_eq!(
+        cmd::ls(O, &c, &paths(&["d/sub"]), None).unwrap(),
+        [line("d/sub/2.txt", 1, "held", None)]
+    );
+    assert!(before == listing(), "ls wrote something");
+    // One vault that has heard of a deletion and still has the file.
+    fs::remove_file(a.join("d/sub/2.txt")).unwrap();
+    cmd::snapshot(O, &a).unwrap();
+    {
+        let mut vc = Vault::open(O, &c, true).unwrap();
+        let va = Vault::open(O, &a, false).unwrap();
+        cmd::receive(O, &mut vc, &va, &mut Summary::default()).unwrap();
+    }
+    assert_eq!(
+        cmd::ls(O, &c, &paths(&["d/sub"]), None).unwrap(),
+        [gone("d/sub/2.txt", "behind", None)]
+    );
 }
 
 /// Every file and folder under `dir`, `.syncit/` included, with its bytes.
@@ -1276,7 +1407,7 @@ fn dry_run_matches_real_run() {
     };
     let before = listing();
     let refused = cmd::move_to(dry, &a, &paths(&["big"]), &c).unwrap_err();
-    assert!(refused.to_string().contains("does not want"), "{refused}");
+    assert!(refused.to_string().contains("excludes"), "{refused}");
     let planned = cmd::move_to(dry, &a, &paths(&["big"]), &b).unwrap();
     assert!(before == listing(), "a dry run wrote something");
     let done = cmd::move_to(O, &a, &paths(&["big"]), &b).unwrap();

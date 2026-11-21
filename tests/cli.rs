@@ -134,7 +134,7 @@ fn cli_smoke() {
     assert_eq!(code, 0, "{out}{err}");
     assert!(err.contains("warning: skipped 1 symbolic links"), "{err}");
     assert!(
-        err.contains("/c does not want 2 files (sub/); they were not copied"),
+        err.contains("/c excludes 2 files (sub/); they were not copied"),
         "{err}"
     );
     assert!(
@@ -142,7 +142,7 @@ fn cli_smoke() {
         "{out}"
     );
     let (_, _, err) = both(&a, &["sync", "../c"]);
-    assert!(!err.contains("does not want"), "only push says so: {err}");
+    assert!(!err.contains("excludes"), "only push says so: {err}");
     let (code, out, err) = both(&a, &["status", "--json"]);
     assert!(
         code == 0 && out.starts_with(r#"{"type":"conflict","#),
@@ -169,11 +169,36 @@ fn cli_smoke() {
     let (code, _, err) = both(&a, &["sync", "../nowhere"]);
     assert!(code == 1 && err.starts_with("error: "), "{err}");
 
+    // ls: one vault, then two; c holds only d/ of a.
+    let (code, out) = run(&tmp.path().join("c"), &["ls"]);
+    assert!(
+        code == 0 && out.contains("✓ d/g.txt") && out.contains("- sub/"),
+        "{out}"
+    );
+    let (code, out) = run(&a, &["ls", "d", "--vs", "../c"]);
+    assert_eq!((code, out.as_str()), (0, "✓ ✓ d/g.txt\n"));
+    let (code, out, err) = both(&a, &["--json", "ls", "--vs", "../c", "d", "sub"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        types(&out).iter().all(|t| t == "holding") && !out.is_empty(),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#""ours":"held","theirs":"excluded""#),
+        "{out}"
+    );
+
+    let (code, help) = run(&a, &["ls", "--help"]);
+    assert!(
+        code == 0 && help.contains("✗ ○  deleted in ours, sync removes it in theirs"),
+        "{help}"
+    );
+
     let (code, help) = run(&a, &["--help"]);
     assert_eq!(code, 0);
     for command in [
-        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "blame",
-        "log", "restore", "config",
+        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "ls",
+        "blame", "log", "restore", "config",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),

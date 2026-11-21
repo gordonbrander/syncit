@@ -57,7 +57,9 @@ A sync run, done by each vault on its own folder (`PRD.md`, "A sync run"):
 | row | one path's record in the stat cache |
 | held | a path with a row: this vault has the file |
 | base | in a row, the entries the file on disk was derived from; the parents of the next entry |
-| wanted | a path that the vault's include and exclude prefixes select for materialising |
+| included | a path that the vault's filter, its `include` and `exclude` prefixes, selects. After a scan every held path is included |
+| excluded | a path the filter does not select. Absence here is by choice, not a deletion |
+| ignored | a path `.syncitignore` rules out: never scanned and never written here |
 | blob | a file's bytes, addressed by hash |
 | peer | the other vault in a run; always named on the command line |
 | store | a log and a set of blobs with no working folder: a directory or an S3 bucket. Holds old versions, and lets vaults that never meet sync through it. Milestones 9 and 10; not built yet |
@@ -67,7 +69,7 @@ A sync run, done by each vault on its own folder (`PRD.md`, "A sync run"):
 - The experience goal is Dropbox, not git (`PRD.md`, "Goals"). People manage their files with ordinary tools and run `sync` when they feel like it. When a choice is open, take the one that needs no extra step or command from the user, as long as it cannot lose data.
 - Do the milestones in section 15 in order. Each ends with tests passing. Tick its box in this file when it is done.
 - Keep it simple. One crate, the dependencies listed in section 3 and no others, no traits with one implementation, no configuration beyond what section 5 defines. Where two designs work, take the one that keeps separate things separate.
-- Core rules are pure functions over data (the read rules, wanted-path matching, conflict-copy names). I/O sits around them.
+- Core rules are pure functions over data (the read rules, the include filter, conflict-copy names). I/O sits around them.
 - Do not change the on-disk formats, the read rules or the write rule. If something in these documents is wrong or cannot be built, stop work on that part, write what you found under "Deviations", choose the smallest fix, and continue.
 - Never weaken a safety check in section 9 to make a test pass.
 - Section 16 lists questions that are deliberately open. Do not solve them in version 1.
@@ -111,7 +113,7 @@ Suggested layout. Merge or split if it reads better, but keep the pure parts fre
 | `entry` | `Entry`, canonical encode and decode, entry id, path validation | none |
 | `segment` | encode, decode and validate a whole segment | none |
 | `log` | load `log/`, the path-to-entries map, `resolve` (the read rules) | load only |
-| `config` | `Config`, load and save, `wanted` | load and save |
+| `config` | `Config`, load and save, `includes` | load and save |
 | `cache` | `Cache`, `Row`, the deletion records, load and save, the unchanged test | load, save, stat |
 | `scan` | walk, the write table, segment writing | yes |
 | `blobs` | hashing, blob sources, fetch, retain | yes |
@@ -182,13 +184,13 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 ```
 
 - `syncit`: format version (`R25`). A command refuses to run on a vault, or with a peer, whose version is not 1.
-- `include`, `exclude`: wanted-path prefixes, vault-relative, `/`-separated. `""` is the vault root.
+- `include`, `exclude`: the filter's prefixes, vault-relative, `/`-separated. `""` is the vault root.
 - `keep_local_history`: retain every version this vault sees in `.syncit/blobs/` (`R15`). Local history is whatever blobs are there; it is never required to be complete.
 - `nickname`: the label written into the header of every segment this vault records (`CRDT.md`, "Nickname"). `init` and `clone` set it to the folder's name, with whitespace and control characters replaced by `-`, cut to 64 bytes, or to `vault` if that leaves nothing. It is a label only: `blame` prints it and no other code reads it.
 - Written pretty-printed. Unknown fields are an error. `keep_local_history` and `nickname` are changed with `syncit config` (section 11). Milestone 9 adds a `store` field beside them.
 - A vault records nothing about other vaults. There is no origin or default peer: any vault syncs with any other, and folders may move.
 
-**Wanted** (`PRD.md`, "What a vault holds"): a prefix matches a path if it is `""`, equals the path, or is followed in the path by `/`. Among all matching prefixes in both lists, the longest decides: wanted if it came from `include`. If none matches, the path is not wanted. A prefix is never in both lists.
+**Included** (`PRD.md`, "What a vault holds"): a prefix matches a path if it is `""`, equals the path, or is followed in the path by `/`. Among all matching prefixes in both lists, the longest decides: included if it came from `include`. If none matches, the path is excluded. A prefix is never in both lists.
 
 ### cache
 
@@ -238,7 +240,7 @@ segment name: 12bf899655031a7997e0f0a4824dc2fe225c6b8e07157384ac2d74c4234a0522
 `.syncitignore`, at the vault root, is the optional ignore list (`R20`). One rule per line; blank lines and lines starting with `#` are skipped. Only the root file is read; there are no per-folder ignore lists.
 
 - A line without `/` is a name. It ignores any file or folder with exactly that name, at any depth.
-- A line with `/` is a vault-relative path prefix, matched as wanted prefixes are.
+- A line with `/` is a vault-relative path prefix, matched as the filter's prefixes are.
 - No wildcards.
 
 An ignored path is invisible: scan does not look at it (so a recorded file that becomes ignored is not read as deleted) and materialise never writes it.
@@ -289,7 +291,7 @@ Let `now` be the time the scan started. For each file found, and for each row wh
   3. Otherwise write a file entry with `parents = []` and create the row.
 - **No file, no row.** Nothing. The path is not held, or is deleted and stays so.
 
-**Auto-include.** When a file has no row, with or without a deletion record, if the path is not wanted, the scan adds an include for it, so that a folder dragged into a vault is synced from then on, including files later added to it elsewhere. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
+**Auto-include.** A file on disk is included. When the walk finds a file whose path is excluded, with or without a row, the scan adds an include for it. A folder dragged into a vault is therefore synced from then on, including files later added to it elsewhere, and a file the vault holds is never left out of a run (a `move` stopped partway, a config edited by hand): when in doubt, data is kept. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
 
 | New file | Include added | Why not shorter |
 |---|---|---|
@@ -297,7 +299,7 @@ Let `now` be the time the scan started. For each file found, and for each row wh
 | `foo/new.txt` | `foo/new.txt` | `foo` is an ancestor of `foo/bar` |
 | `foo/bar/big/n/a.txt`, with `foo/bar/big` excluded | `foo/bar/big/n` | `foo/bar/big` is already a prefix |
 
-Includes are added after the walk, shortest first, re-checking wantedness, so one dragged folder yields one include. The config is saved before the cache. A dry scan adds nothing. `move` undoes it.
+If every prefix is already listed, which happens only when the file's own path is in `exclude` (a moved file put back by hand), the path moves from `exclude` to `include`, as `get` would do. Includes are added after the walk, shortest first, re-checking the filter, so one dragged folder yields one include. The config is saved before the cache. A dry scan adds nothing. `move` undoes it.
 
 A file entry's `mtime` is the file's mtime in milliseconds. Stat the file before and after hashing; if size or mtime changed in between, leave the path and its row untouched this scan and report it as `skipped`.
 
@@ -394,15 +396,15 @@ Let `S = resolve(p)`, `row` the cache row, `W` the winner, `h` its hash.
 
 1. `S` is `Absent`: nothing.
 2. `S` is `Incomplete`: report `incomplete`. Nothing else.
-3. The path is neither held nor wanted: nothing. (`R5`. A held path is kept up to date whether wanted or not.)
-4. **`W` is a tombstone.** If held: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. Then, held or not, set the path's deletion record to the heads: with no file here, this vault's state reflects all of them. A path that reaches this step is held or wanted, so a wanted path the vault never held gets a record too.
+3. The path is excluded or ignored: nothing. (`R5`. The scan has included every file on disk, section 7, so a held path is skipped here only if it is ignored.)
+4. **`W` is a tombstone.** If held: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. Then, held or not, set the path's deletion record to the heads: with no file here, this vault's state reflects all of them. A path that reaches this step is included, so an included path the vault never held gets a record too.
 5. **`W` is a file and held with `row.hash == h`.** The content is in place. Go to "copies and base".
 6. **`W` is a file and held with a different hash.** Run the safety checks.
    - If `row.hash` is a loser hash and its copy path `c` has no entries in the log: the local file is a conflicting version and must stay visible. If something already exists at `c`, report `skipped` (name clash) and stop. Otherwise write the winner to its temporary name first; rename `p` to `c`; rename the temporary file onto `p`; remove the old row. `c` gets no row.
    - Otherwise the local version is superseded, or its copy was already recorded: write the winner over it.
    - If the winner's blob is unavailable: report `pending`, change nothing, and leave the row and its base alone.
    - On success the row becomes `(size, mtime as stat reports, h, base)`. Report `updated`. Go to "copies and base".
-7. **`W` is a file, not held, wanted.** Run the safety checks and write the file. Unavailable: `pending`, and a deletion record stays as it is. On success create the row, remove any deletion record and report `added`. Go to "copies and base".
+7. **`W` is a file, not held.** Run the safety checks and write the file. Unavailable: `pending`, and a deletion record stays as it is. On success create the row, remove any deletion record and report `added`. Go to "copies and base".
 
 ### Copies and base
 
@@ -449,9 +451,9 @@ Save the cache once, after all paths.
 4. Each receiver reloads its log.
 5. Each retaining receiver calls `retain()`. This happens for both before either materialises.
 6. Each receiver materialises with the other vault as blob source: the peer first, then the local vault.
-7. Collect conflicts from each receiver's log, for paths it holds or wants, and report each once: for the local vault if it is open there, otherwise for the peer.
+7. Collect conflicts from each receiver's log, for paths it includes, and report each once: for the local vault if it is open there, otherwise for the peer.
 
-`push` also warns, once, when the local vault holds files the peer neither holds nor wants, or ignores: `<peer> does not want <n> files (<names>); they were not copied`. The names are the top-level folders or files involved, at most five, then `and <n> more`. `sync` and `pull` do not warn; for them a partial vault taking only part is the ordinary case. The warning does not change the exit code.
+`push` also warns when the local vault holds files the peer excludes, `<peer> excludes <n> files (<names>); they were not copied`, and likewise for files the peer ignores, `<peer> ignores <n> files (<names>); they were not copied`. Each is printed once. The names are the top-level folders or files involved, at most five, then `and <n> more`. `sync` and `pull` do not warn; for them a partial vault taking only part is the ordinary case. The warning does not change the exit code.
 
 Scanning precedes exchange, so entries are written from what each vault held before it learned anything new (`PRD.md`, "A sync run").
 
@@ -503,6 +505,7 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit status` | Dry scan and `resolve`. Writes nothing at all. (`R18`) |
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
+| `syncit ls [path]... [--vs <vault>]` | See below. (`R27`) |
 | `syncit blame [path]...` | See below. |
 | `syncit log [path]...` | See below. (`R26`) |
 | `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
@@ -525,7 +528,7 @@ The paths of `get` lie inside the *other* vault, as the source of `clone` does: 
 
 1. Open and lock both vaults, as a run does (section 10). Scan both, so that unrecorded changes are recorded and sent.
 2. Collect the paths this vault holds (has a row for) under the given prefixes. If there are none, fail.
-3. **Want check.** Each of those paths must be one the target holds or wants, and must not be ignored there. If any is not, fail and list them. Nothing has been sent. `move` never changes what the target wants.
+3. **Filter check.** The target must include each of those paths and must not ignore it. If it ignores any, fail with `nothing moved: <target> ignores <paths>`; if it excludes any, fail with `nothing moved: <target> excludes <paths>`. Nothing has been sent. `move` never changes what the target includes.
 4. Continue the run as `push` (section 10, steps 3 to 7).
 5. **Arrival check.** For each path, the target's row must now have the same hash as this vault's row. If any does not, fail and list them, each with the target's `skipped` or `pending` event for it, or else "it holds a different version" (the target has an edit this vault has not pulled, or a conflict this vault's version lost). Nothing is removed. What was pushed stays pushed; running `move` again after the cause is fixed completes it.
 6. Remove every `include` at or under each prefix and every `exclude` under it. Add the prefix to `exclude`. Save the config.
@@ -545,6 +548,31 @@ There is no way to stop holding a path without naming a vault that takes it. An 
 3. Print a `blame` message with the path and the nicknames of the segments holding the winner, sorted. There is usually one. There are several when vaults recorded the identical entry, as they do for a conflict copy each of them created.
 
 It reads the log only. A vault that receives a file records nothing, so it is never named for it; an edit that no scan has recorded is not attributed to anyone. It has no summary and exits 0.
+
+### ls
+
+`syncit ls [path]... [--vs <vault>]` prints what this vault holds of every file the log knows, and with `--vs` what the other vault holds too. The paths are files or folders in this vault, relative to the current directory, that need not exist on disk; with none, the vault root is listed. A path outside this vault is an error that points to `--vs`. The vault given to `--vs` is resolved as for `sync`.
+
+1. Open and lock the vault, and the other vault as a run does (section 10, step 1).
+2. Dry-scan each vault (section 7), so that changes no scan has recorded count. With two vaults, add the other's entries to this vault's log in memory, so that both are compared with the same winner.
+3. For each path whose state is `Resolved`, find each vault's state against the winner, which is a file with hash `h` or a tombstone. The first rule that applies decides:
+
+   | State | Rule | Mark |
+   |---|---|---|
+   | `ignored` | the vault ignores the path (`skips`) | `-` |
+   | `held` | its row has hash `h` | `✓` |
+   | `behind` | its row has another hash, or the winner is a tombstone | `○` |
+   | `excluded` | no row, and the path is excluded | `-` |
+   | `deleted` | no row, and the winner is a tombstone | `✗` |
+   | `missing` | no row | `○` |
+
+   A path whose winner is a tombstone is listed only if a vault is `behind`, that is, still has the file: the log keeps deletions for ever, and a settled one is `log`'s to show. Such a line has `deleted` set. A path that is `Absent` or `Incomplete` is not listed; missing history is `status`'s to report.
+4. For each given path in turn, list what lies under it, in path order. A given path that is a file is one line. A folder below the given path whose files, more than one, are all in the same state (in both vaults) is one line: its path with a trailing `/`, and the number of files. Any other folder is listed child by child, by the same rule.
+5. Print a `holding` message for each line.
+
+`syncit ls --help` carries the legend: each mark, and what each pair of marks means with `--vs` (for example `✗ ○  deleted in ours, sync removes it in theirs`). The README names the marks and points there.
+
+`ls` writes nothing to either vault, has no summary and exits 0. It is the one command that collects before printing, because a folder's line depends on every file in it.
 
 ### log
 
@@ -598,7 +626,7 @@ How it is built:
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
 - `Options` holds the process-wide settings (`json`, and `dry_run` of section 10) and is passed to everything that can print or write.
-- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
+- What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `ls`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages
 
@@ -608,6 +636,7 @@ How it is built:
 | `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
 | `setting` | `name`, `value` | `<name>: <value>` | stdout |
 | `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
+| `holding` | `path`, `files`, `ours`, `theirs` when there are two vaults, and `deleted` (true, or left out) when the winner is a tombstone | `<mark> [<mark> ]<path>`, then ` (<n> files)` for a folder, then in brackets `behind` and `ignored` where a vault is in that state, with `ours`, `theirs` or `ours and theirs` before it when there are two vaults. `behind` is followed by `: deleted elsewhere` when the winner is a tombstone and no vault on the line is `deleted`. The marks are in `ls`, section 11 | stdout |
 | `version` | `path`, `hash`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
 | `info` | `message` | the message | stdout |
 | `summary` | the counts | `recorded 3, added 1, …` | stdout |
@@ -655,11 +684,11 @@ The same run's first and last lines with `--json`:
 - A failure prints one `error` and nothing after it.
 - Bad command-line arguments are reported by the argument parser as text on stderr, with or without `--json`.
 
-`status` prints, for the local vault: `new`, `modified` and `deleted` (what a scan would record), `behind` (held or wanted paths whose winner is not on disk), `incomplete`, and conflicts as above.
+`status` prints, for the local vault: `new`, `modified` and `deleted` (what a scan would record), `behind` (included paths whose winner is not on disk), `incomplete`, and conflicts as above.
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Completed; nothing needs attention. `init`, `status`, `blame`, `log`, `restore` and `config` always exit 0 unless they fail. |
+| 0 | Completed; nothing needs attention. `init`, `status`, `ls`, `blame`, `log`, `restore` and `config` always exit 0 unless they fail. |
 | 1 | Failed: bad arguments, not a vault, vault in use, version mismatch, corrupt local file, a refused `move`. |
 | 2 | Completed, but there are conflicts or pending, skipped, incomplete or rejected items. |
 
@@ -675,7 +704,8 @@ The same run's first and last lines with `--json`:
 | after replacing files, before saving the cache | files newer than their rows | the scan re-records them as entries with the winner's hash and mtime: either the same entry or a head with the same hash, which is the same version. Files with no row are adopted; one written over a deletion record is re-recorded with the winner's hash and mtime, which is again the same version |
 | after renaming a loser to its copy name, before placing the winner | the path is missing, the copy has no row | the scan records a tombstone and the copy; the winner still beats the tombstone, and the losing content is in the copy |
 | after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones. The deletion record names only the second until the next materialise sets it to both |
-| during `move`, after saving the cache | files with no rows | the scan adopts them; nothing is recorded as deleted |
+| during `move`, after saving the config, before saving the cache | held files under an excluded prefix | the scan includes each file on disk again, one include per file; nothing is lost, and running `move` again completes it and leaves one exclude (`interrupted_move`) |
+| during `move`, after saving the cache | files with no rows | the scan adopts and includes them; nothing is recorded as deleted |
 | while uploading to a store (milestone 9) | some blobs or segments are in the store and others are not | every object is whole or absent; a reader sees a path as `pending` or `incomplete` and waits; the next run uploads the rest |
 
 ## 14. Tests
@@ -698,7 +728,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `resolve_cross_path_parent` | an entry with a parent of another path is never a head and supersedes nothing |
 | `winner_order` | file beats tombstone regardless of mtime; later mtime wins; the id breaks a tie |
 | `copy_name_cases` | the table in section 9 |
-| `wanted_cases` | longest prefix decides; `foo` does not match `foobar`; nothing matching means not wanted |
+| `includes_cases` | longest prefix decides; `foo` does not match `foobar`; nothing matching means excluded |
 
 ### Stories (one per user story in `PRD.md`)
 
@@ -726,6 +756,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `new_file_at_existing_path` | a file created in a partial vault at a path another vault already has: equal content is adopted or merges silently, different content is an ordinary conflict with a copy |
 | `recreate_after_delete` | a file deleted, synced, and created again at the same path, with an old version's bytes or new ones, in the vault that deleted it or the one that received the deletion, and with the cache lost: it stays in both vaults as one head whose parents are the tombstones, with no conflict; both vaults hold a deletion record in between |
 | `recreate_against_unseen_recreation` | a path deleted here, re-created in another vault whose content has not arrived, then re-created here with an old version's bytes: a conflict with a copy, not an old file brought forward |
+| `ls_states` | `ls` in a partial vault and against the archive: held, behind, missing, excluded and ignored, in ours and in theirs; unrecorded edits and new files count; a folder in one state is one line with a count; a path argument lists that folder's children or that file; a deleted path is listed, as deleted in one vault and behind in the other, only while a vault still has the file, and with one vault as behind; neither vault is changed |
 | `log_lists_versions` | `log` lists a path's entries newest first with the recording vault, marks the current one, lists a deletion, finds a path with no file, and reports content as available only where a working file or a kept blob has it |
 | `restore_version` | `restore` writes the copy and leaves the file alone; again is a no-op; the copy syncs as a new file and, moved over the file, as an edit; `--in-place` records unrecorded edits first and then the old version on top of them; over a deleted file it stays in both vaults with no conflict; refused for an unknown or empty hash, content not kept, a taken copy name, and a path not on disk here |
 | `lost_cache` | delete `.syncit/cache`, sync: no entries written for unchanged files, no deletions invented, old files brought forward |
@@ -743,7 +774,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `ignore_file_syncs` | a `.syncitignore` created in one vault arrives in the other and its rules apply there from the next run; edits to it in two vaults are an ordinary conflict |
 | `corrupt_blob_source` | a peer file changed behind its cache is not installed (`R11`) |
 | `copy_deleted_stays_deleted` | deleting a conflict copy and syncing does not bring it back |
-| `move_refuses` | `move` refuses, removing nothing, when the target does not want a path (and then sends nothing), when the target holds a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
+| `move_refuses` | `move` refuses, removing nothing, when the target excludes a path (and then sends nothing), when the target holds a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
 | `config_command` | `config` prints the settings, turns local history on and off, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | `store_layout` | a store has `format`, `log/` and `blobs/`; an empty directory is initialised on first write; a non-empty directory without `format`, and one with version 2, are refused and left untouched |
@@ -753,7 +784,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `version_mismatch` | a peer with `"syncit": 2` in its config is refused |
 | `cli_smoke` | the built binary runs every command and returns the documented exit codes; results are on stdout and warnings and errors on stderr; with `--json` every line of both streams is an object with a `type`, and the last stdout line of a run is the summary; `push` to a partial vault warns and `sync` does not |
 | `message_forms` | each message type's text form and JSON form; the summary's counts and exit code |
-| `push_counts_unwanted` | the files a push would not deliver: those the target neither holds nor wants, and those it ignores |
+| `push_counts_excluded` | the files a push would not deliver: those the target excludes, and those it ignores |
+| `interrupted_move` | an exclude over files the vault still holds, as a `move` stopped partway leaves: the next scan includes them again, they sync as before, and a second `move` completes and leaves one exclude |
 | `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion and a conflict, and for `move`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` that would be refused is refused |
 
 ### Requirement coverage
@@ -777,6 +809,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | R20 | 5, 7 | `ignored_files`, `ignore_file_syncs` |
 | R25 | 5, 10 | `version_mismatch`, `segment_rejects` |
 | R26 | 7, 11 | `log_lists_versions`, `restore_version`, `recreate_after_delete` |
+| R27 | 11 | `ls_states` |
 
 ## 15. Milestones
 
@@ -784,14 +817,16 @@ Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warning
 
 - [x] **1. Entry and segment codec.** `entry`, `segment`. Tests: `entry_id_vector`, `canonical_escaping`, `segment_round_trip`, `segment_rejects`.
 - [x] **2. Read rules.** `log` with `resolve`. Tests: the `resolve_*` tests, `winner_order`.
-- [x] **3. A single vault.** `config`, `cache`, `vault`, `scan`; commands `init`, `snapshot`, `status`. Tests: `wanted_cases`, `story_d3_snapshot` (without the sync step), `same_tick_edit`, `lost_cache` (single-vault part), `interrupted_before_cache`, `cli_smoke`.
+- [x] **3. A single vault.** `config`, `cache`, `vault`, `scan`; commands `init`, `snapshot`, `status`. Tests: `includes_cases`, `story_d3_snapshot` (without the sync step), `same_tick_edit`, `lost_cache` (single-vault part), `interrupted_before_cache`, `cli_smoke`.
 - [x] **4. Sync without conflicts.** Blob fetch from working files, segment exchange, materialise steps 1–4 and 7 and the non-conflict part of 6; commands `sync`, `push`, `pull`, `clone`. Tests: `story_a1`, `story_a2`, `story_e1`, `story_c1`, `changed_during_run`, `untracked_in_the_way`, `corrupt_blob_source`.
 - [x] **5. Conflicts.** Conflict copies, base, incomplete paths. Tests: `story_b1`, `copy_name_cases`, `edit_beats_delete`, `same_edit_no_conflict`, `new_file_at_existing_path`, `copied_vault`, `restored_backup`, `pending_then_edit`, `copy_deleted_stays_deleted`, `interrupted_transfer`.
-- [x] **6. Partial vaults.** Wanted paths in materialise, `clone` of a sub-folder, `get`, `move`. Tests: `story_a3`, `story_a4`, `story_a5`, `move_refuses`.
+- [x] **6. Partial vaults.** The include filter in materialise, `clone` of a sub-folder, `get`, `move`. Tests: `story_a3`, `story_a4`, `story_a5`, `move_refuses`.
 - [x] **7. Local history.** `.syncit/blobs/`, `keep_local_history`, `retain`, `config`. Tests: `story_d1`, `story_d2`, `config_command`.
 - [x] **8. Hardening.** Locking, ignore file, symlink checks, version checks, output format and exit codes. Tests: `hostile_segment`, `symlink_escape`, `ignored_files`, `version_mismatch`, and the remaining parts of `lost_cache` and `story_d3`.
 - [x] **8a. Nicknames.** The segment header with a nickname, the `nickname` setting and `config nickname`, the log's record of which vaults recorded each entry, and `blame`. Tests: `header_rejects`, `nickname_default`, `blame_names_the_recording_vault`, and the nickname parts of `config_command`, `message_forms` and `cli_smoke`.
 - [x] **8b. Restore.** Deletion records in the cache (sections 5, 7 and 9), the `version` message, and the commands `log` and `restore`. Tests: `recreate_after_delete`, `recreate_against_unseen_recreation`, `log_lists_versions`, `restore_version`, and the `version` parts of `message_forms` and `cli_smoke`.
+- [x] **8c. One vocabulary for partial replication.** Included, excluded, held and ignored (the glossary) in code, messages and documents; the scan includes every file on disk, with or without a row (section 7). Tests: `interrupted_move`, `push_counts_excluded`, `includes_cases`.
+- [x] **8d. ls.** The `holding` message and the command `ls`, with its `--help` legend. Tests: `ls_states`, and the `holding` parts of `message_forms` and `cli_smoke`.
 - [ ] **9. Stores.** Everything under "Stores" in section 8 and "A run with a store" in section 10, for directory stores: the layout, the `store` setting and `config store`, `flush`, the store as a blob source, and `sync`, `push`, `pull` and `move` with a store. Tests: `story_c2_sync_through_store`, `store_layout`, `store_hostile`, `store_configured_gets_log`.
 - [ ] **10. S3 stores.** The second kind of store, behind the same four operations. Test: `s3_store`.
 
@@ -808,14 +843,16 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Settings | changed with `syncit config`, not by editing the file |
 | Attribution | each vault has a nickname, by default its folder's name, written into the header of the segments it records; `blame` prints it. A label: not unique, not verified, read by no rule. Hostnames and absolute paths are not recorded, since the log is permanent and replicated |
 | Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
-| `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target wants every file and, after the push, holds the same content at every path |
+| `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target includes every file and, after the push, holds the same content at every path |
 | File metadata | regular files only; symlinks skipped with a warning; permissions and extended attributes not recorded |
 | File mtimes | a materialised file gets its entry's mtime; a restored one gets the current time |
 | Re-creating a deleted file | a new version that replaces the tombstones the vault had seen, kept in a deletion record in the cache. With no record, a file at a deleted path is still kept as a new version: when it cannot be decided, data is retained |
 | Unicode paths | recorded as the OS returns them; names that are not UTF-8 are skipped with a warning |
 | Case-insensitive filesystems | no special handling; a case collision surfaces as "untracked file in the way" and nothing is overwritten |
 | Conflict-copy name clash | the existing file is left alone; the conflict is reported and stays open |
-| New folder outside the wanted paths | recorded, held, and added to `include` automatically (section 7); `move` undoes it |
+| A file on disk outside the included paths | added to `include` by the scan, whether new or already held (section 7): the filter follows the disk, so data is kept. `move` undoes it |
+| Seeing a partial vault | `ls`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
+| Terms for partial replication | three independent facts, one word each: included or excluded (the filter), held (the cache), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
 | Tie-break timestamp | file mtime |
 | Empty directories | not tracked; directories emptied by a deletion are removed |
 | Cross-path parents | a read rule, not a segment rejection (`CRDT.md` was corrected to match) |
@@ -842,7 +879,6 @@ Record here anything built differently from these documents, with the reason.
 
 - **A peer's log is read leniently.** Section 6 says a local segment that fails validation stops the command; section 10 says a bad segment in the other vault is rejected and does not stop the run. Both cannot hold for the peer, which must load its own log to scan. A vault opened as a peer skips its invalid segments with a warning; the receiving vault reports them as `rejected`. The vault a command runs in is still strict.
 - **`.syncit` is matched without regard to ASCII case** by the scan and by materialise, at any depth. A valid segment may name `.SYNCIT/x`, which on a case-insensitive filesystem is this vault's own `.syncit/`. Segment validation is unchanged (the format is not touched); the path is simply never written.
-- **Auto-include of a path that is itself excluded.** Section 7's rule finds no prefix when the new file's own path is in `exclude` (a moved file put back by hand). The path is then moved from `exclude` to `include`, which is what `get` would do.
 - **An interrupted scan may be re-recorded as a smaller segment.** Section 7 says the next scan writes the same entries again. A new file whose entry already reached the log is instead recognised by the "file, no row" rule and adopted, so the second segment can hold fewer entries. The set of entries is the same (`interrupted_before_cache`).
 - **`drop` was replaced by `move`.** `drop [--check <vault>] [--force] <path>...` stopped holding paths without sending them anywhere, checking for another copy in local history or a named vault. The check could be stale, and the real task was always "put it there, then remove it here". Two uses went with it: saying "never fetch this folder" with no other vault involved, and discarding files no other copy is known for.
 - **A conflict copy deleted before any scan recorded it can come back** from the other vault, where the same copy was recorded as an ordinary new file. "A copy the user deleted stays deleted" holds from the first run after the copies were created (`copy_deleted_stays_deleted` syncs once before deleting). This follows from the documents as written; it is noted, not fixed.
