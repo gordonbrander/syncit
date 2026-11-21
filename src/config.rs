@@ -1,4 +1,4 @@
-//! `.syncit/config`, and which paths a vault wants.
+//! `.syncit/config`, and which paths a vault includes.
 
 use crate::vault::write_atomic;
 use anyhow::{Context, Result};
@@ -70,8 +70,9 @@ impl Config {
         write_atomic(root, &root.join(".syncit/config"), text.as_bytes())
     }
 
-    /// The longest matching prefix decides; none means not wanted.
-    pub fn wanted(&self, path: &str) -> bool {
+    /// Whether the vault's filter selects the path. The longest matching
+    /// prefix decides; none means excluded.
+    pub fn includes(&self, path: &str) -> bool {
         let longest = |list: &[String]| {
             list.iter()
                 .filter(|p| prefix_matches(p, path))
@@ -82,11 +83,11 @@ impl Config {
         longest(&self.include) > longest(&self.exclude)
     }
 
-    /// Make a path found on disk wanted (SPEC.md section 7, "Auto-include"):
+    /// Make a path found on disk included (SPEC.md section 7, "Auto-include"):
     /// add the shortest of its prefixes that is not equal to, or an ancestor
     /// of, a prefix already listed.
     pub fn auto_include(&mut self, path: &str) {
-        if self.wanted(path) {
+        if self.includes(path) {
             return;
         }
         let listed = |q: &str| {
@@ -135,21 +136,21 @@ mod tests {
     }
 
     #[test]
-    fn wanted_cases() {
+    fn includes_cases() {
         let c = config(&["foo", "foo/bar/big/keep"], &["foo/bar/big"]);
-        assert!(c.wanted("foo"));
-        assert!(c.wanted("foo/x.txt"));
-        assert!(c.wanted("foo/bar/y.txt"));
-        assert!(!c.wanted("foobar"));
-        assert!(!c.wanted("foobar/x.txt"));
-        assert!(!c.wanted("other/x.txt"));
-        assert!(!c.wanted("foo/bar/big/x.bin"));
-        assert!(!c.wanted("foo/bar/big"));
-        assert!(c.wanted("foo/bar/big/keep/x.bin"));
-        assert!(c.wanted("foo/bar/bigger"));
-        assert!(config(&[""], &[]).wanted("anything/at/all"));
-        assert!(!config(&[""], &["a"]).wanted("a/b"));
-        assert!(!config(&[], &[]).wanted("a"));
+        assert!(c.includes("foo"));
+        assert!(c.includes("foo/x.txt"));
+        assert!(c.includes("foo/bar/y.txt"));
+        assert!(!c.includes("foobar"));
+        assert!(!c.includes("foobar/x.txt"));
+        assert!(!c.includes("other/x.txt"));
+        assert!(!c.includes("foo/bar/big/x.bin"));
+        assert!(!c.includes("foo/bar/big"));
+        assert!(c.includes("foo/bar/big/keep/x.bin"));
+        assert!(c.includes("foo/bar/bigger"));
+        assert!(config(&[""], &[]).includes("anything/at/all"));
+        assert!(!config(&[""], &["a"]).includes("a/b"));
+        assert!(!config(&[], &[]).includes("a"));
     }
 
     #[test]
@@ -165,6 +166,6 @@ mod tests {
             ["foo/bar", "zap", "foo/new.txt", "foo/bar/big/n"]
         );
         c.auto_include("foo/bar/big");
-        assert!(c.wanted("foo/bar/big") && c.exclude.is_empty());
+        assert!(c.includes("foo/bar/big") && c.exclude.is_empty());
     }
 }

@@ -93,7 +93,7 @@ Use `push` to back up without bringing anything onto your machine, and `pull` to
 If the other folder holds only [part of a larger archive](#working-with-part-of-a-larger-backup), `push` tells you what it did not take:
 
 ```
-warning: /Volumes/Small does not want 4 files (new.txt, notes.txt, photos/, todo.txt); they were not copied
+warning: /Volumes/Small excludes 4 files (new.txt, notes.txt, photos/, todo.txt); they were not copied
 ```
 
 ## Working with part of a larger backup
@@ -104,7 +104,7 @@ Say a backup drive holds a large archive and you only want one folder of it on y
 syncit clone /Volumes/Backup/Archive/photos/2024 ~/Archive
 ```
 
-You get `~/Archive/photos/2024/…` and nothing else. The folder structure is the same as in the archive, so paths always match. Everything you didn't take is simply "not here"; syncing will never delete it from the archive.
+You get `~/Archive/photos/2024/…` and nothing else. The folder structure is the same as in the archive, so paths always match. The vault *includes* that folder and *excludes* the rest. What is excluded is simply "not here"; syncing will never delete it from the archive. `get` includes more, and `move` excludes again.
 
 **Get more.** To bring in another folder (or a single file) later, point `get` at it in the archive:
 
@@ -139,10 +139,10 @@ recorded 1, added 0, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
 
 > **Deleting is not moving.** If you delete a file with Finder or `rm`, that is a real deletion, and the next sync deletes it from the other folder too. `move` removes it *only here*.
 
-If the other vault holds only part of the archive and these files are not part of it, nothing is sent and nothing is removed:
+If the other vault excludes these files, nothing is sent and nothing is removed:
 
 ```
-error: nothing moved: /Volumes/Small does not want photos/2024/a.jpg
+error: nothing moved: /Volumes/Small excludes photos/2024/a.jpg
 ```
 
 The same goes if the other vault has its own newer version of a file: nothing is removed. Sync with it, then move again.

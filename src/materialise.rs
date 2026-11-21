@@ -67,7 +67,7 @@ fn one(
         } => (heads, winner, losers),
     };
     let row = v.cache.rows.get(p).cloned();
-    if v.declines(p) {
+    if !v.takes(p) {
         return Ok(());
     }
     let (file, w) = (v.root.join(p), v.log.entries[&winner].clone());

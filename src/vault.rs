@@ -181,10 +181,11 @@ impl Vault {
         sum.record(event);
     }
 
-    /// Whether this vault would not take a new file at this path: it neither
-    /// holds nor wants it, or it skips it.
-    pub fn declines(&self, path: &str) -> bool {
-        (!self.cache.rows.contains_key(path) && !self.config.wanted(path)) || self.skips(path)
+    /// Whether a run writes this path here: the vault includes it and does
+    /// not ignore it. A scan includes every file on disk, so after one a held
+    /// path is taken unless it is ignored.
+    pub fn takes(&self, path: &str) -> bool {
+        self.config.includes(path) && !self.skips(path)
     }
 
     /// Whether a scan would not look at this path: it is ignored, belongs to a

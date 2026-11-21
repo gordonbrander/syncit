@@ -88,7 +88,7 @@ A vault is a folder containing a `.syncit/` directory. There is no other kind of
 ```
 b/
   .syncit/
-    config     # format version, wanted paths, store, keep_local_history
+    config     # format version, include and exclude prefixes, store, keep_local_history
     log/       # immutable log segments, named by their hash
     cache      # local: path -> (size, mtime, hash, base), and deletions seen
     blobs/     # optional: content-addressed file copies
@@ -187,13 +187,12 @@ The cache is also the record of what this vault holds. If it is lost, or the vau
 
 ### What a vault holds
 
-`config` lists wanted paths: directory prefixes to include and to exclude, with the longest matching prefix deciding. `init` wants everything. `clone` of a sub-folder wants that sub-folder.
+`config` holds the vault's filter: path prefixes to include and to exclude, with the longest matching prefix deciding. A path the filter selects is *included*; any other is *excluded*. `init` includes everything. `clone` of a sub-folder includes that sub-folder. Separately, a path is *held* when its file is on disk here, and *ignored* when `.syncitignore` rules it out.
 
-- New paths from other vaults are materialised only if wanted.
-- Paths the vault already holds are always kept up to date, wanted or not.
-- A new file or folder placed in the vault outside its wanted paths becomes wanted when it is first scanned. No separate step is needed; `move` undoes it.
+- Paths from other vaults are materialised only if included.
+- A file on disk is included. A scan adds an include for any file it finds at an excluded path, so a new folder placed in the vault is synced with no separate step, and a file the vault holds is never left behind. `move` undoes it.
 - `get <path>...`, given paths inside another vault, adds an include for them and pulls from that vault.
-- `move <path>... <vault>` pushes to that vault, checks that every file arrived, then removes the files and their cache rows here and adds an exclude. It refuses, removing nothing, if the target does not want the files or does not end up holding them. There is no way to stop holding a path without naming a vault that takes it.
+- `move <path>... <vault>` pushes to that vault, checks that every file arrived, then removes the files and their cache rows here and adds an exclude. It refuses, removing nothing, if the target excludes or ignores the files or does not end up holding them. There is no way to stop holding a path without naming a vault that takes it.
 - Deleting a file with ordinary tools is a deletion and propagates.
 
 ### Blobs
@@ -236,7 +235,7 @@ Both vaults do each step, acting on their own folder:
 2. Stash or upload blobs for the new entries, per `keep_local_history` and `store`.
 3. Exchange log segments.
 4. Compute current state from the merged log.
-5. Fetch the blobs needed for wanted and held paths.
+5. Fetch the blobs needed for included paths.
 6. Materialise: write each file to a temporary name in the same directory and rename it into place; apply deletions; write conflict copies; update the stat cache.
 
 Immediately before replacing or deleting a file, it is checked against its cache row. If it has changed, the path is skipped and reported; the next run sees the change as a new entry.
@@ -256,7 +255,7 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | Command | Does |
 |---|---|
 | `syncit init [dir]` | Make a folder a vault. |
-| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another. The vault root is found by walking up from the given path. Records the sub-path as wanted, and nothing about the source. |
+| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another. The vault root is found by walking up from the given path. Records the sub-path as included, and nothing about the source. |
 | `syncit sync <vault or store>` | Sync both ways with another vault, or with a store. |
 | `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
@@ -280,7 +279,7 @@ A vault records no other vault. Every command that involves a second vault names
 | A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
 | A.3 | R5, R7 | `move` removes cache rows, so absence is "not held" |
 | A.4 | R4, R5 | `clone` of a sub-path; same directory structure |
-| A.5 | R4, R6 | `get` for further folders; present files are always recorded and become wanted |
+| A.5 | R4, R6 | `get` for further folders; present files are always recorded and become included |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
 | C.2 | R16, R24 | a store holds the log and blobs; both vaults sync with it |

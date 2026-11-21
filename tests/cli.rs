@@ -134,7 +134,7 @@ fn cli_smoke() {
     assert_eq!(code, 0, "{out}{err}");
     assert!(err.contains("warning: skipped 1 symbolic links"), "{err}");
     assert!(
-        err.contains("/c does not want 2 files (sub/); they were not copied"),
+        err.contains("/c excludes 2 files (sub/); they were not copied"),
         "{err}"
     );
     assert!(
@@ -142,7 +142,7 @@ fn cli_smoke() {
         "{out}"
     );
     let (_, _, err) = both(&a, &["sync", "../c"]);
-    assert!(!err.contains("does not want"), "only push says so: {err}");
+    assert!(!err.contains("excludes"), "only push says so: {err}");
     let (code, out, err) = both(&a, &["status", "--json"]);
     assert!(
         code == 0 && out.starts_with(r#"{"type":"conflict","#),

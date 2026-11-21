@@ -116,10 +116,16 @@ fn announce(opts: &Options) {
     }
 }
 
-/// The files `from` holds that `to` would not take.
-pub fn unwanted(from: &Vault, to: &Vault) -> Vec<String> {
-    let declined = |p: &&String| to.declines(p);
-    from.cache.rows.keys().filter(declined).cloned().collect()
+/// The files `from` holds that `to` excludes.
+pub fn excluded(from: &Vault, to: &Vault) -> Vec<String> {
+    let excluded = |p: &&String| !to.config.includes(p) && !to.skips(p);
+    from.cache.rows.keys().filter(excluded).cloned().collect()
+}
+
+/// The files `from` holds that `to` ignores.
+pub fn ignored(from: &Vault, to: &Vault) -> Vec<String> {
+    let ignored = |p: &&String| to.skips(p);
+    from.cache.rows.keys().filter(ignored).cloned().collect()
 }
 
 /// The part of a run after both vaults are scanned.
@@ -132,8 +138,11 @@ fn exchange(
 ) -> Result<()> {
     let (to_b, to_a) = (mode != Mode::Pull, mode != Mode::Push);
     // A push says "put my files there": say so when some are not taken.
-    let files = unwanted(a, b);
-    if mode == Mode::Push && !files.is_empty() {
+    let untaken = [("excludes", excluded(a, b)), ("ignores", ignored(a, b))];
+    for (verb, files) in untaken {
+        if mode != Mode::Push || files.is_empty() {
+            continue;
+        }
         let top = |p: &String| match p.split_once('/') {
             Some((dir, _)) => format!("{dir}/"),
             None => p.clone(),
@@ -146,7 +155,7 @@ fn exchange(
         warn(
             opts,
             format!(
-                "{} does not want {} files ({}); they were not copied",
+                "{} {verb} {} files ({}); they were not copied",
                 b.root.display(),
                 files.len(),
                 names.join(", ")
@@ -235,7 +244,7 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
     Ok(())
 }
 
-/// Print each open conflict among the paths this vault holds or wants that
+/// Print each open conflict among the paths this vault includes that
 /// is not in `seen`, and add it there.
 fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
     for path in v.log.paths.keys() {
@@ -248,7 +257,7 @@ fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
             continue;
         };
         if (losers.is_empty() && !lost_delete)
-            || !(v.cache.rows.contains_key(path) || v.config.wanted(path))
+            || !v.config.includes(path)
             || !seen.insert(path.clone())
         {
             continue;
@@ -291,7 +300,7 @@ pub fn status(opts: &Options, cwd: &Path) -> Result<Vec<(&'static str, String)>>
             PathState::Incomplete => found.push(("incomplete", path.clone())),
             PathState::Resolved { winner, .. } => {
                 let on_disk = row.map(|row| &row.hash);
-                let concerns = !v.declines(path) && !changed.contains(path);
+                let concerns = v.takes(path) && !changed.contains(path);
                 if concerns && v.log.entries[&winner].hash.as_ref() != on_disk {
                     found.push(("behind", path.clone()));
                 }
@@ -323,7 +332,7 @@ fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
 
 /// Start holding paths of another vault. Each path lies inside that vault,
 /// whose root is found by walking up, as `clone` does. The paths become
-/// wanted here, and a pull from that vault fetches them.
+/// included here, and a pull from that vault fetches them.
 pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
     let first = paths.first().context("no path given")?;
     let source = find_root(&cwd.join(first))?;
@@ -369,17 +378,17 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
         !held.is_empty(),
         "nothing to move: no files here under the given paths"
     );
-    let unwanted: Vec<&str> = held
-        .iter()
-        .filter(|p| t.declines(p))
-        .map(String::as_str)
-        .collect();
-    ensure!(
-        unwanted.is_empty(),
-        "nothing moved: {} does not want {}",
-        t.root.display(),
-        unwanted.join(", ")
-    );
+    let paths = || held.iter().map(String::as_str);
+    let ignored: Vec<&str> = paths().filter(|p| t.skips(p)).collect();
+    let excluded: Vec<&str> = paths().filter(|p| !t.config.includes(p)).collect();
+    for (verb, refused) in [("ignores", ignored), ("excludes", excluded)] {
+        ensure!(
+            refused.is_empty(),
+            "nothing moved: {} {verb} {}",
+            t.root.display(),
+            refused.join(", ")
+        );
+    }
 
     exchange(opts, &mut v, &mut t, Mode::Push, &mut sum)?;
     let arrived =
