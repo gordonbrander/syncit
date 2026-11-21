@@ -7,7 +7,7 @@ The model is the one CouchDB uses for a document's revision tree, generalised so
 ## State and merge
 
 - The log is a set of entries. It only grows.
-- Merge is set union. Union is commutative, associative and idempotent, so any vaults that have exchanged logs hold the same set.
+- Merge is set union. Union is commutative, associative and idempotent, so any vaults that have exchanged logs have the same set.
 - Everything else (current files, conflicts, history) is a pure function of the set. Nothing derived is stored as truth.
 
 ## Entry
@@ -101,15 +101,15 @@ If an entry names a parent that is not in the log, the path is **incomplete**. T
 
 Without this rule a superseded entry would look like a head and produce a false conflict copy.
 
-Scanning is unaffected, because new entries take their parents from the stat cache, not from the heads.
+Scanning is unaffected, because new entries take their parents from the dirstate, not from the heads.
 
 ## Writing an entry
 
-The only operation is "this vault's file at `p` is now this content". A scan writes it when the disk differs from the stat cache.
+The only operation is "this vault's file at `p` is now this content". A scan writes it when the disk differs from the dirstate.
 
-The stat cache row for a path is `(size, mtime, hash, base)`. A path this vault has seen deleted has a deletion record in place of a row, holding only a base. **`base` is the set of entries this vault's file, or its absence, was derived from, and a new entry's parents are the base.** They are not the log's current heads. The two differ whenever the vault has heard of a newer version it has not yet put on disk: the blob was unavailable, the file was skipped because it was being edited, or a run was interrupted after merging. Using the heads there would supersede a version the person never saw.
+The dirstate row for a path is `(size, mtime, hash, base)`. A path this vault has seen deleted has a deletion record in place of a row, holding only a base. **`base` is the set of entries this vault's file, or its absence, was derived from, and a new entry's parents are the base.** They are not the log's current heads. The two differ whenever the vault has heard of a newer version it has not yet put on disk: the blob was unavailable, the file was skipped because it was being edited, or a run was interrupted after merging. Using the heads there would supersede a version the person never saw.
 
-| Disk | Cache row | Entry written | New base |
+| Disk | Dirstate row | Entry written | New base |
 |---|---|---|---|
 | file, hash differs from row | row | file entry, parents = base | the new entry |
 | no file | row | tombstone, parents = base | row replaced by a deletion record: the tombstone |
@@ -119,13 +119,13 @@ The stat cache row for a path is `(size, mtime, hash, base)`. A path this vault 
 | file | none; hash matches nothing | file entry, parents = `[]` | the new entry |
 | no file | deletion record, or none | none | — |
 
-The rows with no cache entry are tried in the order given.
+The rows with no dirstate entry are tried in the order given.
 
 A file where this vault saw a deletion is a re-creation, whatever its content: the vault knows what it had seen, so nothing is inferred. If another vault re-created the path meanwhile and this one has not yet put that version on disk, the two re-creations are concurrent and conflict.
 
-The fourth row is the same act with no record of what the vault had seen: a lost cache, or a file placed at a path the vault never held. A tombstone has no content, so replacing one loses nothing. `parents = []` would not do: a file put back with its old mtime could yield an entry byte-identical to the path's first, which the tombstone already supersedes.
+The fourth row is the same act with no record of what the vault had seen: a lost dirstate, or a file placed at a path the vault never had. A tombstone has no content, so replacing one loses nothing. `parents = []` would not do: a file put back with its old mtime could yield an entry byte-identical to the path's first, which the tombstone already supersedes.
 
-The fifth row is how a vault with a lost cache, or one restored from backup, is recognised as holding an old version and brought forward, instead of having its old files recorded as new edits.
+The fifth row is how a vault with a lost dirstate, or one restored from backup, is recognised as having an old version and brought forward, instead of having its old files recorded as new edits.
 
 ## Setting base
 
@@ -139,7 +139,7 @@ A head that could not be surfaced, because its blob is unavailable, stays out of
 
 When every head is in the base, the next edit names them all as parents and the conflict closes in every vault.
 
-A conflict copy is written without a cache row, so the next scan records it as a new file.
+A conflict copy is written without a dirstate row, so the next scan records it as a new file.
 
 ## Worked cases
 
@@ -153,7 +153,7 @@ A conflict copy is written without a cache row, so the next scan records it as a
 | Folder copied, both copies edited | `A ← B`, `A ← C` | ordinary conflict; no identity needed |
 | Restored from backup at A, then edited, while `A ← B ← C` exists elsewhere | `A ← D` added | heads C and D; conflict; nothing lost |
 | New version heard of but blob unavailable, then local edit | base is still A, so `A ← D` beside `A ← B` | conflict; B not overwritten |
-| File created at a path this vault does not hold | parents `[]` | conflict with the existing head unless the hash is equal |
+| File created at a path this vault does not have | parents `[]` | conflict with the existing head unless the hash is equal |
 
 ## Lookups
 

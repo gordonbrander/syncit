@@ -6,14 +6,14 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use syncit::commands::{self as cmd, Setting};
-use syncit::output::{Holding, Options, Summary};
+use syncit::output::{Options, State, Summary};
 
 const O: &Options = &Options {
     json: false,
     dry_run: false,
 };
-use syncit::cache::Cache;
 use syncit::config::Config;
+use syncit::dirstate::Dirstate;
 use syncit::entry::sha256;
 use syncit::log::{Log, PathState};
 use syncit::materialise::{copy_name, materialise};
@@ -43,7 +43,7 @@ fn is(dir: &Path, path: &str, content: &str) -> bool {
     read(dir, path).as_deref() == Some(content)
 }
 
-/// A temporary folder, and inside it a vault `a` holding `files`.
+/// A temporary folder, and inside it a vault `a` with `files`.
 fn vault(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
     let tmp = TempDir::new().unwrap();
     let a = tmp.path().join("a");
@@ -55,7 +55,7 @@ fn vault(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
     (tmp, a)
 }
 
-/// Vault `a` holding `files`, and `b` cloned from it.
+/// Vault `a` with `files`, and `b` cloned from it.
 fn pair(files: &[(&str, &str)]) -> (TempDir, PathBuf, PathBuf) {
     let (tmp, a) = vault(files);
     let b = tmp.path().join("b");
@@ -63,8 +63,13 @@ fn pair(files: &[(&str, &str)]) -> (TempDir, PathBuf, PathBuf) {
     (tmp, a, b)
 }
 
-fn has(found: &[(&str, String)], kind: &str, path: &str) -> bool {
-    found.iter().any(|(k, p)| *k == kind && p == path)
+/// What `status` lists for the vault at `dir`: the lines that need something.
+fn status(dir: &Path) -> Vec<State> {
+    cmd::status(O, dir, &[], None, false).unwrap()
+}
+
+fn has(found: &[State], state: &str, path: &str) -> bool {
+    found.iter().any(|h| h.ours == state && h.path == path)
 }
 
 fn paths(list: &[&str]) -> Vec<PathBuf> {
@@ -248,14 +253,16 @@ fn story_b1_conflict() {
     assert_eq!(tree(&a), tree(&b));
     // It repeats until it is closed, and status shows it without failing.
     assert_eq!(cmd::sync(O, &b, &a).unwrap().conflicts, 1);
-    assert!(has(&cmd::status(O, &a).unwrap(), "conflict", "notes.txt"));
+    let open = status(&a);
+    assert!(has(&open, "conflict", "notes.txt"));
+    assert_eq!(open[0].conflict.as_ref(), Some(&copy));
     // Editing the winner where both versions are visible closes it everywhere.
     put(&a, "notes.txt", "merged", 3);
     let report = cmd::sync(O, &b, &a).unwrap();
     assert_eq!((report.exit_code(), report.conflicts), (0, 0));
     assert!(is(&a, "notes.txt", "merged") && is(&b, "notes.txt", "merged"));
     assert_eq!(tree(&a), tree(&b));
-    assert!(cmd::status(O, &b).unwrap().is_empty());
+    assert!(status(&b).is_empty());
 }
 
 #[test]
@@ -326,11 +333,11 @@ fn story_d2_history() {
         "v1"
     );
 
-    // Kept versions are a blob source: one held nowhere else comes back.
+    // Kept versions are a blob source: one that is nowhere else comes back.
     fs::remove_file(a.join("f.txt")).unwrap();
     fs::remove_file(b.join("f.txt")).unwrap();
-    fs::remove_file(a.join(".syncit/cache")).unwrap();
-    fs::remove_file(b.join(".syncit/cache")).unwrap();
+    fs::remove_file(a.join(".syncit/dirstate")).unwrap();
+    fs::remove_file(b.join(".syncit/dirstate")).unwrap();
     assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
     assert!(is(&a, "f.txt", "v3") && is(&b, "f.txt", "v3"));
     // Turned off, nothing more is kept, and what was kept stays.
@@ -405,9 +412,9 @@ fn edit_beats_delete() {
 }
 
 /// One head at `path`, a file, whose parents are all tombstones; and the
-/// vault's cache holds it as a file, not as a deletion.
+/// vault's dirstate has it as a file, not as a deletion.
 fn replaced_deletion(dir: &Path, path: &str) -> bool {
-    let (log, cache) = (log(dir), Cache::load(dir).unwrap());
+    let (log, dirstate) = (log(dir), Dirstate::load(dir).unwrap());
     let PathState::Resolved { heads, .. } = log.resolve(path) else {
         return false;
     };
@@ -416,8 +423,8 @@ fn replaced_deletion(dir: &Path, path: &str) -> bool {
         && head.hash.is_some()
         && !head.parents.is_empty()
         && head.parents.iter().all(|p| log.entries[p].hash.is_none())
-        && cache.rows.contains_key(path)
-        && !cache.deleted.contains_key(path)
+        && dirstate.rows.contains_key(path)
+        && !dirstate.deleted.contains_key(path)
 }
 
 #[test]
@@ -430,7 +437,7 @@ fn recreate_after_delete() {
     }
     assert_eq!(cmd::sync(O, &a, &b).unwrap().deleted, 2);
     for dir in [&a, &b] {
-        let seen = Cache::load(dir).unwrap().deleted;
+        let seen = Dirstate::load(dir).unwrap().deleted;
         assert_eq!(seen.len(), 2, "both vaults record the deletions");
     }
     put(&a, "same.txt", "one", 1);
@@ -454,10 +461,10 @@ fn recreate_after_delete() {
     }
     assert!(is(&a, "same.txt", "one") && replaced_deletion(&b, "same.txt"));
 
-    // With the cache lost there is no record: the file is kept all the same.
+    // With the dirstate lost there is no record: the file is kept all the same.
     fs::remove_file(a.join("same.txt")).unwrap();
     cmd::sync(O, &a, &b).unwrap();
-    fs::remove_file(a.join(".syncit/cache")).unwrap();
+    fs::remove_file(a.join(".syncit/dirstate")).unwrap();
     put(&a, "same.txt", "one", 3);
     for _ in 0..2 {
         let report = cmd::sync(O, &a, &b).unwrap();
@@ -555,16 +562,13 @@ fn restore_version() {
     assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy);
     assert!(is(&a, "f.txt", "v2") && is(&a, &copy, "v1"));
     assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy, "again");
-    assert!(has(&cmd::status(O, &a).unwrap(), "new", &copy));
+    assert!(has(&status(&a), "new", &copy));
     assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
     assert!(is(&b, &copy, "v1"));
     // A copy deleted since the last scan can be had again.
     fs::remove_file(a.join(&copy)).unwrap();
     assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy);
-    assert!(
-        cmd::status(O, &a).unwrap().is_empty(),
-        "the same file as before"
-    );
+    assert!(status(&a).is_empty(), "the same file as before");
     // The copy moved over the file is an edit like any other.
     fs::rename(a.join(&copy), a.join("f.txt")).unwrap();
     assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
@@ -583,7 +587,7 @@ fn restore_version() {
     assert_eq!((heads.len(), head.hash.clone()), (1, Some(hash("v2"))));
     let parent = &log_a.entries[&head.parents[0]];
     assert_eq!(parent.hash, Some(hash("unrecorded")));
-    assert!(cmd::status(O, &a).unwrap().is_empty(), "already recorded");
+    assert!(status(&a).is_empty(), "already recorded");
     assert_eq!(restore(&a, "f.txt", "v2", true).unwrap(), "f.txt", "again");
     // The replaced version was kept, and can be had back in turn.
     assert!(restore(&a, "f.txt", "unrecorded", false).is_ok());
@@ -615,7 +619,7 @@ fn restore_version() {
     );
     put(&a, &copy, "something else", 3);
     refused(restore(&a, "f.txt", "v1", false), "is taken");
-    // c holds only k.txt: f.txt is not on disk there.
+    // c has only k.txt: f.txt is not on disk there.
     let c = a.parent().unwrap().join("c");
     cmd::clone(O, &a.join("k.txt"), &c).unwrap();
     refused(restore(&c, "f.txt", "v1", true), "not on disk");
@@ -657,17 +661,17 @@ fn new_file_at_existing_path() {
     for dir in [&a, &b] {
         assert!(is(dir, "g.txt", "other") && is(dir, &copy, "G"));
     }
-    // Both are held from now on.
+    // Both are present from now on.
     put(&a, "f.txt", "F2", 6);
     cmd::sync(O, &b, &a).unwrap();
     assert!(is(&b, "f.txt", "F2"));
 }
 
 #[test]
-fn lost_cache() {
+fn lost_dirstate() {
     let (_tmp, a, b) = pair(&[("f1.txt", "v1"), ("f2.txt", "two"), ("d/f3.txt", "three")]);
     // A single vault: nothing is recorded again.
-    fs::remove_file(a.join(".syncit/cache")).unwrap();
+    fs::remove_file(a.join(".syncit/dirstate")).unwrap();
     let report = cmd::snapshot(O, &a).unwrap();
     assert_eq!(
         (report.recorded, names(&a.join(".syncit/log")).len()),
@@ -675,7 +679,7 @@ fn lost_cache() {
     );
     // With a peer: old files are brought forward, absent ones are not deletions.
     fs::remove_file(b.join("d/f3.txt")).unwrap();
-    fs::remove_file(b.join(".syncit/cache")).unwrap();
+    fs::remove_file(b.join(".syncit/dirstate")).unwrap();
     put(&a, "f1.txt", "v2", 1);
     let report = cmd::sync(O, &b, &a).unwrap();
     assert_eq!(
@@ -744,7 +748,7 @@ fn pending_then_edit() {
     let report = cmd::sync(O, &b, &c).unwrap();
     assert_eq!((report.pending, report.exit_code()), (1, 2));
     assert!(is(&b, "f.txt", "v1"));
-    assert!(has(&cmd::status(O, &b).unwrap(), "behind", "f.txt"));
+    assert!(has(&status(&b), "behind", "f.txt"));
     // An edit made without having seen v2 conflicts with it.
     put(&b, "f.txt", "mine", 2);
     let report = cmd::sync(O, &b, &a).unwrap();
@@ -829,24 +833,24 @@ fn same_tick_edit() {
         .unwrap()
         .set_modified(mtime)
         .unwrap();
-    assert!(has(&cmd::status(O, a).unwrap(), "modified", "f.txt"));
+    assert!(has(&status(a), "modified", "f.txt"));
     assert_eq!(cmd::snapshot(O, a).unwrap().recorded, 1);
     assert_eq!(cmd::snapshot(O, a).unwrap().recorded, 0);
 }
 
 #[test]
-fn interrupted_before_cache() {
+fn interrupted_before_dirstate() {
     let (_tmp, a) = vault(&[("f1.txt", "v1")]);
     cmd::snapshot(O, &a).unwrap();
-    let cache = fs::read(a.join(".syncit/cache")).unwrap();
+    let dirstate = fs::read(a.join(".syncit/dirstate")).unwrap();
     put(&a, "f1.txt", "v2", 1);
     put(&a, "f2.txt", "new", 1);
     assert_eq!(cmd::snapshot(O, &a).unwrap().recorded, 2);
     let entries = log(&a).entries;
-    // As if the run had stopped after the segment and before the cache.
+    // As if the run had stopped after the segment and before the dirstate.
     // The edit is written again as the identical entry; the new file is
     // recognised from the log.
-    fs::write(a.join(".syncit/cache"), cache).unwrap();
+    fs::write(a.join(".syncit/dirstate"), dirstate).unwrap();
     assert_eq!(cmd::snapshot(O, &a).unwrap().recorded, 1);
     assert_eq!(log(&a).entries, entries);
     assert_eq!(cmd::snapshot(O, &a).unwrap().recorded, 0);
@@ -868,7 +872,7 @@ fn interrupted_transfer() {
         )
         .unwrap();
     }
-    assert!(has(&cmd::status(O, &b).unwrap(), "incomplete", "f.txt"));
+    assert!(has(&status(&b), "incomplete", "f.txt"));
     {
         let mut report = Summary::default();
         let mut vb = Vault::open(O, &b, true).unwrap();
@@ -876,7 +880,7 @@ fn interrupted_transfer() {
         assert_eq!((report.incomplete, report.exit_code()), (1, 2));
     }
     assert!(is(&b, "f.txt", "v1"));
-    // A local edit meanwhile is still recorded from the cache.
+    // A local edit meanwhile is still recorded from the dirstate.
     assert_eq!(cmd::snapshot(O, &b).unwrap().recorded, 0);
     let report = cmd::pull(O, &b, &a).unwrap();
     assert_eq!(report.exit_code(), 0);
@@ -1045,18 +1049,18 @@ fn move_refuses() {
     // then a different version: with two paths given, nothing is removed.
     cmd::move_to(O, &a, &paths(&["e"]), &b).unwrap();
     put(&a, "e/h.txt", "mine", 2);
-    fs::remove_file(a.join(".syncit/cache")).unwrap();
+    fs::remove_file(a.join(".syncit/dirstate")).unwrap();
     let error = err(&b, &["e", "d"], &a);
     assert!(
-        error.contains("e/h.txt (it holds a different version") && !error.contains("d/g.txt"),
+        error.contains("e/h.txt (it has a different version") && !error.contains("d/g.txt"),
         "{error}"
     );
     assert!(is(&b, "e/h.txt", "h") && is(&b, "d/g.txt", "g") && is(&a, "e/h.txt", "mine"));
-    // The target holds a different, newer version.
+    // The target has a different, newer version.
     put(&a, "d/g.txt", "newer", 5);
     let error = err(&b, &["d"], &a);
     assert!(
-        error.contains("d/g.txt (it holds a different version"),
+        error.contains("d/g.txt (it has a different version"),
         "{error}"
     );
     assert!(is(&b, "d/g.txt", "g"));
@@ -1074,7 +1078,7 @@ fn move_refuses() {
 #[test]
 fn interrupted_move() {
     // A move stopped after it saved the filter and before it removed the
-    // files: the folder is excluded and its files are still held.
+    // files: the folder is excluded and its files are still present.
     let (_tmp, a, b) = pair(&[("d/g.txt", "g"), ("d/h.txt", "h"), ("f.txt", "f")]);
     configure(&b, |c| c.exclude.push("d".into()));
     // The next scan includes what is on disk: nothing is lost.
@@ -1188,8 +1192,7 @@ fn nested_vault_is_ordinary_files() {
     put(&b, "inner/new.txt", "edited", 2);
     cmd::sync(O, &b, &a).unwrap();
     assert!(is(&a, "inner/new.txt", "edited"));
-    let status = cmd::status(O, &a.join("inner")).unwrap();
-    assert!(has(&status, "modified", "new.txt"));
+    assert!(has(&status(&a.join("inner")), "modified", "new.txt"));
     // Vaults that share files do not sync with each other.
     assert!(cmd::sync(O, &a, &a.join("inner")).is_err());
     assert!(cmd::pull(O, &a.join("inner"), &a).is_err());
@@ -1240,7 +1243,7 @@ fn push_counts_excluded() {
 }
 
 #[test]
-fn ls_states() {
+fn status_states() {
     let (tmp, a) = vault(&[
         ("d/g.txt", "g"),
         ("d/sub/1.txt", "1"),
@@ -1251,42 +1254,40 @@ fn ls_states() {
     ]);
     let c = tmp.path().join("c");
     cmd::clone(O, &a.join("d"), &c).unwrap();
-    let line = |path: &str, files, ours, theirs| Holding {
+    let line = |path: &str, files, ours, theirs| State {
         path: path.into(),
         files,
         ours,
         theirs,
-        deleted: false,
+        conflict: None,
     };
-    // A line for a deleted path that a vault still has the file of.
-    let gone = |path: &str, ours, theirs| Holding {
-        deleted: true,
-        ..line(path, 1, ours, theirs)
-    };
-    // One vault: a folder in one state is one line; the rest is excluded.
+    let list = |dir: &Path, paths: &[PathBuf], peer| cmd::status(O, dir, paths, peer, true);
+    // One vault: nothing needs anything. Of every file, a folder in one
+    // state is one line; the rest is excluded.
+    assert!(status(&c).is_empty());
     assert_eq!(
-        cmd::ls(O, &c, &[], None).unwrap(),
+        list(&c, &[], None).unwrap(),
         [
-            line("d/", 3, "held", None),
+            line("d/", 3, "current", None),
             line("f.txt", 1, "excluded", None),
             line("music/", 2, "excluded", None),
         ]
     );
     // A path lists that folder's children, or that file.
     assert_eq!(
-        cmd::ls(O, &c, &paths(&["music", "d/g.txt"]), None).unwrap(),
+        list(&c, &paths(&["music", "d/g.txt"]), None).unwrap(),
         [
             line("music/m.mp3", 1, "excluded", None),
             line("music/n.mp3", 1, "excluded", None),
-            line("d/g.txt", 1, "held", None),
+            line("d/g.txt", 1, "current", None),
         ]
     );
     // A path outside the vault is refused, and says how to compare.
-    let error = cmd::ls(O, &c, std::slice::from_ref(&a), None).unwrap_err();
+    let error = list(&c, std::slice::from_ref(&a), None).unwrap_err();
     assert!(format!("{error:#}").contains("--vs <vault>"), "{error:#}");
-    // Unrecorded changes count: an edit, a new file and a deletion there, a
-    // new file and a deletion here, and a file that is ignored here. A
-    // deleted path is listed while the other vault still has the file.
+    // Unrecorded changes are states: an edit, a new file and a deletion
+    // there, a new file and a deletion here, and a file that is ignored here.
+    // A vault that still has a file removed in the other is behind it.
     fs::remove_file(c.join("d/sub/1.txt")).unwrap();
     put(&a, "d/g.txt", "edit", 1);
     put(&a, "d/tmp/t.txt", "t", 1);
@@ -1299,40 +1300,46 @@ fn ls_states() {
         out
     };
     let before = listing();
-    assert_eq!(
-        cmd::ls(O, &c, &[], Some(&a)).unwrap(),
-        [
-            line("d/g.txt", 1, "behind", Some("held")),
-            line("d/new.txt", 1, "held", Some("missing")),
-            gone("d/sub/1.txt", "deleted", Some("behind")),
-            line("d/sub/2.txt", 1, "held", Some("held")),
-            line("d/tmp/t.txt", 1, "ignored", Some("held")),
-            line("music/", 2, "excluded", Some("held")),
-        ]
-    );
+    let every = [
+        line("d/g.txt", 1, "behind", Some("modified")),
+        line("d/new.txt", 1, "new", Some("missing")),
+        line("d/sub/1.txt", 1, "removed", Some("behind")),
+        line("d/sub/2.txt", 1, "current", Some("current")),
+        line("d/tmp/t.txt", 1, "ignored", Some("new")),
+        line("f.txt", 1, "excluded", Some("removed")),
+        line("music/", 2, "excluded", Some("current")),
+    ];
+    assert_eq!(list(&c, &[], Some(&a)).unwrap(), every);
+    // Without `all`, only the lines where a vault needs something.
+    let needy: Vec<State> = [0, 1, 2, 4, 5].map(|i| every[i].clone()).into();
+    assert_eq!(cmd::status(O, &c, &[], Some(&a), false).unwrap(), needy);
     // The other way round, and limited to a file or a folder here.
     assert_eq!(
-        cmd::ls(O, &a, &paths(&["d/g.txt"]), Some(&c)).unwrap(),
-        [line("d/g.txt", 1, "held", Some("behind"))]
+        list(&a, &paths(&["d/g.txt"]), Some(&c)).unwrap(),
+        [line("d/g.txt", 1, "modified", Some("behind"))]
     );
     assert_eq!(
-        cmd::ls(O, &a, &paths(&["music"]), Some(&c)).unwrap(),
+        list(&a, &paths(&["music"]), Some(&c)).unwrap(),
         [
-            line("music/m.mp3", 1, "held", Some("excluded")),
-            line("music/n.mp3", 1, "held", Some("excluded")),
+            line("music/m.mp3", 1, "current", Some("excluded")),
+            line("music/n.mp3", 1, "current", Some("excluded")),
         ]
     );
     assert_eq!(
-        cmd::ls(O, &a, &paths(&["d/sub/1.txt"]), Some(&c)).unwrap(),
-        [gone("d/sub/1.txt", "behind", Some("deleted"))]
+        list(&a, &paths(&["d/sub/1.txt"]), Some(&c)).unwrap(),
+        [line("d/sub/1.txt", 1, "behind", Some("removed"))]
     );
-    // With no vault that has the file, a deleted path is not listed.
+    // One vault: what a scan would record here.
     assert_eq!(
-        cmd::ls(O, &c, &paths(&["d/sub"]), None).unwrap(),
-        [line("d/sub/2.txt", 1, "held", None)]
+        status(&c),
+        [
+            line("d/new.txt", 1, "new", None),
+            line("d/sub/1.txt", 1, "removed", None),
+        ]
     );
-    assert!(before == listing(), "ls wrote something");
-    // One vault that has heard of a deletion and still has the file.
+    assert!(before == listing(), "status wrote something");
+    // One vault that has heard of a deletion and still has the file: a sync
+    // did not finish.
     fs::remove_file(a.join("d/sub/2.txt")).unwrap();
     cmd::snapshot(O, &a).unwrap();
     {
@@ -1341,8 +1348,18 @@ fn ls_states() {
         cmd::receive(O, &mut vc, &va, &mut Summary::default()).unwrap();
     }
     assert_eq!(
-        cmd::ls(O, &c, &paths(&["d/sub"]), None).unwrap(),
-        [gone("d/sub/2.txt", "behind", None)]
+        list(&c, &paths(&["d/sub"]), None).unwrap(),
+        [
+            line("d/sub/1.txt", 1, "removed", None),
+            line("d/sub/2.txt", 1, "incomplete", None),
+        ]
+    );
+    // A removal that is recorded, with no vault that has the file, is not
+    // listed.
+    cmd::snapshot(O, &c).unwrap();
+    assert_eq!(
+        list(&c, &paths(&["d/sub"]), None).unwrap(),
+        [line("d/sub/2.txt", 1, "incomplete", None)]
     );
 }
 

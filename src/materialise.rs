@@ -1,7 +1,7 @@
 //! Materialise: bring the working folder to the state the log describes.
 
 use crate::blobs::{available, fetch, hash_file};
-use crate::cache::{Row, mtime_ms};
+use crate::dirstate::{Row, mtime_ms};
 use crate::entry::Id;
 use crate::log::{Loser, PathState};
 use crate::output::{Options, Summary};
@@ -43,7 +43,7 @@ pub fn materialise(
     if opts.dry_run {
         return Ok(());
     }
-    v.cache.save(&v.root)
+    v.dirstate.save(&v.root)
 }
 
 fn one(
@@ -66,7 +66,7 @@ fn one(
             ..
         } => (heads, winner, losers),
     };
-    let row = v.cache.rows.get(p).cloned();
+    let row = v.dirstate.rows.get(p).cloned();
     if !v.takes(p) {
         return Ok(());
     }
@@ -78,11 +78,11 @@ fn one(
                 fs::remove_file(&file)?;
                 prune(&v.root, &file);
             }
-            v.cache.rows.remove(p);
+            v.dirstate.rows.remove(p);
             v.event(opts, sum, "deleted", p, "");
         }
         // No file here now reflects every head: this vault has seen them.
-        v.cache.deleted.insert(p.to_string(), heads);
+        v.dirstate.deleted.insert(p.to_string(), heads);
         return Ok(());
     };
     // The copy name the local version was renamed to, if it was.
@@ -123,8 +123,8 @@ fn one(
             }
             place(v, &tmp, p, &h)?
         };
-        v.cache.deleted.remove(p);
-        v.cache.rows.insert(
+        v.dirstate.deleted.remove(p);
+        v.dirstate.rows.insert(
             p.to_string(),
             Row {
                 size,
@@ -191,12 +191,12 @@ fn copies_and_base(
             .is_none_or(|x| visible.contains(&x))
     };
     let base: Vec<Id> = heads.into_iter().filter(shown).collect();
-    if let Some(row) = v.cache.rows.get_mut(p) {
+    if let Some(row) = v.dirstate.rows.get_mut(p) {
         row.base = base;
     }
 }
 
-/// A conflict copy is an ordinary file with no cache row: the next scan
+/// A conflict copy is an ordinary file with no dirstate row: the next scan
 /// records it.
 fn write_copy(
     opts: &Options,
@@ -232,8 +232,11 @@ fn no_symlinked_parent(v: &Vault, p: &str) -> Result<()> {
 fn safe(v: &Vault, p: &str) -> Result<()> {
     no_symlinked_parent(v, p)?;
     let file = v.root.join(p);
-    match v.cache.rows.get(p) {
-        Some(row) => ensure!(v.cache.matches(row, &file), "changed since it was scanned"),
+    match v.dirstate.rows.get(p) {
+        Some(row) => ensure!(
+            v.dirstate.matches(row, &file),
+            "changed since it was scanned"
+        ),
         None => ensure!(
             file.symlink_metadata().is_err(),
             "an untracked file is in the way"

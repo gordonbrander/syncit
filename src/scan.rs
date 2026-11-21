@@ -1,7 +1,7 @@
-//! Scan: compare the working folder with the stat cache and write entries.
+//! Scan: compare the working folder with the stat dirstate and write entries.
 
 use crate::blobs::hash_file;
-use crate::cache::{Row, mtime_ms};
+use crate::dirstate::{Row, mtime_ms};
 use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
 use crate::output::{Options, warn};
@@ -37,7 +37,8 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
         );
     }
 
-    let (mut cache, mut config, mut out) = (v.cache.clone(), v.config.clone(), Scan::default());
+    let (mut dirstate, mut config, mut out) =
+        (v.dirstate.clone(), v.config.clone(), Scan::default());
     let mut excluded = vec![];
     for path in &files {
         // A file on disk is included, whether or not the vault knew it.
@@ -45,9 +46,9 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             excluded.push(path.clone());
         }
         let file = v.root.join(path);
-        let row = cache.rows.get(path).cloned();
+        let row = dirstate.rows.get(path).cloned();
         if let (Some(row), Ok(meta)) = (&row, file.symlink_metadata())
-            && cache.unchanged(row, meta.len(), mtime_ms(&meta))
+            && dirstate.unchanged(row, meta.len(), mtime_ms(&meta))
         {
             continue;
         }
@@ -58,12 +59,14 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
         v.hint(&hash, file);
         let (parents, kind) = match row {
             Some(row) if row.hash == hash => {
-                cache.rows.insert(path.clone(), Row { size, mtime, ..row });
+                dirstate
+                    .rows
+                    .insert(path.clone(), Row { size, mtime, ..row });
                 continue;
             }
             Some(row) => (row.base, "modified"),
             None => {
-                if let Some(base) = cache.deleted.remove(path) {
+                if let Some(base) = dirstate.deleted.remove(path) {
                     // Re-created where this vault saw a deletion: the new
                     // version replaces the tombstones it had seen.
                     (base, "new")
@@ -73,7 +76,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
                     (tombstones, "new")
                 } else {
                     // A file this vault did not know it had: if the log knows
-                    // this content at this path, the vault holds that version.
+                    // this content at this path, the vault has that version.
                     let known = v
                         .log
                         .valid(path)
@@ -81,7 +84,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
                         .filter(|(_, e)| e.hash.as_ref() == Some(&hash));
                     let known: Vec<Id> = known.map(|(id, _)| id.clone()).collect();
                     if !known.is_empty() {
-                        cache.rows.insert(
+                        dirstate.rows.insert(
                             path.clone(),
                             Row {
                                 size,
@@ -102,7 +105,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             parents,
             path: path.clone(),
         };
-        cache.rows.insert(
+        dirstate.rows.insert(
             path.clone(),
             Row {
                 size,
@@ -116,9 +119,9 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     }
 
     let gone = |p: &&String| !files.contains(*p) && !v.skips(p);
-    let gone: Vec<String> = cache.rows.keys().filter(gone).cloned().collect();
+    let gone: Vec<String> = dirstate.rows.keys().filter(gone).cloned().collect();
     for path in gone {
-        let parents = cache
+        let parents = dirstate
             .rows
             .remove(&path)
             .map(|row| row.base)
@@ -130,7 +133,9 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             parents,
             path,
         };
-        cache.deleted.insert(entry.path.clone(), vec![entry.id()]);
+        dirstate
+            .deleted
+            .insert(entry.path.clone(), vec![entry.id()]);
         out.entries.push(entry);
     }
 
@@ -138,7 +143,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     excluded.sort_by_key(|p| p.len());
     excluded.iter().for_each(|p| config.auto_include(p));
 
-    // Segment, then config, then cache: stopped in between, the next scan
+    // Segment, then config, then dirstate: stopped in between, the next scan
     // sees the same difference and writes the same entries again.
     if !out.entries.is_empty() && !dry {
         let (name, bytes) = segment::encode(&v.config.nickname, &out.entries);
@@ -151,11 +156,11 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
         config.save(&v.root)?;
     }
     v.config = config;
-    cache.scanned = now;
+    dirstate.scanned = now;
     if !dry {
-        cache.save(&v.root)?;
+        dirstate.save(&v.root)?;
     }
-    v.cache = cache;
+    v.dirstate = dirstate;
     Ok(out)
 }
 

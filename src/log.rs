@@ -208,7 +208,7 @@ mod tests {
         let d = e("p", Some("d"), 4, &[&a]);
         expect(&log(&[&a, &b, &c, &d]), &[&c, &d], &d, &[&c], false);
 
-        // A file created at a path this vault does not hold: a conflict with
+        // A file created at a path this vault does not have: a conflict with
         // the existing head, unless the hash is equal.
         let x = e("p", Some("x"), 1, &[]);
         expect(&log(&[&a, &b, &c, &x]), &[&c, &x], &c, &[&x], false);

@@ -2,7 +2,7 @@
 
 ## TLDR
 
-People who keep the same files in more than one place (a backup drive, a laptop, a second machine, a bucket) can copy them one way with rsync, but they cannot safely sync both ways, hold only part of an archive, or find out when two copies diverged. syncit is a command-line tool that turns any folder into a *vault*: a folder of ordinary files plus a small `.syncit/` directory. Any vault can sync with any other vault, in either direction or both. A vault can hold a subset of the files. Conflicting edits are kept side by side instead of one overwriting the other. Keeping old versions is optional and decided per vault.
+People who keep the same files in more than one place (a backup drive, a laptop, a second machine, a bucket) can copy them one way with rsync, but they cannot safely sync both ways, have only part of an archive, or find out when two copies diverged. syncit is a command-line tool that turns any folder into a *vault*: a folder of ordinary files plus a small `.syncit/` directory. Any vault can sync with any other vault, in either direction or both. A vault can have a subset of the files. Conflicting edits are kept side by side instead of one overwriting the other. Keeping old versions is optional and decided per vault.
 
 ## User stories
 
@@ -10,7 +10,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 
 - **A.1** As someone with an archive on a backup drive, I want to check it out to my computer, edit files, and sync back, so the archive gets my edits.
 - **A.2** As the same person, I want files I add to my working copy to appear in the archive when I sync, so new work is backed up without extra steps.
-- **A.3** When my working copy holds files I no longer need locally, I want to move them to the archive and stop holding them here, without deleting them from the archive, so I can free space and keep the archive whole.
+- **A.3** When my working copy has files I no longer need locally, I want to move them to the archive and no longer have them here, without deleting them from the archive, so I can free space and keep the archive whole.
 - **A.4** As someone with a large archive, I want to check out a single sub-folder, edit and add files in it, and sync back, so I only carry what I'm working on.
 - **A.5** As the same person, I want to check out several sub-folders, and also add a new top-level folder locally, so that both my edits and the new folder reach the archive.
 - **B.1** When two folders have both been edited since they last synced, I want them brought into agreement with every conflicting version kept as a visible file, so no edit is silently lost and I can see what to reconcile.
@@ -27,7 +27,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - The folder a person works in contains ordinary files, readable and editable by any application.
 - Any vault can sync with any other vault, and any set of vaults converges to the same state regardless of the order of syncs.
 - No edit is silently lost: a conflicting, deleted, or overwritten version is either still on disk under a visible name or was explicitly discarded by policy.
-- A vault can hold part of the whole without that being mistaken for deletion.
+- A vault can have part of the whole without that being mistaken for deletion.
 - Whether old versions are kept, and where, is a local choice per vault that does not affect how sync behaves.
 - The model is small enough to hold in one's head: files, a log, and blobs.
 
@@ -45,7 +45,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 
 **Must**
 
-- **R1** Sync two vaults in both directions so that afterwards they hold the same files for the paths both hold. (B.1, C.1)
+- **R1** Sync two vaults in both directions so that afterwards they have the same files for the paths both have. (B.1, C.1)
 - **R2** Sync in one direction only, as a push or a pull. (A.1, A.2)
 - **R3** Propagate edits, additions and deletions. (A.1, A.2, B.1)
 - **R4** Create a vault as a partial copy of another by naming a sub-folder, and extend it later with further sub-folders. The directory structure matches the source. (A.4, A.5)
@@ -63,11 +63,11 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 **Should**
 
 - **R15** A vault can keep every version it sees in a local blob store. (D.2)
-- **R16** A vault can send what it has to a content-addressed store, a folder or a bucket, holding it locally while the store is unreachable. (D.2, D.3)
+- **R16** A vault can send what it has to a content-addressed store, a folder or a bucket, keeping it locally while the store is unreachable. (D.2, D.3)
 - **R24** A store holds the log as well as blobs, so vaults that never see each other can sync through it. `R16` and `R24` are one mechanism. (C.1, C.2)
 - **R17** Record a snapshot of the current state without syncing. (D.3)
 - **R26** List the recorded versions of a file, and bring one back: as a copy beside the file, or in place of it. (D.2)
-- **R27** Show what a vault holds, lacks and excludes of everything the log knows, alone or against another vault, without changing anything. (A.3, A.4, A.5)
+- **R27** Show what a vault has, lacks and excludes of everything the log knows, alone or against another vault, without changing anything. (A.3, A.4, A.5)
 - **R18** Report pending local changes, files waiting on unavailable content, and open conflicts, without changing anything. (E.1)
 - **R20** Exclude files by an ignore list. (A.5, E.1)
 - **R25** The on-disk format carries a version, so a later change such as a different hash function can be detected and migrated instead of misread. (E.1)
@@ -91,12 +91,12 @@ b/
   .syncit/
     config     # format version, include and exclude prefixes, store, keep_local_history
     log/       # immutable log segments, named by their hash
-    cache      # local: path -> (size, mtime, hash, base), and deletions seen
+    dirstate      # local: path -> (size, mtime, hash, base), and deletions seen
     blobs/     # optional: content-addressed file copies
   foo/bar/x.txt   # ordinary files
 ```
 
-`config` and `cache` are local and never replicated. `log/` is replicated. `blobs/` is a store that other vaults may read from.
+`config` and `dirstate` are local and never replicated. `log/` is replicated. `blobs/` is a store that other vaults may read from.
 
 ### Format version and hashing
 
@@ -119,7 +119,7 @@ The log is a grow-only set of entries. `CRDT.md` specifies it in full. Each entr
 - Entries are written in segments. A segment is an immutable JSON Lines file named by its hash, holding the entries one scan produced.
 - Merging two logs is set union: copy the segments you don't have.
 - Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot` and `move`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
-- A vault holds the log entries of every vault it has heard from, directly or through a relay.
+- A vault has the log entries of every vault it has heard from, directly or through a relay.
 
 ### Current state
 
@@ -169,42 +169,42 @@ C notes-3f9a1c2e.txt
 - Moving the copy over the original is an ordinary edit: the old content becomes a new version on top of the current one.
 - `--in-place` writes the version at the path itself, replacing the file or bringing back a deleted one. The folder is scanned first, so an edit not yet recorded is in the log before it is replaced, and again afterwards, so the restored version is recorded like any other edit.
 - A restored file is dated now, not with the old version's time. Restoring is a new edit, and should not lose a conflict to something older.
-- Only content this vault can supply can be restored: a file on disk, or a blob kept by `keep_local_history`. With history off, the version `--in-place` replaces survives only as a hash, unless another vault holds it.
+- Only content this vault can supply can be restored: a file on disk, or a blob kept by `keep_local_history`. With history off, the version `--in-place` replaces survives only as a hash, unless another vault has it.
 
 ### Scanning
 
-A scan compares the working folder to the stat cache and produces new entries.
+A scan compares the working folder to the dirstate and produces new entries.
 
-- A file whose size and mtime match its cache row is unchanged. Otherwise it is hashed, and if the hash differs a new entry is written.
+- A file whose size and mtime match its dirstate row is unchanged. Otherwise it is hashed, and if the hash differs a new entry is written.
 - A file whose mtime is not older than the start of the previous scan is hashed regardless, to catch edits within one timestamp tick.
-- A cache row with no file on disk is a deletion and gets a tombstone. The cache then records the deletion in place of the row.
-- A file on disk at a path the cache records as deleted is a re-creation: it gets an entry that replaces the tombstones this vault had seen.
-- A file on disk with neither, wherever it is in the vault, is looked up in the log. If the path is deleted there, the file is new and replaces the deletion. If its hash matches an earlier version of that path, the vault holds that version and nothing is written. Otherwise it is new and gets an entry.
-- A path in the log with no file, no cache row and no recorded deletion is simply not held. Nothing is written.
+- A dirstate row with no file on disk is a deletion and gets a tombstone. The dirstate then records the deletion in place of the row.
+- A file on disk at a path the dirstate records as deleted is a re-creation: it gets an entry that replaces the tombstones this vault had seen.
+- A file on disk with neither, wherever it is in the vault, is looked up in the log. If the path is deleted there, the file is new and replaces the deletion. If its hash matches an earlier version of that path, the vault has that version and nothing is written. Otherwise it is new and gets an entry.
+- A path in the log with no file, no dirstate row and no recorded deletion is simply one the vault does not have. Nothing is written.
 
-The cache is this vault's position in the log, which the log itself cannot hold because it is the same in every vault. For each path it records what is on disk here and its `base`: the entries that state was derived from. For a file, that is a row. For a path this vault has seen deleted, it is a deletion record whose base is the tombstones. A new entry's parents are the base, not the newest entries in the log. A vault that has heard of a newer version but not yet put it on disk therefore produces a conflict when its file is edited, or re-created after a deletion, instead of overwriting a version nobody there saw.
+The dirstate is this vault's position in the log, which the log itself cannot hold because it is the same in every vault. For each path it records what is on disk here and its `base`: the entries that state was derived from. For a file, that is a row. For a path this vault has seen deleted, it is a deletion record whose base is the tombstones. A new entry's parents are the base, not the newest entries in the log. A vault that has heard of a newer version but not yet put it on disk therefore produces a conflict when its file is edited, or re-created after a deletion, instead of overwriting a version nobody there saw.
 
-The cache is also the record of what this vault holds. If it is lost, or the vault is restored from a backup, present files are recognised as old versions and brought forward, and absent files are treated as not held; no deletion is invented. One case cannot be decided without it: a file whose path the log says is deleted may be a re-creation, or an old copy the deletion never reached. The file is kept, as a new version.
+The dirstate is also the record of what this vault has. If it is lost, or the vault is restored from a backup, present files are recognised as old versions and brought forward, and absent files are treated as ones the vault does not have; no deletion is invented. One case cannot be decided without it: a file whose path the log says is deleted may be a re-creation, or an old copy the deletion never reached. The file is kept, as a new version.
 
-### What a vault holds
+### What a vault has
 
-`config` holds the vault's filter: path prefixes to include and to exclude, with the longest matching prefix deciding. A path the filter selects is *included*; any other is *excluded*. `init` includes everything. `clone` of a sub-folder includes that sub-folder. Separately, a path is *held* when its file is on disk here, and *ignored* when `.syncitignore` rules it out.
+`config` holds the vault's filter: path prefixes to include and to exclude, with the longest matching prefix deciding. A path the filter selects is *included*; any other is *excluded*. `init` includes everything. `clone` of a sub-folder includes that sub-folder. Separately, a path is *present* when its file is on disk here, which is to say the vault *has* it, and *ignored* when `.syncitignore` rules it out.
 
 - Paths from other vaults are materialised only if included.
-- A file on disk is included. A scan adds an include for any file it finds at an excluded path, so a new folder placed in the vault is synced with no separate step, and a file the vault holds is never left behind. `move` undoes it.
+- A file on disk is included. A scan adds an include for any file it finds at an excluded path, so a new folder placed in the vault is synced with no separate step, and a file the vault has is never left behind. `move` undoes it.
 - `get <path>...`, given paths inside another vault, adds an include for them and pulls from that vault.
-- `move <path>... <vault>` pushes to that vault, checks that every file arrived, then removes the files and their cache rows here and adds an exclude. It refuses, removing nothing, if the target excludes or ignores the files or does not end up holding them. There is no way to stop holding a path without naming a vault that takes it.
+- `move <path>... <vault>` pushes to that vault, checks that every file arrived, then removes the files and their dirstate rows here and adds an exclude. It refuses, removing nothing, if the target excludes or ignores the files or does not end up having them. There is no way to exclude a path a vault has without naming a vault that takes it.
 - Deleting a file with ordinary tools is a deletion and propagates.
 
 ### Blobs
 
 A blob is a file's content, addressed by its hash. A blob source is anything that can return the bytes for a hash:
 
-- a vault's working folder, located through its stat cache
+- a vault's working folder, located through its dirstate
 - a vault's `.syncit/blobs/`
 - a store
 
-Any source may hold any subset. Fetched bytes are hashed before use. If no reachable source has a blob, the path is reported as pending and retried on the next run. A missing blob for a superseded version means only that the version cannot be restored.
+Any source may have any subset. Fetched bytes are hashed before use. If no reachable source has a blob, the path is reported as pending and retried on the next run. A missing blob for a superseded version means only that the version cannot be restored.
 
 Two independent settings in `config` decide what a vault retains:
 
@@ -237,11 +237,11 @@ Both vaults do each step, acting on their own folder:
 3. Exchange log segments.
 4. Compute current state from the merged log.
 5. Fetch the blobs needed for included paths.
-6. Materialise: write each file to a temporary name in the same directory and rename it into place; apply deletions; write conflict copies; update the stat cache.
+6. Materialise: write each file to a temporary name in the same directory and rename it into place; apply deletions; write conflict copies; update the dirstate.
 
-Immediately before replacing or deleting a file, it is checked against its cache row. If it has changed, the path is skipped and reported; the next run sees the change as a new entry.
+Immediately before replacing or deleting a file, it is checked against its dirstate row. If it has changed, the path is skipped and reported; the next run sees the change as a new entry.
 
-Scanning always precedes merging, so entries are written from what the vault held before it learned anything new.
+Scanning always precedes merging, so entries are written from what the vault had before it learned anything new.
 
 In a push or pull, both vaults still scan, but only the receiving vault takes segments and materialises.
 
@@ -260,9 +260,8 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit sync <vault or store>` | Sync both ways with another vault, or with a store. |
 | `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
-| `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
-| `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
-| `syncit ls [path]... [--vs <vault>]` | List each file as held, missing, behind, excluded, ignored or deleted here, and with `--vs` in another vault too. Writes nothing. |
+| `syncit status [path]... [--vs <vault>]` | Show each file that needs something: unrecorded changes, files behind or missing, open conflicts. `--all` lists every file, with those current, excluded and ignored; `--vs` shows another vault's state beside this one's. Writes nothing. |
+| `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault has. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
 | `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
@@ -279,8 +278,8 @@ A vault records no other vault. Every command that involves a second vault names
 | Story | Requirements | Mechanism |
 |---|---|---|
 | A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
-| A.3 | R5, R7 | `move` removes cache rows, so absence is "not held" |
-| A.4 | R4, R5, R27 | `clone` of a sub-path; same directory structure; `ls` shows what is held and what is excluded |
+| A.3 | R5, R7 | `move` removes dirstate rows, so absence is "not present" |
+| A.4 | R4, R5, R27 | `clone` of a sub-path; same directory structure; `status --all` shows what is present and what is excluded |
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become included |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
@@ -292,7 +291,7 @@ A vault records no other vault. Every command that involves a second vault names
 
 ## Rationale and alternatives
 
-The design keeps three things separate that sync tools usually fuse: what happened (the log), what the bytes are (blobs), and what is on disk (the working folder and its cache). Each can be partial, lost, or rebuilt without corrupting the others.
+The design keeps three things separate that sync tools usually fuse: what happened (the log), what the bytes are (blobs), and what is on disk (the working folder and its dirstate). Each can be partial, lost, or rebuilt without corrupting the others.
 
 - **Do nothing: `rsync -au` in both directions.** With no memory of the last sync it cannot tell a deletion from a creation, or a one-sided edit from a two-sided one. Deleted files come back and the older of two concurrent edits is silently overwritten. It ties correctness to clocks agreeing across machines.
 - **Use `rclone bisync` or `unison`.** These are the boring existing options and they work for two folders. Both keep a snapshot of the last sync per pair of folders. That ties the metadata to a pair: a third folder needs a snapshot per pairing, a moved or restored folder invalidates it, and there is no history. Neither supports drop-without-delete.

@@ -41,22 +41,58 @@ pub struct Version {
     pub available: bool,
 }
 
-/// One line of `ls`: a file, or a folder whose files are all in one state.
-/// A state is `held`, `behind`, `missing`, `excluded`, `ignored` or `deleted`.
+/// One line of `status`: a file, or a folder whose files are all in one
+/// state. The states and their marks are in `mark`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Holding {
+pub struct State {
     /// A folder's path ends in `/`.
     pub path: String,
     /// How many files the line stands for: 1 for a file.
     pub files: usize,
     pub ours: &'static str,
-    /// The other vault's state, when `ls` compares with one.
+    /// The other vault's state, when `status` compares with one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theirs: Option<&'static str>,
-    /// The path's current version is a deletion; a vault that still has the
-    /// file is behind.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub deleted: bool,
+    /// The conflict copies, when a vault's state is `conflict`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<String>,
+}
+
+/// The mark of a state of `status`: one mark for each.
+fn mark(state: &str) -> &'static str {
+    match state {
+        "current" => "✓",
+        "modified" => "✎",
+        "new" => "+",
+        "removed" => "✗",
+        "behind" => "◐",
+        "missing" => "○",
+        "conflict" => "≠",
+        "excluded" => "-",
+        "ignored" => "·",
+        _ => "!", // incomplete
+    }
+}
+
+impl State {
+    /// The text form: the marks, the path padded to `width` characters, each
+    /// vault's state as a word, then the number of files in a folder or the
+    /// conflict copies.
+    pub fn row(&self, width: usize) -> String {
+        let states = [Some(self.ours), self.theirs];
+        let marks: Vec<&str> = states.iter().flatten().map(|s| mark(s)).collect();
+        let mut row = format!("{}  {:<width$}", marks.join(" "), self.path);
+        for state in states.iter().flatten() {
+            row += &format!("  {state:<10}");
+        }
+        if self.path.ends_with('/') {
+            row += &format!("  {} files", self.files);
+        }
+        if let Some(copies) = &self.conflict {
+            row += &format!("  {copies}");
+        }
+        row.trim_end().to_string()
+    }
 }
 
 /// Milliseconds since the epoch as `2026-11-20 14:03Z`.
@@ -81,7 +117,7 @@ fn utc(ms: i64) -> String {
 pub enum Message {
     Event(Event),
     Version(Version),
-    Holding(Holding),
+    State(State),
     /// An open conflict. `message` names the conflict copies.
     Conflict {
         vault: String,
@@ -134,11 +170,10 @@ impl Display for Message {
                 // The letters of `git status --short`, where git has one.
                 let letter = match *kind {
                     "added" => "A",
-                    "updated" | "modified" => "M",
+                    "updated" => "M",
                     "deleted" => "D",
                     "copied" => "C",
                     "moved" => "R",
-                    "new" => "?",
                     _ => "!",
                 };
                 write!(f, "{}", head(side, letter, path))?;
@@ -173,41 +208,7 @@ impl Display for Message {
                 }
                 Ok(())
             }
-            Message::Holding(h) => {
-                let mark = |state: &str| match state {
-                    "held" => "✓",
-                    "behind" | "missing" => "○",
-                    "deleted" => "✗",
-                    _ => "-",
-                };
-                write!(f, "{}", mark(h.ours))?;
-                if let Some(theirs) = h.theirs {
-                    write!(f, " {}", mark(theirs))?;
-                }
-                write!(f, " {}", h.path)?;
-                if h.path.ends_with('/') {
-                    write!(f, " ({} files)", h.files)?;
-                }
-                // The two states a mark does not tell apart from another.
-                for state in ["behind", "ignored"] {
-                    let whose = match (h.ours == state, h.theirs.map(|t| t == state)) {
-                        (true, None) => "",
-                        (true, Some(false)) => "ours ",
-                        (false, Some(true)) => "theirs ",
-                        (true, Some(true)) => "ours and theirs ",
-                        (false, _) => continue,
-                    };
-                    // No `✗` on the line says what the vault is behind.
-                    let gone = h.deleted && h.ours != "deleted" && h.theirs != Some("deleted");
-                    let why = if state == "behind" && gone {
-                        ": deleted elsewhere"
-                    } else {
-                        ""
-                    };
-                    write!(f, " ({whose}{state}{why})")?;
-                }
-                Ok(())
-            }
+            Message::State(h) => write!(f, "{}", h.row(0)),
             Message::Setting { name, value } => write!(f, "{name}: {value}"),
             Message::Blame { path, nicknames } => write!(f, "{} {path}", nicknames.join(",")),
             Message::Info { message } => write!(f, "{message}"),
@@ -298,6 +299,20 @@ pub fn print_stderr<T: Display + Serialize>(value: &T, json: bool) {
     eprintln!("{}", line(value, json));
 }
 
+/// The lines of `status`, with the paths padded to one width.
+// ponytail: the width is counted in characters, so wide ones (CJK) put the
+// columns out of line; use the unicode-width crate if that matters.
+pub fn print_states(lines: &[State], json: bool) {
+    let width = lines.iter().map(|h| h.path.chars().count()).max();
+    for h in lines {
+        if json {
+            print_stdout(&Message::State(h.clone()), true);
+        } else {
+            println!("{}", h.row(width.unwrap_or(0)));
+        }
+    }
+}
+
 pub fn warn(opts: &Options, message: String) {
     print_stderr(&Message::Warning { message }, opts.json);
 }
@@ -333,8 +348,7 @@ mod tests {
         ] {
             assert_eq!(line(&message(kind, ""), false), format!("{text} a/f.txt"));
         }
-        assert_eq!(line(&message("new", ""), false), "? a/f.txt");
-        assert_eq!(line(&message("behind", ""), false), "! a/f.txt (behind)");
+        assert_eq!(line(&message("pending", ""), false), "! a/f.txt (pending)");
         assert_eq!(
             line(&message("skipped", "changed"), false),
             "! a/f.txt (skipped: changed)"
@@ -422,75 +436,55 @@ mod tests {
             line(&version(None, true, false), false),
             "-------- 2023-11-14 22:13Z drive a/f.txt (current, deleted)"
         );
-        let holding = |path: &str, files, ours, theirs| {
-            Message::Holding(Holding {
-                path: path.into(),
-                files,
-                ours,
-                theirs,
-                deleted: false,
-            })
+        let file_state = |path: &str, files, ours, theirs, conflict: Option<&str>| State {
+            path: path.into(),
+            files,
+            ours,
+            theirs,
+            conflict: conflict.map(String::from),
         };
-        let deleted = |ours, theirs| {
-            Message::Holding(Holding {
-                path: "f".into(),
-                files: 1,
-                ours,
-                theirs,
-                deleted: true,
-            })
-        };
+        let message = |h: &State| Message::State(h.clone());
         assert_eq!(
-            both(&deleted("deleted", Some("behind"))),
+            both(&message(&file_state("a/f.txt", 1, "behind", None, None))),
             (
-                "✗ ○ f (theirs behind)".into(),
-                r#"{"type":"holding","path":"f","files":1,"ours":"deleted","theirs":"behind","deleted":true}"#
+                "◐  a/f.txt  behind".into(),
+                r#"{"type":"state","path":"a/f.txt","files":1,"ours":"behind"}"#.into()
+            )
+        );
+        assert_eq!(
+            both(&message(&file_state("music/", 1340, "current", Some("excluded"), None))),
+            (
+                "✓ -  music/  current     excluded    1340 files".into(),
+                r#"{"type":"state","path":"music/","files":1340,"ours":"current","theirs":"excluded"}"#
                     .into()
             )
         );
-        for (ours, theirs, text) in [
-            ("behind", Some("deleted"), "○ ✗ f (ours behind)"),
-            ("behind", None, "○ f (behind: deleted elsewhere)"),
-            (
-                "behind",
-                Some("excluded"),
-                "○ - f (ours behind: deleted elsewhere)",
-            ),
-        ] {
-            assert_eq!(line(&deleted(ours, theirs), false), text);
-        }
         assert_eq!(
-            both(&holding("a/f.txt", 1, "behind", None)),
+            both(&message(&file_state("n.txt", 1, "conflict", None, Some("n-12345678.txt")))),
             (
-                "○ a/f.txt (behind)".into(),
-                r#"{"type":"holding","path":"a/f.txt","files":1,"ours":"behind"}"#.into()
-            )
-        );
-        assert_eq!(
-            both(&holding("music/", 1340, "held", Some("excluded"))),
-            (
-                "✓ - music/ (1340 files)".into(),
-                r#"{"type":"holding","path":"music/","files":1340,"ours":"held","theirs":"excluded"}"#
+                "≠  n.txt  conflict    n-12345678.txt".into(),
+                r#"{"type":"state","path":"n.txt","files":1,"ours":"conflict","conflict":"n-12345678.txt"}"#
                     .into()
             )
         );
-        for (ours, theirs, text) in [
-            ("held", None, "✓ f"),
-            ("missing", None, "○ f"),
-            ("excluded", None, "- f"),
-            ("ignored", None, "- f (ignored)"),
-            ("behind", Some("held"), "○ ✓ f (ours behind)"),
-            ("held", Some("behind"), "✓ ○ f (theirs behind)"),
-            ("behind", Some("behind"), "○ ○ f (ours and theirs behind)"),
-            ("missing", Some("ignored"), "○ - f (theirs ignored)"),
-            (
-                "behind",
-                Some("ignored"),
-                "○ - f (ours behind) (theirs ignored)",
-            ),
+        // One mark and one word for each state; the path is padded to a width.
+        for (state, text) in [
+            ("current", "✓  f     current"),
+            ("modified", "✎  f     modified"),
+            ("new", "+  f     new"),
+            ("removed", "✗  f     removed"),
+            ("behind", "◐  f     behind"),
+            ("missing", "○  f     missing"),
+            ("excluded", "-  f     excluded"),
+            ("ignored", "·  f     ignored"),
+            ("incomplete", "!  f     incomplete"),
         ] {
-            assert_eq!(line(&holding("f", 1, ours, theirs), false), text);
+            assert_eq!(file_state("f", 1, state, None, None).row(4), text);
         }
+        assert_eq!(
+            file_state("f", 1, "behind", Some("removed"), None).row(4),
+            "◐ ✗  f     behind      removed"
+        );
         assert_eq!(utc(0), "1970-01-01 00:00Z");
         assert_eq!(utc(-1), "1969-12-31 23:59Z");
         assert_eq!(utc(951_782_400_000), "2000-02-29 00:00Z");
