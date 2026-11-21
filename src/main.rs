@@ -64,7 +64,7 @@ enum Command {
     /// Show the state of each file here: what needs recording, syncing or you
     #[command(after_help = "\
 Marks:
-  ✓  held        here and up to date
+  ✓  current     here and up to date
   ✎  modified    changed here, not yet recorded
   +  new         new here, not yet recorded
   ✗  removed     gone from this vault

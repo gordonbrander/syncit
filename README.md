@@ -267,7 +267,7 @@ Each line is a mark, the file, and the name of the mark:
 
 | Mark | Name | Meaning |
 |---|---|---|
-| `✓` | held | here and up to date |
+| `✓` | current | here and up to date |
 | `✎` | modified | changed here, and not yet recorded |
 | `+` | new | new here, and not yet recorded |
 | `✗` | removed | gone from this folder |
@@ -287,7 +287,7 @@ syncit status --vs /Volumes/Backup/Documents
 ```
 ✎ ◐  notes.txt   modified    behind
 ◐ ✗  old.txt     behind      removed
-◐ ✓  report.txt  behind      held
+◐ ✓  report.txt  behind      current
 + ○  todo.txt    new         missing
 ```
 
@@ -298,10 +298,10 @@ syncit status --all --vs /Volumes/Small
 ```
 
 ```
-✓ -  music/        held        excluded    1340 files
-✓ ◐  notes.txt     held        behind
-✓ ✓  photos/2024/  held        held        212 files
-- ✓  videos/       excluded    held        31 files
+✓ -  music/        current     excluded    1340 files
+✓ ◐  notes.txt     current     behind
+✓ ✓  photos/2024/  current     current     212 files
+- ✓  videos/       excluded    current     31 files
 ```
 
 A folder whose files are all in the same state is shown as one line with a count. Name folders or files to look at only those: `syncit status --all music photos/2025`. A removed file is listed only while a folder still has it or has not recorded the removal. `syncit status --help` lists the marks.

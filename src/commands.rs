@@ -331,7 +331,7 @@ fn holding(
     match (change, row) {
         (Some(&"deleted"), _) => "removed",
         (Some(kind), _) => kind,
-        (None, Some(row)) if Some(&row.hash) == winner => "held",
+        (None, Some(row)) if Some(&row.hash) == winner => "current",
         (None, Some(_)) if winner.is_none() => "leftover",
         (None, Some(_)) => "behind",
         (None, None) if winner.is_none() => "deleted",
@@ -342,7 +342,7 @@ fn holding(
 /// Whether a line of `status` needs nothing: no sync and no scan would
 /// change what either vault holds of it.
 fn settled(line: &Holding) -> bool {
-    let settled = |state| matches!(state, "held" | "excluded" | "ignored" | "deleted");
+    let settled = |state| matches!(state, "current" | "excluded" | "ignored" | "deleted");
     settled(line.ours) && line.theirs.is_none_or(settled)
 }
 

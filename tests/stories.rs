@@ -1268,7 +1268,7 @@ fn status_states() {
     assert_eq!(
         list(&c, &[], None).unwrap(),
         [
-            line("d/", 3, "held", None),
+            line("d/", 3, "current", None),
             line("f.txt", 1, "excluded", None),
             line("music/", 2, "excluded", None),
         ]
@@ -1279,7 +1279,7 @@ fn status_states() {
         [
             line("music/m.mp3", 1, "excluded", None),
             line("music/n.mp3", 1, "excluded", None),
-            line("d/g.txt", 1, "held", None),
+            line("d/g.txt", 1, "current", None),
         ]
     );
     // A path outside the vault is refused, and says how to compare.
@@ -1304,10 +1304,10 @@ fn status_states() {
         line("d/g.txt", 1, "behind", Some("modified")),
         line("d/new.txt", 1, "new", Some("missing")),
         line("d/sub/1.txt", 1, "removed", Some("behind")),
-        line("d/sub/2.txt", 1, "held", Some("held")),
+        line("d/sub/2.txt", 1, "current", Some("current")),
         line("d/tmp/t.txt", 1, "ignored", Some("new")),
         line("f.txt", 1, "excluded", Some("removed")),
-        line("music/", 2, "excluded", Some("held")),
+        line("music/", 2, "excluded", Some("current")),
     ];
     assert_eq!(list(&c, &[], Some(&a)).unwrap(), every);
     // Without `all`, only the lines where a vault needs something.
@@ -1321,8 +1321,8 @@ fn status_states() {
     assert_eq!(
         list(&a, &paths(&["music"]), Some(&c)).unwrap(),
         [
-            line("music/m.mp3", 1, "held", Some("excluded")),
-            line("music/n.mp3", 1, "held", Some("excluded")),
+            line("music/m.mp3", 1, "current", Some("excluded")),
+            line("music/n.mp3", 1, "current", Some("excluded")),
         ]
     );
     assert_eq!(

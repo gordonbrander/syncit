@@ -61,7 +61,7 @@ pub struct Holding {
 /// The mark of a state of `status`: one mark for each.
 fn mark(state: &str) -> &'static str {
     match state {
-        "held" => "✓",
+        "current" => "✓",
         "modified" => "✎",
         "new" => "+",
         "removed" => "✗",
@@ -452,10 +452,10 @@ mod tests {
             )
         );
         assert_eq!(
-            both(&message(&holding("music/", 1340, "held", Some("excluded"), None))),
+            both(&message(&holding("music/", 1340, "current", Some("excluded"), None))),
             (
-                "✓ -  music/  held        excluded    1340 files".into(),
-                r#"{"type":"holding","path":"music/","files":1340,"ours":"held","theirs":"excluded"}"#
+                "✓ -  music/  current     excluded    1340 files".into(),
+                r#"{"type":"holding","path":"music/","files":1340,"ours":"current","theirs":"excluded"}"#
                     .into()
             )
         );
@@ -469,7 +469,7 @@ mod tests {
         );
         // One mark and one word for each state; the path is padded to a width.
         for (state, text) in [
-            ("held", "✓  f     held"),
+            ("current", "✓  f     current"),
             ("modified", "✎  f     modified"),
             ("new", "+  f     new"),
             ("removed", "✗  f     removed"),

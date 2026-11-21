@@ -260,7 +260,7 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit sync <vault or store>` | Sync both ways with another vault, or with a store. |
 | `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
-| `syncit status [path]... [--vs <vault>]` | Show each file that needs something: unrecorded changes, files behind or missing, open conflicts. `--all` lists every file, with those held, excluded and ignored; `--vs` shows another vault's state beside this one's. Writes nothing. |
+| `syncit status [path]... [--vs <vault>]` | Show each file that needs something: unrecorded changes, files behind or missing, open conflicts. `--all` lists every file, with those current, excluded and ignored; `--vs` shows another vault's state beside this one's. Writes nothing. |
 | `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |

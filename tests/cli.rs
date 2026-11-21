@@ -180,7 +180,7 @@ fn cli_smoke() {
     let (code, out) = run(&a, &["status", "-a", "d", "--vs", "../c"]);
     assert_eq!(
         (code, out.as_str()),
-        (0, "✓ ✓  d/g.txt  held        held\n")
+        (0, "✓ ✓  d/g.txt  current     current\n")
     );
     let args = ["--json", "status", "--all", "--vs", "../c", "d", "sub"];
     let (code, out, err) = both(&a, &args);
@@ -190,7 +190,7 @@ fn cli_smoke() {
         "{out}"
     );
     assert!(
-        out.contains(r#""ours":"held","theirs":"excluded""#),
+        out.contains(r#""ours":"current","theirs":"excluded""#),
         "{out}"
     );
 
