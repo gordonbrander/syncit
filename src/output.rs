@@ -44,7 +44,7 @@ pub struct Version {
 /// One line of `status`: a file, or a folder whose files are all in one
 /// state. The states and their marks are in `mark`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Holding {
+pub struct State {
     /// A folder's path ends in `/`.
     pub path: String,
     /// How many files the line stands for: 1 for a file.
@@ -74,7 +74,7 @@ fn mark(state: &str) -> &'static str {
     }
 }
 
-impl Holding {
+impl State {
     /// The text form: the marks, the path padded to `width` characters, each
     /// vault's state as a word, then the number of files in a folder or the
     /// conflict copies.
@@ -117,7 +117,7 @@ fn utc(ms: i64) -> String {
 pub enum Message {
     Event(Event),
     Version(Version),
-    Holding(Holding),
+    State(State),
     /// An open conflict. `message` names the conflict copies.
     Conflict {
         vault: String,
@@ -208,7 +208,7 @@ impl Display for Message {
                 }
                 Ok(())
             }
-            Message::Holding(h) => write!(f, "{}", h.row(0)),
+            Message::State(h) => write!(f, "{}", h.row(0)),
             Message::Setting { name, value } => write!(f, "{name}: {value}"),
             Message::Blame { path, nicknames } => write!(f, "{} {path}", nicknames.join(",")),
             Message::Info { message } => write!(f, "{message}"),
@@ -302,11 +302,11 @@ pub fn print_stderr<T: Display + Serialize>(value: &T, json: bool) {
 /// The lines of `status`, with the paths padded to one width.
 // ponytail: the width is counted in characters, so wide ones (CJK) put the
 // columns out of line; use the unicode-width crate if that matters.
-pub fn print_holdings(lines: &[Holding], json: bool) {
+pub fn print_states(lines: &[State], json: bool) {
     let width = lines.iter().map(|h| h.path.chars().count()).max();
     for h in lines {
         if json {
-            print_stdout(&Message::Holding(h.clone()), true);
+            print_stdout(&Message::State(h.clone()), true);
         } else {
             println!("{}", h.row(width.unwrap_or(0)));
         }
@@ -436,34 +436,34 @@ mod tests {
             line(&version(None, true, false), false),
             "-------- 2023-11-14 22:13Z drive a/f.txt (current, deleted)"
         );
-        let holding = |path: &str, files, ours, theirs, conflict: Option<&str>| Holding {
+        let file_state = |path: &str, files, ours, theirs, conflict: Option<&str>| State {
             path: path.into(),
             files,
             ours,
             theirs,
             conflict: conflict.map(String::from),
         };
-        let message = |h: &Holding| Message::Holding(h.clone());
+        let message = |h: &State| Message::State(h.clone());
         assert_eq!(
-            both(&message(&holding("a/f.txt", 1, "behind", None, None))),
+            both(&message(&file_state("a/f.txt", 1, "behind", None, None))),
             (
                 "◐  a/f.txt  behind".into(),
-                r#"{"type":"holding","path":"a/f.txt","files":1,"ours":"behind"}"#.into()
+                r#"{"type":"state","path":"a/f.txt","files":1,"ours":"behind"}"#.into()
             )
         );
         assert_eq!(
-            both(&message(&holding("music/", 1340, "current", Some("excluded"), None))),
+            both(&message(&file_state("music/", 1340, "current", Some("excluded"), None))),
             (
                 "✓ -  music/  current     excluded    1340 files".into(),
-                r#"{"type":"holding","path":"music/","files":1340,"ours":"current","theirs":"excluded"}"#
+                r#"{"type":"state","path":"music/","files":1340,"ours":"current","theirs":"excluded"}"#
                     .into()
             )
         );
         assert_eq!(
-            both(&message(&holding("n.txt", 1, "conflict", None, Some("n-12345678.txt")))),
+            both(&message(&file_state("n.txt", 1, "conflict", None, Some("n-12345678.txt")))),
             (
                 "≠  n.txt  conflict    n-12345678.txt".into(),
-                r#"{"type":"holding","path":"n.txt","files":1,"ours":"conflict","conflict":"n-12345678.txt"}"#
+                r#"{"type":"state","path":"n.txt","files":1,"ours":"conflict","conflict":"n-12345678.txt"}"#
                     .into()
             )
         );
@@ -479,10 +479,10 @@ mod tests {
             ("ignored", "·  f     ignored"),
             ("incomplete", "!  f     incomplete"),
         ] {
-            assert_eq!(holding("f", 1, state, None, None).row(4), text);
+            assert_eq!(file_state("f", 1, state, None, None).row(4), text);
         }
         assert_eq!(
-            holding("f", 1, "behind", Some("removed"), None).row(4),
+            file_state("f", 1, "behind", Some("removed"), None).row(4),
             "◐ ✗  f     behind      removed"
         );
         assert_eq!(utc(0), "1970-01-01 00:00Z");

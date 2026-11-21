@@ -3,7 +3,7 @@
 syncit lets you keep folders in sync, in both directions.
 
 - **Sync anything to anything**: Any folder can sync with any other. Sync is decentralized and many-to-many.
-- **Partial sync**: replicas can hold just part of a larger archive.
+- **Partial sync**: replicas can have just part of a larger archive.
 - **Backup and restore**: keep snapshots of old versions (optional).
 
 syncit works seamlessly with ordinary files and folder management. Create, edit, move and delete, then run `syncit sync` when you want the folders to agree.
@@ -93,7 +93,7 @@ syncit pull /Volumes/Backup/Documents    # take changes from theirs, send nothin
 
 Use `push` to back up without bringing anything onto your machine, and `pull` to update from a folder you don't want to change.
 
-If the other folder holds only [part of a larger archive](#working-with-part-of-a-larger-backup), `push` tells you what it did not take:
+If the other folder has only [part of a larger archive](#working-with-part-of-a-larger-backup), `push` tells you what it did not take:
 
 ```
 warning: /Volumes/Small excludes 4 files (new.txt, notes.txt, photos/, todo.txt); they were not copied
@@ -101,7 +101,7 @@ warning: /Volumes/Small excludes 4 files (new.txt, notes.txt, photos/, todo.txt)
 
 ## Working with part of a larger backup
 
-Say a backup drive holds a large archive and you only want one folder of it on your laptop. Clone that sub-folder:
+Say a backup drive has a large archive and you only want one folder of it on your laptop. Clone that sub-folder:
 
 ```sh
 syncit clone /Volumes/Backup/Archive/photos/2024 ~/Archive
@@ -291,7 +291,7 @@ syncit status --vs /Volumes/Backup/Documents
 + ○  todo.txt    new         missing
 ```
 
-To list every file the archive knows about, and not only those that need something, add `--all`. This is how to see what a folder holds only part of:
+To list every file the archive knows about, and not only those that need something, add `--all`. This is how to see what a folder has only part of:
 
 ```sh
 syncit status --all --vs /Volumes/Small
@@ -410,7 +410,7 @@ syncit --json push /Volumes/Backup/Documents
 {"type":"summary","recorded":1,"added":0,"updated":1,"deleted":0,"conflicts":0,"pending":0,"skipped":0,"incomplete":0,"rejected":0}
 ```
 
-The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `holding` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
+The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `state` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
 
 ## Commands
 
@@ -423,7 +423,7 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `ho
 | `syncit pull <vault>` | receive changes only; takes `--dry-run` |
 | `syncit status [path]... [--vs <vault>]` | show the files that need something; `--all` lists every file; `--vs` compares with another vault |
 | `syncit snapshot` | record the current state without syncing |
-| `syncit get <path in another vault>...` | start holding those files here, and fetch them |
+| `syncit get <path in another vault>...` | add those files to this vault, and fetch them |
 | `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
 | `syncit blame [path]...` | show which vault recorded the current version of each file |
 | `syncit log [path]...` | list the recorded versions of each file, newest first |

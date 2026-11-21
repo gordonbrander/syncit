@@ -47,7 +47,7 @@ enum Command {
     },
     /// Record the folder's current state without syncing
     Snapshot,
-    /// Start holding files of another vault: give their paths in that vault
+    /// Add files of another vault to this one: give their paths in that vault
     Get {
         #[arg(required = true)]
         paths: Vec<PathBuf>,

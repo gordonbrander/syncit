@@ -1,7 +1,7 @@
 //! A vault: a folder with `.syncit/`, opened and locked.
 
-use crate::cache::Cache;
 use crate::config::{Config, prefix_matches};
+use crate::dirstate::Dirstate;
 use crate::log::Log;
 use crate::output::{Event, Message, Options, Summary, print_stdout};
 use anyhow::{Context, Result, anyhow, ensure};
@@ -18,10 +18,10 @@ pub struct Vault {
     /// In a run with a peer, `->` for our vault and `<-` for theirs.
     pub side: &'static str,
     pub config: Config,
-    pub cache: Cache,
+    pub dirstate: Dirstate,
     pub log: Log,
     pub ignore: Ignore,
-    /// Hash to working files that may hold it. A hint: every use is verified.
+    /// Hash to working files that may have it. A hint: every use is verified.
     pub hints: HashMap<String, Vec<PathBuf>>,
     _lock: File,
 }
@@ -130,7 +130,7 @@ impl Vault {
             root.display(),
             config.syncit
         );
-        let cache = Cache::load(&root)?;
+        let dirstate = Dirstate::load(&root)?;
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
@@ -139,11 +139,11 @@ impl Vault {
             hints: HashMap::new(),
             root,
             config,
-            cache,
+            dirstate,
             ignore,
             _lock: lock,
         };
-        for (path, row) in &vault.cache.rows {
+        for (path, row) in &vault.dirstate.rows {
             vault
                 .hints
                 .entry(row.hash.clone())
@@ -182,8 +182,8 @@ impl Vault {
     }
 
     /// Whether a run writes this path here: the vault includes it and does
-    /// not ignore it. A scan includes every file on disk, so after one a held
-    /// path is taken unless it is ignored.
+    /// not ignore it. A scan includes every file on disk, so after one a path
+    /// with a row is taken unless it is ignored.
     pub fn takes(&self, path: &str) -> bool {
         self.config.includes(path) && !self.skips(path)
     }

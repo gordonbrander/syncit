@@ -7,7 +7,7 @@ use crate::entry::valid_path;
 use crate::log::PathState;
 use crate::materialise::{copy_name, materialise, prune, write_now};
 use crate::output::{
-    Event, Holding, Message, Options, Summary, Version, print_holdings, print_stdout, warn,
+    Event, Message, Options, State, Summary, Version, print_states, print_stdout, warn,
 };
 use crate::scan::scan;
 use crate::segment::{self, valid_nickname};
@@ -118,16 +118,21 @@ fn announce(opts: &Options) {
     }
 }
 
-/// The files `from` holds that `to` excludes.
+/// The files `from` has that `to` excludes.
 pub fn excluded(from: &Vault, to: &Vault) -> Vec<String> {
     let excluded = |p: &&String| !to.config.includes(p) && !to.skips(p);
-    from.cache.rows.keys().filter(excluded).cloned().collect()
+    from.dirstate
+        .rows
+        .keys()
+        .filter(excluded)
+        .cloned()
+        .collect()
 }
 
-/// The files `from` holds that `to` ignores.
+/// The files `from` has that `to` ignores.
 pub fn ignored(from: &Vault, to: &Vault) -> Vec<String> {
     let ignored = |p: &&String| to.skips(p);
-    from.cache.rows.keys().filter(ignored).cloned().collect()
+    from.dirstate.rows.keys().filter(ignored).cloned().collect()
 }
 
 /// The part of a run after both vaults are scanned.
@@ -308,14 +313,14 @@ pub fn snapshot(opts: &Options, cwd: &Path) -> Result<Summary> {
 /// which it prints as `behind` or `incomplete`. `winner` is the hash of the path's current version,
 /// None in it for a deletion, and None if the path's history is incomplete.
 /// `changes` is what a dry scan of the vault found.
-fn holding(
+fn state(
     v: &Vault,
     path: &str,
     winner: Option<Option<&String>>,
     conflict: bool,
     changes: &BTreeMap<String, &'static str>,
 ) -> &'static str {
-    let (row, change) = (v.cache.rows.get(path), changes.get(path));
+    let (row, change) = (v.dirstate.rows.get(path), changes.get(path));
     if v.skips(path) {
         return "ignored";
     }
@@ -340,8 +345,8 @@ fn holding(
 }
 
 /// Whether a line of `status` needs nothing: no sync and no scan would
-/// change what either vault holds of it.
-fn settled(line: &Holding) -> bool {
+/// change what either vault has of it.
+fn settled(line: &State) -> bool {
     let settled = |state| matches!(state, "current" | "excluded" | "ignored" | "deleted");
     settled(line.ours) && line.theirs.is_none_or(settled)
 }
@@ -350,13 +355,13 @@ fn settled(line: &Holding) -> bool {
 /// sorted by path. A folder below the top whose files, more than one, are all
 /// in the same state is one line; any other is listed child by child. A
 /// conflict is always a line of its own: it names its copies.
-fn collapse(dir: &str, files: &[Holding], top: bool, out: &mut Vec<Holding>) {
-    let state = |f: &Holding| (f.ours, f.theirs, f.conflict.is_some());
+fn collapse(dir: &str, files: &[State], top: bool, out: &mut Vec<State>) {
+    let key = |f: &State| (f.ours, f.theirs, f.conflict.is_some());
     let same = files
         .iter()
-        .all(|f| state(f) == (files[0].ours, files[0].theirs, false));
+        .all(|f| key(f) == (files[0].ours, files[0].theirs, false));
     if !top && same && files.len() > 1 {
-        out.push(Holding {
+        out.push(State {
             path: format!("{dir}/"),
             files: files.len(),
             ..files[0].clone()
@@ -365,7 +370,7 @@ fn collapse(dir: &str, files: &[Holding], top: bool, out: &mut Vec<Holding>) {
     }
     // A child is the next name in the path, with its `/` if it is a folder.
     let skip = if dir.is_empty() { 0 } else { dir.len() + 1 };
-    let child = |f: &Holding| {
+    let child = |f: &State| {
         let rest = &f.path[skip..];
         rest.find('/').map_or(rest.len(), |i| i + 1) + skip
     };
@@ -389,7 +394,7 @@ pub fn status(
     paths: &[PathBuf],
     peer: Option<&Path>,
     all: bool,
-) -> Result<Vec<Holding>> {
+) -> Result<Vec<State>> {
     let opts = &Options {
         json: opts.json,
         dry_run: true,
@@ -409,7 +414,7 @@ pub fn status(
         theirs = scan(opts, peer, true)?.changes.into_iter().collect();
         absorb(&mut v, peer);
     }
-    let mut files: Vec<Holding> = vec![];
+    let mut files: Vec<State> = vec![];
     for path in v.log.paths.keys() {
         let winner = match v.log.resolve(path) {
             PathState::Absent => continue,
@@ -417,11 +422,8 @@ pub fn status(
             PathState::Resolved { winner, .. } => Some(v.log.entries[&winner].hash.as_ref()),
         };
         let copies = conflict_copies(&v, path);
-        let state = |v: &Vault, changes| holding(v, path, winner, copies.is_some(), changes);
-        let (a, b) = (
-            state(&v, &ours),
-            peer.as_ref().map(|peer| state(peer, &theirs)),
-        );
+        let of = |v: &Vault, changes| state(v, path, winner, copies.is_some(), changes);
+        let (a, b) = (of(&v, &ours), peer.as_ref().map(|peer| of(peer, &theirs)));
         // A file still here whose removal is known is behind a vault on the
         // line that removed it. With none, a sync did not finish.
         let leftover = |state, other| match (state, other) {
@@ -429,7 +431,7 @@ pub fn status(
             ("leftover", _) => "incomplete",
             _ => state,
         };
-        let mut line = Holding {
+        let mut line = State {
             path: path.clone(),
             files: 1,
             ours: leftover(a, b),
@@ -448,7 +450,7 @@ pub fn status(
     let mut found = vec![];
     for prefix in &scopes {
         // The prefix itself, if it is a file; then what lies under it.
-        let (file, under): (Vec<Holding>, Vec<Holding>) = files
+        let (file, under): (Vec<State>, Vec<State>) = files
             .iter()
             .filter(|f| prefix_matches(prefix, &f.path))
             .cloned()
@@ -466,7 +468,7 @@ pub fn status(
     for line in &mut found {
         (line.ours, line.theirs) = (word(line.ours), line.theirs.map(word));
     }
-    print_holdings(&found, opts.json);
+    print_states(&found, opts.json);
     Ok(found)
 }
 
@@ -476,7 +478,7 @@ fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
         let prefix = relative(root, &resolve_path(&cwd.join(path))?)?;
         ensure!(
             prefix.is_empty() || valid_path(&prefix),
-            "{} is not a path a vault can hold",
+            "{} is not a path a vault can have",
             path.display()
         );
         Ok(prefix)
@@ -484,7 +486,7 @@ fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
     paths.iter().map(prefix).collect()
 }
 
-/// Start holding paths of another vault. Each path lies inside that vault,
+/// Add paths of another vault to this one. Each path lies inside that vault,
 /// whose root is found by walking up, as `clone` does. The paths become
 /// included here, and a pull from that vault fetches them.
 pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
@@ -516,7 +518,7 @@ pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
 }
 
 /// Move files to another vault: push to it, confirm each file arrived, then
-/// stop holding them here. Nothing is removed unless every file is confirmed.
+/// exclude them here. Nothing is removed unless every file is confirmed.
 pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> Result<Summary> {
     let mut v = Vault::open(opts, cwd, true)?;
     let prefixes = prefixes(&v.root, cwd, paths)?;
@@ -527,12 +529,12 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     record(opts, &mut t, Some(&v), &mut sum)?;
 
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
-    let held: Vec<String> = v.cache.rows.keys().filter(under).cloned().collect();
+    let present: Vec<String> = v.dirstate.rows.keys().filter(under).cloned().collect();
     ensure!(
-        !held.is_empty(),
+        !present.is_empty(),
         "nothing to move: no files here under the given paths"
     );
-    let paths = || held.iter().map(String::as_str);
+    let paths = || present.iter().map(String::as_str);
     let ignored: Vec<&str> = paths().filter(|p| t.skips(p)).collect();
     let excluded: Vec<&str> = paths().filter(|p| !t.config.includes(p)).collect();
     for (verb, refused) in [("ignores", ignored), ("excludes", excluded)] {
@@ -545,23 +547,24 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     }
 
     exchange(opts, &mut v, &mut t, Mode::Push, &mut sum)?;
-    let arrived =
-        |p: &&String| t.cache.rows.get(*p).map(|row| &row.hash) == Some(&v.cache.rows[*p].hash);
+    let arrived = |p: &&String| {
+        t.dirstate.rows.get(*p).map(|row| &row.hash) == Some(&v.dirstate.rows[*p].hash)
+    };
     let target = t.root.display().to_string();
-    let missing: Vec<String> = held
+    let missing: Vec<String> = present
         .iter()
         .filter(|p| !arrived(p))
         .map(|p| {
             let said = |e: &&Event| e.vault == target && &e.path == p;
             match sum.events.iter().find(said) {
                 Some(e) => format!("{p} ({}: {})", e.kind, e.note),
-                None => format!("{p} (it holds a different version; sync first)"),
+                None => format!("{p} (it has a different version; sync first)"),
             }
         })
         .collect();
     ensure!(
         missing.is_empty(),
-        "nothing moved: {target} does not hold {}",
+        "nothing moved: {target} does not have {}",
         missing.join(", ")
     );
 
@@ -573,18 +576,18 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     if !opts.dry_run {
         v.config.save(&v.root)?;
     }
-    // Rows go before files: a file with no row is held again after the next
+    // Rows go before files: a file with no row gets one again at the next
     // scan, but a row with no file would be recorded as a deletion.
-    let rows: Vec<_> = held
+    let rows: Vec<_> = present
         .into_iter()
-        .filter_map(|path| v.cache.rows.remove_entry(&path))
+        .filter_map(|path| v.dirstate.rows.remove_entry(&path))
         .collect();
     if !opts.dry_run {
-        v.cache.save(&v.root)?;
+        v.dirstate.save(&v.root)?;
     }
     for (path, row) in rows {
         let file = v.root.join(&path);
-        if !v.cache.matches(&row, &file) {
+        if !v.dirstate.matches(&row, &file) {
             v.event(
                 opts,
                 &mut sum,
@@ -672,7 +675,7 @@ pub fn log(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>
 
 /// Bring back the version of `path` whose hash starts with `hash`: as a copy
 /// beside the file, named as a conflict copy is, or in place of it. Returns
-/// the vault-relative path that holds the version afterwards.
+/// the vault-relative path that has the version afterwards.
 ///
 /// A copy is an ordinary new file, recorded by the next scan. In place, the
 /// folder is scanned first so that no unrecorded edit is lost, and again
@@ -701,7 +704,7 @@ pub fn restore(
         (None, _) => bail!("no version of {p} has a hash starting with {hash}; see `syncit log`"),
         (Some(_), Some(_)) => bail!("several versions of {p} have a hash starting with {hash}"),
     };
-    let held = v.cache.rows.get(&p).map(|row| row.hash.clone());
+    let present = v.dirstate.rows.get(&p).map(|row| row.hash.clone());
     let dest = if in_place {
         p.clone()
     } else {
@@ -712,7 +715,7 @@ pub fn restore(
         print_stdout(&Message::Info { message }, opts.json);
     };
     if in_place {
-        if held.as_ref() == Some(&h) {
+        if present.as_ref() == Some(&h) {
             already("is already that version");
             return Ok(dest);
         }
@@ -722,7 +725,7 @@ pub fn restore(
         let deleted = matches!(v.log.resolve(&p), PathState::Resolved { winner, .. }
             if v.log.entries[&winner].hash.is_none());
         ensure!(
-            held.is_some() || deleted,
+            present.is_some() || deleted,
             "{p} is not on disk in this vault: sync or `syncit get` it first, or restore a copy"
         );
     } else {
@@ -744,7 +747,7 @@ pub fn restore(
     if in_place {
         record(opts, &mut v, None, &mut sum)?;
     }
-    let kind = match (in_place, held) {
+    let kind = match (in_place, present) {
         (false, _) => "copied",
         (true, Some(_)) => "updated",
         (true, None) => "added",

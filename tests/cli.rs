@@ -125,7 +125,7 @@ fn cli_smoke() {
     // Which edit won depends on the two mtimes, written a moment apart.
     assert!(b.join("sub/f.txt").exists());
 
-    // Results on stdout, warnings and errors on stderr. c holds only d/ of a.
+    // Results on stdout, warnings and errors on stderr. c has only d/ of a.
     fs::create_dir(a.join("d")).unwrap();
     fs::write(a.join("d/g.txt"), "g").unwrap();
     std::os::unix::fs::symlink("g.txt", a.join("d/link")).unwrap();
@@ -145,9 +145,7 @@ fn cli_smoke() {
     assert!(!err.contains("excludes"), "only push says so: {err}");
     let (code, out, err) = both(&a, &["status", "--json"]);
     assert!(
-        code == 0
-            && out.starts_with(r#"{"type":"holding","#)
-            && out.contains(r#""ours":"conflict""#),
+        code == 0 && out.starts_with(r#"{"type":"state","#) && out.contains(r#""ours":"conflict""#),
         "{out}{err}"
     );
 
@@ -171,7 +169,7 @@ fn cli_smoke() {
     let (code, _, err) = both(&a, &["sync", "../nowhere"]);
     assert!(code == 1 && err.starts_with("error: "), "{err}");
 
-    // status --all: one vault, then two; c holds only d/ of a.
+    // status --all: one vault, then two; c has only d/ of a.
     let (code, out) = run(&tmp.path().join("c"), &["status", "--all"]);
     assert!(
         code == 0 && out.contains("✓  d/g.txt") && out.contains("-  sub/"),
@@ -186,7 +184,7 @@ fn cli_smoke() {
     let (code, out, err) = both(&a, &args);
     assert_eq!(code, 0, "{out}{err}");
     assert!(
-        types(&out).iter().all(|t| t == "holding") && !out.is_empty(),
+        types(&out).iter().all(|t| t == "state") && !out.is_empty(),
         "{out}"
     );
     assert!(
