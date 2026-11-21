@@ -21,6 +21,7 @@ pub const TICK_MARGIN_MS: i64 = 2000;
 pub struct Row {
     pub size: u64,
     pub mtime: i64,
+    pub exec: bool,
     pub hash: String,
     pub base: Vec<Id>, // the entries the file was derived from; sorted
 }
@@ -39,6 +40,11 @@ pub struct Dirstate {
 /// A file's mtime in milliseconds since the epoch, rounded down.
 pub fn mtime_ms(meta: &Metadata) -> i64 {
     meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000
+}
+
+/// Whether the owner may execute the file: the one permission that is synced.
+pub fn is_exec(meta: &Metadata) -> bool {
+    meta.mode() & 0o100 != 0
 }
 
 impl Dirstate {
@@ -61,19 +67,22 @@ impl Dirstate {
         )
     }
 
-    /// The unchanged test: may a file with this size and mtime be taken as
-    /// the row's content without hashing it?
-    pub fn unchanged(&self, row: &Row, size: u64, mtime: i64) -> bool {
-        size == row.size && mtime == row.mtime && row.mtime < self.scanned - TICK_MARGIN_MS
+    /// The unchanged test: may a file with this metadata be taken as the
+    /// row's version without hashing it?
+    pub fn unchanged(&self, row: &Row, meta: &Metadata) -> bool {
+        meta.len() == row.size
+            && mtime_ms(meta) == row.mtime
+            && is_exec(meta) == row.exec
+            && row.mtime < self.scanned - TICK_MARGIN_MS
     }
 
-    /// Whether the file on disk still has the row's content.
+    /// Whether the file on disk is still the row's version.
     pub fn matches(&self, row: &Row, file: &Path) -> bool {
         let Ok(meta) = file.symlink_metadata() else {
             return false;
         };
         meta.is_file()
-            && (self.unchanged(row, meta.len(), mtime_ms(&meta))
-                || hash_file(file).is_ok_and(|h| h == row.hash))
+            && is_exec(&meta) == row.exec
+            && (self.unchanged(row, &meta) || hash_file(file).is_ok_and(|h| h == row.hash))
     }
 }

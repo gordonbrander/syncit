@@ -112,6 +112,7 @@ The log is a grow-only set of entries. `CRDT.md` specifies it in full. Each entr
 |---|---|
 | path | relative to the vault root |
 | hash | hash of the file's bytes, or null for a deletion (a tombstone) |
+| exec | whether the file is executable; the only permission recorded, as in Git |
 | mtime | the file's modification time when scanned |
 | parents | ids of the entries for this path that this one replaces |
 
@@ -318,7 +319,7 @@ The design keeps three things separate that sync tools usually fuse: what happen
 
 ## Open questions
 
-- **File metadata.** Which of permission bits, symlinks and extended attributes are recorded in an entry, and whether a metadata-only change is a new version.
+- **File metadata.** The executable bit is recorded, and a change to it alone is a new version, as in Git. Whether symlinks or extended attributes ever are is open.
 - **Case-insensitive filesystems.** How two paths differing only in case are handled on macOS and Windows.
 - **Vaults that are not mounted paths.** The proposal assumes a vault is reachable as a directory. Stores cover syncing through a bucket. Syncing two vaults directly over SSH or iroh is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
 - **Ignore list.** Settled for version 1: `.syncitignore` at the vault root, an ordinary file that syncs with the rest. Wildcards and per-folder lists are open.

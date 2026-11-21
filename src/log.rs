@@ -34,6 +34,7 @@ pub enum PathState {
 pub struct Loser {
     pub hash: String,
     pub mtime: i64, // the largest among heads with this hash
+    pub exec: bool, // of the head with that mtime; of the greatest id on a tie
 }
 
 impl Log {
@@ -105,13 +106,14 @@ impl Log {
         else {
             return PathState::Absent;
         };
-        let mut losers: BTreeMap<&String, i64> = BTreeMap::new();
-        for (_, e) in &heads {
+        let mut losers: BTreeMap<&String, (i64, &Id, bool)> = BTreeMap::new();
+        for (id, e) in &heads {
             if let Some(hash) = &e.hash
                 && e.hash != w.hash
             {
-                let mtime = losers.entry(hash).or_insert(e.mtime);
-                *mtime = e.mtime.max(*mtime);
+                let head = (e.mtime, *id, e.exec);
+                let newest = losers.entry(hash).or_insert(head);
+                *newest = head.max(*newest);
             }
         }
         PathState::Resolved {
@@ -119,9 +121,10 @@ impl Log {
             lost_delete: w.hash.is_some() && heads.iter().any(|(_, e)| e.hash.is_none()),
             losers: losers
                 .into_iter()
-                .map(|(hash, mtime)| Loser {
+                .map(|(hash, (mtime, _, exec))| Loser {
                     hash: hash.clone(),
                     mtime,
+                    exec,
                 })
                 .collect(),
             heads: heads.into_iter().map(|(id, _)| id.clone()).collect(),
@@ -138,6 +141,7 @@ mod tests {
         let mut parents: Vec<Id> = parents.iter().map(|p| p.id()).collect();
         parents.sort();
         Entry {
+            exec: false,
             hash: content.map(|c| sha256(c.as_bytes())),
             mtime,
             parents,
@@ -253,6 +257,30 @@ mod tests {
             PathState::Resolved { losers, .. } => assert_eq!(losers[0].mtime, 7),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_exec() {
+        let on = |e: Entry| Entry { exec: true, ..e };
+        let a = e("p", Some("a"), 1, &[]);
+        // The same content with the other bit is a head, not a conflict.
+        let x = on(e("p", Some("a"), 1, &[&a]));
+        let y = e("p", Some("a"), 1, &[&a]);
+        expect(&log(&[&a, &x]), &[&x], &x, &[], false);
+        let l = log(&[&a, &x, &y]);
+        let winner = if x.id() > y.id() { &x } else { &y };
+        expect(&l, &[&x, &y], winner, &[], false);
+
+        // A loser has the bit of its newest head.
+        let old = on(e("p", Some("b"), 2, &[&a]));
+        let new = e("p", Some("b"), 3, &[&a]);
+        let w = e("p", Some("c"), 9, &[&a]);
+        let exec_of = |heads: &[&Entry]| match log(heads).resolve("p") {
+            PathState::Resolved { losers, .. } => (losers.len(), losers[0].mtime, losers[0].exec),
+            other => panic!("expected a resolved path, got {other:?}"),
+        };
+        assert_eq!(exec_of(&[&a, &old, &w]), (1, 2, true));
+        assert_eq!(exec_of(&[&a, &old, &new, &w]), (1, 3, false));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use syncit::commands::{self as cmd, Setting};
@@ -33,6 +34,16 @@ fn put(dir: &Path, path: &str, content: &str, t: u64) {
         .unwrap()
         .set_modified(time)
         .unwrap();
+}
+
+fn chmod(dir: &Path, path: &str, mode: u32) {
+    fs::set_permissions(dir.join(path), fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Whether the file is executable; None if it is not there.
+fn exec(dir: &Path, path: &str) -> Option<bool> {
+    let meta = dir.join(path).metadata().ok()?;
+    Some(meta.permissions().mode() & 0o111 != 0)
 }
 
 fn read(dir: &Path, path: &str) -> Option<String> {
@@ -689,6 +700,92 @@ fn lost_dirstate() {
     assert_eq!(report.updated, 1);
     assert!(is(&b, "f1.txt", "v2") && is(&b, "f2.txt", "two"));
     assert!(is(&a, "d/f3.txt", "three") && is(&b, "d/f3.txt", "three"));
+    // A known file with the other executable bit is a change to the version
+    // the log has, not a second first version.
+    fs::remove_file(a.join(".syncit/dirstate")).unwrap();
+    chmod(&a, "f2.txt", 0o755);
+    assert_eq!(cmd::snapshot(O, &a).unwrap().recorded, 1);
+    let l = log(&a);
+    let PathState::Resolved { heads, winner, .. } = l.resolve("f2.txt") else {
+        panic!("f2.txt is not resolved");
+    };
+    let w = &l.entries[&winner];
+    assert_eq!((heads.len(), w.exec, w.parents.len()), (1, true, 1));
+}
+
+#[test]
+fn exec_bit_syncs() {
+    let (_tmp, a, b) = pair(&[("run.sh", "echo")]);
+    let mtime = |dir: &Path| dir.join("run.sh").metadata().unwrap().modified().unwrap();
+    let written = mtime(&a);
+    // The bit alone is a change, and it arrives without touching the file.
+    chmod(&a, "run.sh", 0o755);
+    assert!(has(&status(&a), "modified", "run.sh"));
+    let report = cmd::sync(O, &b, &a).unwrap();
+    assert_eq!((report.recorded, report.updated), (1, 1));
+    assert_eq!(report.exit_code(), 0);
+    assert_eq!(exec(&b, "run.sh"), Some(true));
+    assert!(is(&b, "run.sh", "echo") && mtime(&b) == written);
+    let l = log(&a);
+    let PathState::Resolved { heads, winner, .. } = l.resolve("run.sh") else {
+        panic!("run.sh is not resolved");
+    };
+    let w = &l.entries[&winner];
+    assert_eq!((heads.len(), w.exec, w.parents.len()), (1, true, 1));
+    assert!(status(&a).is_empty() && status(&b).is_empty());
+    // And back off again, from the other side.
+    chmod(&b, "run.sh", 0o644);
+    let report = cmd::sync(O, &b, &a).unwrap();
+    assert_eq!((report.recorded, report.updated), (1, 1));
+    assert_eq!(exec(&a, "run.sh"), Some(false));
+    assert!(is(&a, "run.sh", "echo") && mtime(&a) == written);
+    // A new file and an edited one are written with their bit.
+    put(&a, "new.sh", "new", 1);
+    chmod(&a, "new.sh", 0o700);
+    put(&a, "run.sh", "echo 2", 2);
+    chmod(&a, "run.sh", 0o755);
+    assert_eq!(cmd::sync(O, &b, &a).unwrap().exit_code(), 0);
+    assert_eq!(exec(&b, "new.sh"), Some(true));
+    assert_eq!(exec(&b, "run.sh"), Some(true));
+    assert!(is(&b, "run.sh", "echo 2"));
+    // Nothing more to say.
+    let report = cmd::sync(O, &b, &a).unwrap();
+    assert_eq!((report.recorded, report.updated), (0, 0));
+}
+
+#[test]
+fn exec_change_vs_edit() {
+    let (_tmp, a, b) = pair(&[("run.sh", "base")]);
+    chmod(&a, "run.sh", 0o755);
+    put(&b, "run.sh", "edited", 2);
+    let report = cmd::sync(O, &b, &a).unwrap();
+    assert_eq!((report.conflicts, report.exit_code()), (1, 2));
+    // The edit wins; the executable version is the conflict copy, in both.
+    let copy = copy_of("run.sh", "base");
+    for dir in [&a, &b] {
+        assert!(is(dir, "run.sh", "edited") && is(dir, &copy, "base"));
+        assert_eq!(exec(dir, "run.sh"), Some(false));
+        assert_eq!(exec(dir, &copy), Some(true));
+    }
+    // Both vaults record the copy as the same entry.
+    assert_eq!(cmd::sync(O, &b, &a).unwrap().conflicts, 1);
+    assert_eq!(log(&a).paths[&copy].len(), 1);
+    assert!(log(&a).entries[&log(&a).paths[&copy].iter().next().unwrap().clone()].exec);
+}
+
+#[test]
+fn restore_keeps_exec() {
+    let (_tmp, a) = vault(&[("run.sh", "v1")]);
+    configure(&a, |c| c.keep_local_history = true);
+    chmod(&a, "run.sh", 0o755);
+    cmd::snapshot(O, &a).unwrap();
+    put(&a, "run.sh", "v2", 1);
+    chmod(&a, "run.sh", 0o644);
+    cmd::snapshot(O, &a).unwrap();
+    let v1 = sha256(b"v1");
+    let copy = cmd::restore(O, &a, Path::new("run.sh"), &v1[..8], false).unwrap();
+    assert!(is(&a, &copy, "v1"));
+    assert_eq!(exec(&a, &copy), Some(true));
 }
 
 #[test]
@@ -899,10 +996,10 @@ fn hostile_segment() {
     };
     let hash = sha256(b"good");
     let escape = plant(format!(
-        "{{\"nickname\":\"a\",\"syncit\":1}}\n{{\"hash\":\"{hash}\",\"mtime\":1,\"parents\":[],\"path\":\"../evil.txt\"}}\n"
+        "{{\"nickname\":\"a\",\"syncit\":1}}\n{{\"exec\":false,\"hash\":\"{hash}\",\"mtime\":1,\"parents\":[],\"path\":\"../evil.txt\"}}\n"
     ));
     plant(
-        "{\"nickname\":\"a\",\"syncit\":1}\n{\"hash\":null, \"mtime\":1,\"parents\":[],\"path\":\"x\"}\n"
+        "{\"nickname\":\"a\",\"syncit\":1}\n{\"exec\":false,\"hash\":null, \"mtime\":1,\"parents\":[],\"path\":\"x\"}\n"
             .to_string(),
     );
     // A segment from before nicknames.

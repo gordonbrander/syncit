@@ -228,7 +228,7 @@ syncit log notes.txt
 5c02e8aa 2026-11-18 08:05Z laptop notes.txt (no content)
 ```
 
-Each line starts with the first characters of the version's hash; times are UTC. `(no content)` marks a version this vault did not keep, which is every old version unless history was on when it passed through.
+Each line starts with the first characters of the version's hash; times are UTC. `(no content)` marks a version this vault did not keep, which is every old version unless history was on when it passed through. `(executable)` marks a version in which the file could be run.
 
 `restore` takes a file and enough of a hash to pick one version:
 
@@ -384,7 +384,7 @@ There are no wildcards. Ignored files are never sent, never overwritten and neve
 - **Safe to interrupt.** You can stop syncit at any point, or unplug the drive. Run it again and it finishes the job.
 - **It won't overwrite work in progress.** If a file changes while a sync is running, that file is skipped and reported, and handled on the next run.
 - **Local folders only.** The other folder must be reachable as a path on this machine: an internal disk, an external drive, a mounted network share. syncit does not connect over the network itself.
-- **Not synced:** symbolic links, empty folders, file permissions.
+- **Not synced:** symbolic links, empty folders, and file permissions other than whether a file is executable.
 - **Renames** are seen as a delete plus a new file, so a renamed file is copied again.
 - **A vault inside a vault.** If you drag one vault into another, its files are synced as ordinary files of the outer vault, and syncit prints a warning. The two cannot be synced with each other.
 - **One at a time.** Running two syncit commands on the same vault at once fails with "vault is in use".

@@ -16,6 +16,7 @@ An entry records that a path had some content.
 
 | Field | Type | Meaning |
 |---|---|---|
+| `exec` | boolean | the owner may execute the file; `false` for a tombstone |
 | `hash` | 64 hex chars, or `null` | SHA-256 of the file's bytes; `null` is a tombstone |
 | `mtime` | integer | milliseconds since the Unix epoch; for a tombstone, the time the scan noticed the deletion |
 | `parents` | sorted array of entry ids | the entries of this path that this one replaces; empty for a file the vault had no prior version of |
@@ -37,8 +38,8 @@ A segment is a JSON Lines file:
 
 ```
 {"nickname":"notes","syncit":1}
-{"hash":"9c1f…","mtime":1763600000000,"parents":["3f9a…"],"path":"foo/bar/x.txt"}
-{"hash":null,"mtime":1763600005000,"parents":["77b0…"],"path":"old.txt"}
+{"exec":false,"hash":"9c1f…","mtime":1763600000000,"parents":["3f9a…"],"path":"foo/bar/x.txt"}
+{"exec":false,"hash":null,"mtime":1763600005000,"parents":["77b0…"],"path":"old.txt"}
 ```
 
 - The first line is the header: the format version, and the nickname of the vault that scanned.
@@ -83,7 +84,7 @@ For a path `p`, with `E` the entries for `p`, leaving out invalid entries (see "
 4. **Conflict**: the heads have more than one distinct `hash`.
 5. **Losers**: each distinct non-null `hash` among the heads other than the winner's. Each becomes a conflict copy, as `PRD.md` describes.
 
-The path exists in the current state if the winner is not a tombstone.
+The path exists in the current state if the winner is not a tombstone. The file has the winner's `exec`. Heads that differ only in `exec` are not a conflict: no content would be lost.
 
 In the winner's key, `hash is not null` ranks any file above a tombstone, so an edit beats a concurrent delete. `mtime` makes the most recent edit win. The id breaks all remaining ties.
 
@@ -107,15 +108,16 @@ Scanning is unaffected, because new entries take their parents from the dirstate
 
 The only operation is "this vault's file at `p` is now this content". A scan writes it when the disk differs from the dirstate.
 
-The dirstate row for a path is `(size, mtime, hash, base)`. A path this vault has seen deleted has a deletion record in place of a row, holding only a base. **`base` is the set of entries this vault's file, or its absence, was derived from, and a new entry's parents are the base.** They are not the log's current heads. The two differ whenever the vault has heard of a newer version it has not yet put on disk: the blob was unavailable, the file was skipped because it was being edited, or a run was interrupted after merging. Using the heads there would supersede a version the person never saw.
+The dirstate row for a path is `(size, mtime, exec, hash, base)`. A path this vault has seen deleted has a deletion record in place of a row, holding only a base. **`base` is the set of entries this vault's file, or its absence, was derived from, and a new entry's parents are the base.** They are not the log's current heads. The two differ whenever the vault has heard of a newer version it has not yet put on disk: the blob was unavailable, the file was skipped because it was being edited, or a run was interrupted after merging. Using the heads there would supersede a version the person never saw.
 
 | Disk | Dirstate row | Entry written | New base |
 |---|---|---|---|
-| file, hash differs from row | row | file entry, parents = base | the new entry |
+| file, hash or exec differs from row | row | file entry, parents = base | the new entry |
 | no file | row | tombstone, parents = base | row replaced by a deletion record: the tombstone |
 | file | deletion record | file entry, parents = base | record replaced by a row: the new entry |
 | file | none; every head of this path is a tombstone | file entry, parents = the heads | the new entry |
-| file | none; hash matches entries of this path | none | the matching entries |
+| file | none; hash and exec match entries of this path | none | the matching entries |
+| file | none; hash matches entries of this path, exec matches none of them | file entry, parents = the entries with that hash | the new entry |
 | file | none; hash matches nothing | file entry, parents = `[]` | the new entry |
 | no file | deletion record, or none | none | — |
 
@@ -125,7 +127,7 @@ A file where this vault saw a deletion is a re-creation, whatever its content: t
 
 The fourth row is the same act with no record of what the vault had seen: a lost dirstate, or a file placed at a path the vault never had. A tombstone has no content, so replacing one loses nothing. `parents = []` would not do: a file put back with its old mtime could yield an entry byte-identical to the path's first, which the tombstone already supersedes.
 
-The fifth row is how a vault with a lost dirstate, or one restored from backup, is recognised as having an old version and brought forward, instead of having its old files recorded as new edits.
+The fifth row is how a vault with a lost dirstate, or one restored from backup, is recognised as having an old version and brought forward, instead of having its old files recorded as new edits. The sixth is the same vault having changed the executable bit of that version: a child of it, so the result does not depend on a tie-break between two first versions.
 
 ## Setting base
 
@@ -181,7 +183,7 @@ Not in version 1. This is the intended shape, to be designed together with netwo
 
   ```
   {"key":"<public key>","nickname":"notes","syncit":2}
-  {"hash":"9c1f…","mtime":1763600000000,"parents":["3f9a…"],"path":"foo/bar/x.txt"}
+  {"exec":false,"hash":"9c1f…","mtime":1763600000000,"parents":["3f9a…"],"path":"foo/bar/x.txt"}
   {"sig":"<signature over all bytes above>"}
   ```
 
