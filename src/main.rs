@@ -70,6 +70,20 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Remove files from this vault only, without sending them anywhere
+    Drop {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// A vault that has the files: nothing is dropped unless it does
+        #[arg(long, value_name = "VAULT")]
+        check: Option<PathBuf>,
+        /// Drop even files no other copy is known of
+        #[arg(long)]
+        force: bool,
+        /// Show what would happen; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the state of each file here: what needs recording, syncing or you
     #[command(after_help = "\
 Marks:
@@ -138,7 +152,8 @@ fn main() {
         Command::Sync { dry_run, .. }
         | Command::Push { dry_run, .. }
         | Command::Pull { dry_run, .. }
-        | Command::Move { dry_run, .. } => dry_run,
+        | Command::Move { dry_run, .. }
+        | Command::Drop { dry_run, .. } => dry_run,
         _ => false,
     };
     let no_remove = match cli.command {
@@ -167,6 +182,12 @@ fn main() {
         Command::Move { paths, vault, .. } => {
             commands::move_to(opts, cwd, &paths, &vault).map(Some)
         }
+        Command::Drop {
+            paths,
+            check,
+            force,
+            ..
+        } => commands::drop(opts, cwd, &paths, check.as_deref(), force).map(Some),
         Command::Blame { paths } => commands::blame(opts, cwd, &paths).map(|_| None),
         Command::Log { paths } => commands::log(opts, cwd, &paths).map(|_| None),
         Command::Restore {

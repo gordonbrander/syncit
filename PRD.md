@@ -119,7 +119,7 @@ The log is a grow-only set of entries. `CRDT.md` specifies it in full. Each entr
 - An entry's id is the hash of its canonical bytes. Two byte-identical entries are the same entry.
 - Entries are written in segments. A segment is an immutable JSON Lines file named by its hash, holding the entries one scan produced.
 - Merging two logs is set union: copy the segments you don't have.
-- Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot` and `move`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
+- Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot`, `move` and `drop`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
 - A vault has the log entries of every vault it has heard from, directly or through a relay.
 
 ### Current state
@@ -211,7 +211,8 @@ The dirstate is also the record of what this vault has. If it is lost, or the va
 - Paths from other vaults are materialised only if included.
 - A file on disk is included. A scan adds an include for any file it finds at an excluded path, so a new folder placed in the vault is synced with no separate step, and a file the vault has is never left behind. `move` undoes it.
 - `get <path>...`, given paths inside another vault, adds an include for them and pulls from that vault.
-- `move <path>... <vault>` pushes to that vault, checks that every file arrived, then removes the files and their dirstate rows here and adds an exclude. It refuses, removing nothing, if the target excludes or ignores the files or does not end up having them. There is no way to exclude a path a vault has without naming a vault that takes it.
+- `move <path>... <vault>` pushes to that vault, checks that every file arrived, then removes the files and their dirstate rows here and adds an exclude. It refuses, removing nothing, if the target excludes or ignores the files or does not end up having them.
+- `drop <path>...` removes the files and their rows here and adds an exclude, sending nothing. It refuses unless each file's content is in local history or in a vault named with `--check`; `--force` overrides.
 - Deleting a file with ordinary tools is a deletion and propagates.
 
 ### Blobs
@@ -279,13 +280,13 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status [path]... [--vs <vault>]` | Show each file that needs something: unrecorded changes, files behind or missing, open conflicts. `--all` lists every file, with those current, excluded and ignored; `--vs` shows another vault's state beside this one's. Writes nothing. |
-| `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault has. |
+| `syncit get <path in another vault>...` / `syncit move <path>... <vault>` / `syncit drop <path>...` | Change what this vault has. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
 | `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
 | `syncit config` | Show or change `keep_local_history`, `nickname` and `store`. |
 
-`sync`, `push`, `pull` and `move` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
+`sync`, `push`, `pull`, `move` and `drop` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
 
 `sync`, `push` and `pull` take `--no-remove`, which removes no file because it was deleted elsewhere: a vault that still has the file keeps it, and records it as re-created, so it comes back in the vault that deleted it.
 

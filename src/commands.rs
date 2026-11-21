@@ -614,6 +614,72 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
         missing.join(", ")
     );
 
+    remove_here(opts, &mut v, prefixes, present, "moved", &mut sum)?;
+    Ok(sum)
+}
+
+/// Stop having files here without sending them anywhere: exclude the paths
+/// and remove their files from this vault only. Unless `force`, every file's
+/// content must be in this vault's history or in the vault named by `check`.
+pub fn drop(
+    opts: &Options,
+    cwd: &Path,
+    paths: &[PathBuf],
+    check: Option<&Path>,
+    force: bool,
+) -> Result<Summary> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    let prefixes = prefixes(&v.root, cwd, paths)?;
+    let mut check = check.map(|path| other(opts, &mut v, path)).transpose()?;
+    let mut sum = Summary::default();
+    announce(opts);
+    // Unrecorded changes are recorded before anything is removed, and the
+    // checked vault is scanned so that its rows say what it has now.
+    record(opts, &mut v, check.as_ref(), &mut sum)?;
+    if let Some(c) = &mut check {
+        record(opts, c, Some(&v), &mut sum)?;
+    }
+
+    let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
+    let present: Vec<String> = v.dirstate.rows.keys().filter(under).cloned().collect();
+    if !force {
+        let blobs = v.dot().join("blobs");
+        let elsewhere = |hash: &String| {
+            blobs.join(hash).exists()
+                || check.as_ref().is_some_and(|c| {
+                    c.dirstate.rows.values().any(|row| &row.hash == hash)
+                        || c.dot().join("blobs").join(hash).exists()
+                })
+        };
+        let sole: Vec<&str> = present
+            .iter()
+            .filter(|p| !elsewhere(&v.dirstate.rows[*p].hash))
+            .map(String::as_str)
+            .collect();
+        let hint = match check {
+            Some(_) => "Sync with it first",
+            None => "Name a vault that has them with --check <vault>",
+        };
+        ensure!(
+            sole.is_empty(),
+            "nothing dropped: no other copy is known of {}. {hint}, or use --force",
+            sole.join(", ")
+        );
+    }
+    remove_here(opts, &mut v, prefixes, present, "dropped", &mut sum)?;
+    Ok(sum)
+}
+
+/// Exclude `prefixes` and remove the `present` files under them from this
+/// vault only, reporting each as `kind`. No deletion is recorded.
+fn remove_here(
+    opts: &Options,
+    v: &mut Vault,
+    prefixes: Vec<String>,
+    present: Vec<String>,
+    kind: &'static str,
+    sum: &mut Summary,
+) -> Result<()> {
     for prefix in prefixes {
         v.config.include.retain(|x| !prefix_matches(&prefix, x));
         v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
@@ -634,22 +700,16 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     for (path, row) in rows {
         let file = v.root.join(&path);
         if !v.dirstate.matches(&row, &file) {
-            v.event(
-                opts,
-                &mut sum,
-                "skipped",
-                &path,
-                "changed since it was scanned",
-            );
+            v.event(opts, sum, "skipped", &path, "changed since it was scanned");
             continue;
         }
         if !opts.dry_run {
             fs::remove_file(&file)?;
             prune(&v.root, &file);
         }
-        v.event(opts, &mut sum, "moved", &path, "");
+        v.event(opts, sum, kind, &path, "");
     }
-    Ok(sum)
+    Ok(())
 }
 
 /// Which vaults recorded the current version of each file under `paths`, or

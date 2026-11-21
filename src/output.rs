@@ -177,7 +177,7 @@ impl Display for Message {
                     "updated" => "M",
                     "deleted" => "D",
                     "copied" => "C",
-                    "moved" => "R",
+                    "moved" | "dropped" => "R",
                     _ => "!",
                 };
                 write!(f, "{}", head(side, letter, path))?;
@@ -352,6 +352,7 @@ mod tests {
             ("deleted", "D"),
             ("copied", "C"),
             ("moved", "R"),
+            ("dropped", "R"),
         ] {
             assert_eq!(line(&message(kind, ""), false), format!("{text} a/f.txt"));
         }

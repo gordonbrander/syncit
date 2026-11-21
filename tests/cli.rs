@@ -203,8 +203,8 @@ fn cli_smoke() {
     let (code, help) = run(&a, &["--help"]);
     assert_eq!(code, 0);
     for command in [
-        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "blame",
-        "log", "restore", "config",
+        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "drop",
+        "blame", "log", "restore", "config",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),
