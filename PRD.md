@@ -287,6 +287,8 @@ A vault does have a nickname: a label, by default its folder's name, written int
 
 `sync`, `push`, `pull` and `move` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
 
+`sync`, `push` and `pull` take `--no-remove`, which removes no file because it was deleted elsewhere: a vault that still has the file keeps it, and records it as re-created, so it comes back in the vault that deleted it.
+
 Every command prints as it works: results on stdout, one line per file, and warnings and errors on stderr. `--json` makes every line a JSON object, for scripts.
 
 A vault records no other vault. Every command that involves a second vault names it, so there is no default peer and no hierarchy, and nothing breaks when a folder moves.

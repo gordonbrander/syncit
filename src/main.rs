@@ -30,6 +30,9 @@ enum Command {
         /// Show what would happen; change nothing
         #[arg(long)]
         dry_run: bool,
+        /// Keep files that were deleted; they come back in the vault that deleted them
+        #[arg(long)]
+        no_remove: bool,
     },
     /// Send this vault's changes to another vault
     Push {
@@ -37,6 +40,9 @@ enum Command {
         /// Show what would happen; change nothing
         #[arg(long)]
         dry_run: bool,
+        /// Keep files that were deleted; they come back in the vault that deleted them
+        #[arg(long)]
+        no_remove: bool,
     },
     /// Take another vault's changes into this one
     Pull {
@@ -44,6 +50,9 @@ enum Command {
         /// Show what would happen; change nothing
         #[arg(long)]
         dry_run: bool,
+        /// Keep files that were deleted; they come back in the vault that deleted them
+        #[arg(long)]
+        no_remove: bool,
     },
     /// Record the folder's current state without syncing
     Snapshot,
@@ -132,9 +141,16 @@ fn main() {
         | Command::Move { dry_run, .. } => dry_run,
         _ => false,
     };
+    let no_remove = match cli.command {
+        Command::Sync { no_remove, .. }
+        | Command::Push { no_remove, .. }
+        | Command::Pull { no_remove, .. } => no_remove,
+        _ => false,
+    };
     let opts = &Options {
         json: cli.json,
         dry_run,
+        no_remove,
     };
     // Commands that run a sync return a summary, printed last.
     let result = match cli.command {

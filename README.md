@@ -330,6 +330,20 @@ recorded 3, added 1, updated 1, deleted 1, conflicts 0, pending 0, skipped 0
 
 `push`, `pull` and `move` take `--dry-run` too. For `move` it shows which files would be removed here, or the error if the move would be refused.
 
+To sync without removing anything, add `--no-remove`. A file deleted in one folder is kept in the other and put back where it was deleted. Both are adds:
+
+```sh
+syncit sync --no-remove /Volumes/Backup/Documents
+```
+
+```
+<- A old.txt (kept)
+-> A old.txt
+recorded 2, added 2, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
+```
+
+The deletion is undone, not postponed: later syncs leave the file alone. `push` and `pull` take `--no-remove` too; since they write to one folder only, the file comes back to the other at its next sync.
+
 ## Reading the output
 
 Every line about a file has a letter, then the file's path in its vault. When a command involves another vault, the line starts with an arrow: `->` for a file in your vault, `<-` for a file in the other one. `snapshot` looks only at your vault and prints no arrow. `status` has its own marks, [above](#checking-before-you-sync).
@@ -426,9 +440,9 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `st
 |---|---|
 | `syncit init [dir]` | make a folder a vault |
 | `syncit clone <vault or sub-folder> <dir>` | make a new vault from another, or from part of one |
-| `syncit sync <vault>` | sync both ways with another vault; `--dry-run` only shows what would happen |
-| `syncit push <vault>` | send changes only; takes `--dry-run` |
-| `syncit pull <vault>` | receive changes only; takes `--dry-run` |
+| `syncit sync <vault>` | sync both ways with another vault; `--dry-run` only shows what would happen; `--no-remove` keeps deleted files |
+| `syncit push <vault>` | send changes only; takes `--dry-run` and `--no-remove` |
+| `syncit pull <vault>` | receive changes only; takes `--dry-run` and `--no-remove` |
 | `syncit status [path]... [--vs <vault>]` | show the files that need something; `--all` lists every file; `--vs` compares with another vault |
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | add those files to this vault, and fetch them |

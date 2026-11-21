@@ -7,11 +7,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use syncit::commands::{self as cmd, Setting};
-use syncit::output::{Options, State, Summary};
+use syncit::output::{Event, Options, State, Summary};
 
 const O: &Options = &Options {
     json: false,
     dry_run: false,
+    no_remove: false,
 };
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
@@ -529,6 +530,60 @@ fn edit_beats_delete() {
     put(&b, "f.txt", "again", 2);
     assert_eq!(cmd::sync(O, &b, &a).unwrap().exit_code(), 0);
     assert!(is(&a, "f.txt", "again"));
+}
+
+#[test]
+fn no_remove_keeps_deleted() {
+    let keep = |dry_run| Options {
+        json: false,
+        dry_run,
+        no_remove: true,
+    };
+    let files = [
+        ("f.txt", "f"),
+        ("g.txt", "g"),
+        ("h.txt", "h"),
+        ("k.txt", "k"),
+    ];
+    let (_tmp, a, b) = pair(&files);
+
+    // Deleted in one vault: it stays in the other and comes back in the first.
+    fs::remove_file(a.join("f.txt")).unwrap();
+    let before = (tree(&a), tree(&b));
+    let planned = cmd::sync(&keep(true), &a, &b).unwrap();
+    assert!(before == (tree(&a), tree(&b)), "a dry run wrote something");
+    let done = cmd::sync(&keep(false), &a, &b).unwrap();
+    assert_eq!(planned, done);
+    assert_eq!((done.deleted, done.added, done.exit_code()), (0, 2, 0));
+    let kept = |e: &&Event| e.kind == "added" && e.path == "f.txt";
+    let notes: Vec<_> = done
+        .events
+        .iter()
+        .filter(kept)
+        .map(|e| e.note.as_str())
+        .collect();
+    assert_eq!(notes, ["kept", ""], "kept in b, written in a");
+    for dir in [&a, &b] {
+        assert!(is(dir, "f.txt", "f") && replaced_deletion(dir, "f.txt"));
+    }
+    let again = cmd::sync(O, &a, &b).unwrap();
+    assert_eq!((again.recorded, again.added, again.deleted), (0, 0, 0));
+
+    // A push writes nothing here: the file comes back at the next sync.
+    fs::remove_file(a.join("g.txt")).unwrap();
+    let pushed = cmd::push(&keep(false), &a, &b).unwrap();
+    assert!(pushed.has("added", "g.txt") && pushed.deleted == 0);
+    assert!(is(&b, "g.txt", "g") && !a.join("g.txt").exists());
+    assert_eq!(cmd::sync(O, &a, &b).unwrap().deleted, 0);
+    assert!(is(&a, "g.txt", "g") && replaced_deletion(&a, "g.txt"));
+
+    // Deleted in both: nothing to keep.
+    for dir in [&a, &b] {
+        fs::remove_file(dir.join("h.txt")).unwrap();
+    }
+    let both = cmd::sync(&keep(false), &a, &b).unwrap();
+    assert!(!both.has("added", "h.txt") && both.exit_code() == 0);
+    assert!(!a.join("h.txt").exists() && !b.join("h.txt").exists());
 }
 
 /// One head at `path`, a file, whose parents are all tombstones; and the
@@ -1587,6 +1642,7 @@ fn dry_run_matches_real_run() {
     let dry = &Options {
         json: false,
         dry_run: true,
+        no_remove: false,
     };
     type Run = fn(&Options, &Path, &Path) -> anyhow::Result<Summary>;
     for run in [cmd::sync as Run, cmd::push, cmd::pull] {
