@@ -267,16 +267,16 @@ Each line is a mark, the file, and the name of the mark:
 
 | Mark | Name | Meaning |
 |---|---|---|
-| `✓` | current | here and up to date |
-| `✎` | modified | changed here, and not yet recorded |
-| `+` | new | new here, and not yet recorded |
-| `✗` | removed | gone from this folder |
-| `◐` | behind | an out-of-date copy is here; a sync brings the current version, or removes the file if the other vault shows `✗` |
-| `○` | missing | meant to be here, but not here yet; a sync brings it |
-| `≠` | conflict | both versions are kept, waiting for you; the copy is named |
-| `!` | incomplete | an earlier sync did not finish; sync again |
-| `-` | excluded | not here by choice: this folder does not include it |
-| `·` | ignored | [ignored](#ignoring-files) by this folder |
+| `✓` | current | File up to date |
+| `✎` | modified | Changed here, not yet snapshotted |
+| `+` | new | New here, not yet snapshotted |
+| `✗` | removed | Gone from this folder |
+| `◐` | behind | Our copy is out-of-date. Sync to update. |
+| `○` | missing | File not present (not yet synced) |
+| `≠` | conflict | Conflict. Both versions are kept. |
+| `!` | incomplete | An earlier sync did not finish. Sync again. |
+| `-` | excluded | Filtered from partial replica |
+| `·` | ignored | [Ignored](#ignoring-files) due to `.syncitignore` |
 
 On its own, `status` looks only at this folder. "Not yet recorded" means changed since the last `sync` or `snapshot` here; it does not say what another vault lacks. For that, add `--vs`. Each line then has two marks and two names: ours first, theirs second.
 
