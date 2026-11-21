@@ -193,12 +193,8 @@ impl Vault {
     /// never recorded and never written.
     pub fn skips(&self, path: &str) -> bool {
         let name = path.rsplit('/').next().unwrap_or(path);
-        if self.ignore.matches(path)
+        self.ignore.matches(path)
             || name.starts_with(TMP_PREFIX)
             || path.split('/').any(|c| c.eq_ignore_ascii_case(".syncit"))
-        {
-            return true;
-        }
-        false
     }
 }
