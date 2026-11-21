@@ -2,12 +2,11 @@
 
 syncit lets you keep folders in sync, in both directions.
 
-- **Sync anything to anything**: Any folder can sync with any other... a laptop, a backup drive, a second computer.
-- **Partial replication**: A folder can hold just part of a larger archive, without the missing files being mistaken for deletions.
-- **Conflict resolution**: When the same file was edited in two places, both versions are kept as visible files. Nothing is silently overwritten.
-- **Archiving**: Keeping old versions is optional, and you choose it per folder.
+- **Sync anything to anything**: Any folder can sync with any other. Sync is decentralized and many-to-many.
+- **Partial sync**: replicas can hold just part of a larger archive.
+- **Backup and restore**: keep snapshots of old versions (optional).
 
-syncit works seamlessly with ordinary files and folder management. Create, edit, move and delete, then run `syncit sync` when you want the folders to agree. 
+syncit works seamlessly with ordinary files and folder management. Create, edit, move and delete, then run `syncit sync` when you want the folders to agree.
 
 ## Install
 
@@ -67,25 +66,29 @@ You always say which folder to sync with. A vault keeps no record of other vault
 
 ## Syncing two folders
 
-**Starting from one folder.** `init` it, then `clone` it, as in the quick start. After that, `syncit sync <the other folder>` from either one.
-
-**Both folders already exist.** `init` each one, then name the other folder when you sync:
-
 ```sh
-cd ~/Documents && syncit init
-cd /Volumes/Backup/Documents && syncit init
+cd ~/Documents
+syncit init
+
+cd /Volumes/Backup/Documents
+syncit init
+
 syncit sync ~/Documents
 ```
 
-Files that exist on only one side are copied to the other. Files that exist on both sides with the same content are left alone. Files with the same name and different content become a [conflict](#in-case-of-conflict-keeps-both), so nothing is lost.
+How it works:
 
-**More than two folders.** Any vault can sync with any other; just name it: `syncit sync /path/to/other`. You don't have to route everything through one "main" copy. If A syncs with B and B syncs with C, C gets A's changes.
+- Files that exist on only one side are copied to the other.
+- Files that exist on both sides with the same content are left alone.
+- Files with the same name are kept as [conflicted copies](#in-case-of-conflict-keeps-both). No data is lost.
+
+Any vault can sync with any other. You don't have to route everything through one "main" copy. If A syncs with B and B syncs with C, C gets A's changes.
 
 ## One direction only: push and pull
 
 ```sh
-syncit push /Volumes/Backup/Documents    # send my changes there; take nothing back
-syncit pull /Volumes/Backup/Documents    # take changes from there; send nothing
+syncit push /Volumes/Backup/Documents    # send changes to theirs, take nothing
+syncit pull /Volumes/Backup/Documents    # take changes from theirs, send nothing
 ```
 
 Use `push` to back up without bringing anything onto your machine, and `pull` to update from a folder you don't want to change.
@@ -147,7 +150,7 @@ error: nothing moved: /Volumes/Small excludes photos/2024/a.jpg
 
 The same goes if the other vault has its own newer version of a file: nothing is removed. Sync with it, then move again.
 
-## In case of conflict, keeps both
+## In case of conflict, keep both
 
 If the same file was edited in two folders since they last synced, syncit keeps both. The newer one keeps the name; the other is saved as a copy next to it:
 
@@ -175,101 +178,7 @@ The `U … (conflict: …)` line is repeated on every sync until you edit the fi
 
 Delete it again if that is what you want, or edit it to keep it; either one clears the message.
 
-## Checking before you sync
-
-`syncit status` shows what is waiting, and changes nothing:
-
-```
-? todo.txt
-M notes.txt
-```
-
-| Line | Meaning |
-|---|---|
-| `?` | a new file here, which the next sync will send |
-| `M`, `D` | modified or deleted here; the next sync will send that |
-| `! … (behind)` | a newer version is known but not yet in this folder |
-| `! … (incomplete)` | an earlier sync was interrupted; sync again |
-| `U … (conflict: …)` | both versions are on disk, waiting for you |
-
-`status` looks only at this folder and shows what is waiting; [`ls`](#seeing-what-is-where) shows everything, settled or not. To see what a sync with another folder would do, in both directions, add `--dry-run`. It prints what the sync would print and changes nothing in either folder:
-
-```sh
-syncit sync --dry-run /Volumes/Backup/Documents
-```
-
-```
-dry run: nothing is changed
-<- M notes.txt
-<- D old.txt
--> A todo.txt
-recorded 3, added 1, updated 1, deleted 1, conflicts 0, pending 0, skipped 0
-```
-
-`push`, `pull` and `move` take `--dry-run` too. For `move` it shows which files would be removed here, or the error if the move would be refused.
-
-## Seeing what is where
-
-`syncit ls` lists every file the archive knows about and says whether this folder has it. Nothing is changed.
-
-```sh
-cd ~/Archive
-syncit ls
-```
-
-```
-- music/ (1340 files)
-✓ notes.txt
-- photos/2023/ (88 files)
-✓ photos/2024/ (212 files)
-○ photos/2025/beach.jpg
-○ todo.txt (behind)
-```
-
-| Mark | Meaning |
-|---|---|
-| `✓` | here, and up to date |
-| `○` | meant to be here, but the current version is not: it has not arrived yet, or (`behind`) the copy here is an older one. The next sync brings it |
-| `-` | not here by choice: this folder excludes it, or (`ignored`) [ignores](#ignoring-files) it |
-| `✗` | deleted, and gone from this folder |
-
-A folder whose files are all in the same state is shown as one line with a count. Name folders or files to look at only those: `syncit ls music photos/2025`.
-
-To compare with another vault, add `--vs`. There are then two marks on each line: ours first, theirs second.
-
-```sh
-syncit ls --vs /Volumes/Small
-```
-
-```
-✓ - music/ (1340 files)
-✓ ○ notes.txt (theirs behind)
-- ✓ videos/ (31 files)
-○ ✓ drafts/ (4 files)
-✓ ✓ photos/2024/ (212 files)
-✗ ○ old.txt (theirs behind)
-```
-
-To compare one folder only: `syncit ls music --vs /Volumes/Small`. `syncit ls --help` says what each pair of marks means. Changes you have not synced yet are counted, in both folders. A deleted file is listed only while one of the folders still has it: the next sync removes it there.
-
-## Reading the output
-
-Every line about a file has a letter, then the file's path in its vault. When a command involves another vault, the line starts with an arrow: `->` for a file in your vault, `<-` for a file in the other one. `status` and `snapshot` look only at your vault and print no arrow.
-
-| Letter | Meaning |
-|---|---|
-| `A` | added |
-| `M` | modified |
-| `D` | deleted |
-| `C` | a conflict copy was written |
-| `R` | removed from this folder by `move` |
-| `U` | a conflict is open |
-| `?` | new and not yet recorded (`status` only) |
-| `!` | needs a look; the reason follows in parentheses |
-
-Lines are printed as things happen, so a long sync shows its progress.
-
-## Keeping old versions
+## Version history
 
 By default syncit keeps only the latest version of each file and uses no extra disk space. One setting changes that. Each vault has its own; it is never synced. See it with:
 
@@ -342,6 +251,98 @@ syncit restore --in-place notes.txt 3f9a
 syncit records the file as it is first, so with history on, the version you replace can itself be restored later. With history off it cannot, unless another vault still has it.
 
 Each stored version is also a plain file in `.syncit/blobs/`, named by the SHA-256 of its content.
+
+## Checking before you sync
+
+`syncit status` shows what is waiting, and changes nothing:
+
+```
+? todo.txt
+M notes.txt
+```
+
+| Line | Meaning |
+|---|---|
+| `?` | a new file here, which the next sync will send |
+| `M`, `D` | modified or deleted here; the next sync will send that |
+| `! … (behind)` | a newer version is known but not yet in this folder |
+| `! … (incomplete)` | an earlier sync was interrupted; sync again |
+| `U … (conflict: …)` | both versions are on disk, waiting for you |
+
+To see what a sync with another folder would do, in both directions, add `--dry-run`. It prints what the sync would print and changes nothing in either folder:
+
+```sh
+syncit sync --dry-run /Volumes/Backup/Documents
+```
+
+```
+dry run: nothing is changed
+<- M notes.txt
+<- D old.txt
+-> A todo.txt
+recorded 3, added 1, updated 1, deleted 1, conflicts 0, pending 0, skipped 0
+```
+
+`push`, `pull` and `move` take `--dry-run` too. For `move` it shows which files would be removed here, or the error if the move would be refused.
+
+`syncit ls` lists every file the archive knows about and says whether this folder has it. Nothing is changed.
+
+```sh
+cd ~/Archive
+syncit ls
+```
+
+```
+- music/ (1340 files)
+✓ notes.txt
+- photos/2023/ (88 files)
+✓ photos/2024/ (212 files)
+○ photos/2025/beach.jpg
+○ todo.txt (behind)
+```
+
+| Mark | Meaning |
+|---|---|
+| `✓` | here, and up to date |
+| `○` | meant to be here, but the current version is not: it has not arrived yet, or (`behind`) the copy here is an older one. The next sync brings it |
+| `-` | not here by choice: this folder excludes it, or (`ignored`) [ignores](#ignoring-files) it |
+| `✗` | deleted, and gone from this folder |
+
+A folder whose files are all in the same state is shown as one line with a count. Name folders or files to look at only those: `syncit ls music photos/2025`.
+
+To compare with another vault, add `--vs`. There are then two marks on each line: ours first, theirs second.
+
+```sh
+syncit ls --vs /Volumes/Small
+```
+
+```
+✓ - music/ (1340 files)
+✓ ○ notes.txt (theirs behind)
+- ✓ videos/ (31 files)
+○ ✓ drafts/ (4 files)
+✓ ✓ photos/2024/ (212 files)
+✗ ○ old.txt (theirs behind)
+```
+
+To compare one folder only: `syncit ls music --vs /Volumes/Small`. `syncit ls --help` says what each pair of marks means. Changes you have not synced yet are counted, in both folders. A deleted file is listed only while one of the folders still has it: the next sync removes it there.
+
+## Reading the output
+
+Every line about a file has a letter, then the file's path in its vault. When a command involves another vault, the line starts with an arrow: `->` for a file in your vault, `<-` for a file in the other one. `status` and `snapshot` look only at your vault and print no arrow.
+
+| Letter | Meaning |
+|---|---|
+| `A` | added |
+| `M` | modified |
+| `D` | deleted |
+| `C` | a conflict copy was written |
+| `R` | removed from this folder by `move` |
+| `U` | a conflict is open |
+| `?` | new and not yet recorded (`status` only) |
+| `!` | needs a look; the reason follows in parentheses |
+
+Lines are printed as things happen, so a long sync shows its progress.
 
 ## Who changed what
 
