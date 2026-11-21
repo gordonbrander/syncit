@@ -42,7 +42,7 @@ A sync run, done by each vault on its own folder (`PRD.md`, "A sync run"):
 | Term | Meaning |
 |---|---|
 | vault | a folder containing `.syncit/` |
-| entry | one log record: a path had some content (`hash`, `mtime`, `parents`, `path`) |
+| entry | one log record: a path had some content (`exec`, `hash`, `mtime`, `parents`, `path`) |
 | entry id | SHA-256 of the entry's canonical line |
 | tombstone | an entry whose `hash` is `null`: the path was deleted |
 | segment | an immutable file of entries, the output of one scan, named by its SHA-256 |
@@ -131,13 +131,14 @@ Types the rest of this file refers to:
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
+    pub exec: bool,           // the owner may execute the file; false for a tombstone
     pub hash: Option<String>, // 64 lowercase hex, or None for a tombstone
     pub mtime: i64,           // milliseconds since the Unix epoch
     pub parents: Vec<String>, // entry ids, sorted, no duplicates
     pub path: String,
 }
 
-pub struct Row { pub size: u64, pub mtime: i64, pub hash: String, pub base: Vec<String> }
+pub struct Row { pub size: u64, pub mtime: i64, pub exec: bool, pub hash: String, pub base: Vec<String> }
 
 /// The result of the read rules for one path.
 pub enum PathState {
@@ -150,7 +151,8 @@ pub enum PathState {
         lost_delete: bool,   // winner is a file and some head is a tombstone
     },
 }
-pub struct Loser { pub hash: String, pub mtime: i64 } // mtime: the largest among heads with this hash
+// mtime: the largest among heads with this hash. exec: that head's; on a tie, the greatest id's.
+pub struct Loser { pub hash: String, pub mtime: i64, pub exec: bool }
 ```
 
 `Id` and hashes may be `String`. Do not build a newtype hierarchy.
@@ -198,7 +200,7 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 {
   "scanned": 1763600000000,
   "rows": {
-    "foo/bar/x.txt": { "size": 120, "mtime": 1763599990000, "hash": "9c1f…", "base": ["3f9a…"] }
+    "foo/bar/x.txt": { "size": 120, "mtime": 1763599990000, "exec": false, "hash": "9c1f…", "base": ["3f9a…"] }
   },
   "deleted": {
     "foo/old.txt": ["77b0…"]
@@ -207,18 +209,18 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 ```
 
 - `scanned`: when the most recent scan started, in milliseconds. 0 before the first scan.
-- `rows`: one per file this vault had on disk at the last scan. `mtime` is the file's mtime as the filesystem reported it, in milliseconds (floor; negative before 1970).
+- `rows`: one per file this vault had on disk at the last scan. `mtime` is the file's mtime as the filesystem reported it, in milliseconds (floor; negative before 1970). `exec` is whether the owner may execute it (`mode & 0o100`), the only permission that is recorded.
 - `deleted`: one per path this vault has seen deleted, with its base: the heads, all tombstones, that the absence of a file here reflects. A path is in at most one of `rows` and `deleted`. A dirstate written before this field existed has none, and loads as if it were empty.
 - A missing dirstate file is an empty dirstate. That is the "lost dirstate" case and must work (`CRDT.md`, "Writing an entry", third row).
 
-**The unchanged test.** A file is unchanged against its row if its size and mtime equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise and `move`.
+**The unchanged test.** A file is unchanged against its row if its size, mtime and executable bit equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash; it is the row's version only if its executable bit also equals the row's. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise and `move`.
 
 ### Segments
 
 Format, canonical form and validation are in `CRDT.md`, "Segments" and "Validation". Implementation notes:
 
 - Encode an entry with `serde_json::to_string`. Decode by parsing the line into `Entry`, re-encoding, and requiring the bytes to equal the line. This one check enforces key order, absence of whitespace, number form, string escaping, presence of all four fields and absence of others.
-- Then check the field contents: `hash` and each parent are 64 lowercase hex characters; `parents` is strictly ascending by byte order; `path` passes path validation.
+- Then check the field contents: `hash` and each parent are 64 lowercase hex characters; `parents` is strictly ascending by byte order; `path` passes path validation; a tombstone's `exec` is `false`.
 - Path validation: not empty, does not start with `/`, no component that is empty, `.` or `..`, first component is not `.syncit`.
 - The file is: the header line, then zero or more entry lines, each line ended by one `\n`. No blank lines, no missing final newline.
 - The header is `{"nickname":"<nickname>","syncit":1}`. It is encoded and checked as an entry is: parse it into a struct with exactly those two fields, re-encode, and require the same bytes. Then check that `syncit` is 1 and the nickname is valid: 1 to 64 bytes, no whitespace, no control characters.
@@ -229,10 +231,10 @@ Format, canonical form and validation are in `CRDT.md`, "Segments" and "Validati
 Test vector:
 
 ```
-entry line:  {"hash":null,"mtime":1763600005000,"parents":[],"path":"old.txt"}
-entry id:    14e254d499907fd5a29ece8053509c7270afa9ad3be8beb60f16836aef423449
+entry line:  {"exec":false,"hash":null,"mtime":1763600005000,"parents":[],"path":"old.txt"}
+entry id:    7143ad25f65a2079629dadd17cde1155bc1152bb41be99705c0f807933e841c9
 segment:     {"nickname":"notes","syncit":1}\n<entry line>\n
-segment name: 12bf899655031a7997e0f0a4824dc2fe225c6b8e07157384ac2d74c4234a0522
+segment name: 84f57e1040620ebe774999c3e166a89617ec808413902b99f36de3e21b0caec2
 ```
 
 ### .syncitignore
@@ -282,13 +284,14 @@ Paths are recorded as the operating system returns them, joined with `/`. No Uni
 
 Let `now` be the time the scan started. For each file found, and for each row whose path was not found and is not ignored, apply the table in `CRDT.md`, "Writing an entry":
 
-- **File and row.** Apply the unchanged test. If the hash equals the row's, refresh the row's size and mtime and write nothing. If it differs, write a file entry with `parents` = the row's base; the row becomes `(size, mtime, new hash, [new entry id])`.
+- **File and row.** Apply the unchanged test. If the hash and the executable bit equal the row's, refresh the row's size and mtime and write nothing. If either differs, write a file entry with `parents` = the row's base; the row becomes `(size, mtime, exec, hash, [new entry id])`. A change of the bit alone is a new version, as in Git; `chmod` leaves the mtime alone, so that entry has its parent's mtime.
 - **Row, no file.** Write a tombstone with `mtime = now` and `parents` = the row's base. Replace the row with a deletion record whose base is the tombstone.
 - **File, deletion record.** Hash it. Write a file entry with `parents` = the record's base, whatever the hash. Replace the record with the row.
 - **File, neither.** Hash it. Then the first of these that applies:
   1. `resolve` gives a winner that is a tombstone (so every head is one): write a file entry with `parents` = the heads and create the row.
-  2. Some valid entries of this path have that hash: write nothing and create a row whose base is all of them (superseded ones included).
-  3. Otherwise write a file entry with `parents = []` and create the row.
+  2. Some valid entries of this path have that hash and that executable bit: write nothing and create a row whose base is all of them (superseded ones included).
+  3. Some valid entries of this path have that hash, all with the other bit: the vault has that version and has changed its bit. Write a file entry with `parents` = all of them and create the row.
+  4. Otherwise write a file entry with `parents = []` and create the row.
 - **No file, no row.** Nothing. The vault does not have the path, or the path is deleted and stays so.
 
 **Auto-include.** A file on disk is included. When the walk finds a file whose path is excluded, with or without a row, the scan adds an include for it. A folder dragged into a vault is therefore synced from then on, including files later added to it elsewhere, and a file the vault has is never left out of a run (a `move` stopped partway, a config edited by hand): when in doubt, data is kept. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
@@ -301,7 +304,7 @@ Let `now` be the time the scan started. For each file found, and for each row wh
 
 If every prefix is already listed, which happens only when the file's own path is in `exclude` (a moved file put back by hand), the path moves from `exclude` to `include`, as `get` would do. Includes are added after the walk, shortest first, re-checking the filter, so one dragged folder yields one include. The config is saved before the dirstate. A dry scan adds nothing. `move` undoes it.
 
-A file entry's `mtime` is the file's mtime in milliseconds. Stat the file before and after hashing; if size or mtime changed in between, leave the path and its row untouched this scan and report it as `skipped`.
+A file entry's `mtime` is the file's mtime in milliseconds, and its `exec` is the file's executable bit; a tombstone's `exec` is `false`. Stat the file before and after hashing; if size or mtime changed in between, leave the path and its row untouched this scan and report it as `skipped`.
 
 ### Finishing
 
@@ -388,7 +391,7 @@ These apply to every write, rename and delete in the working folder. A path that
 
 ### Writing a file
 
-To put content `h` with mtime `m` at path `p`: create the parent directories; `fetch(h)` into `.syncit-tmp-<unique>` in the same directory; set its mtime to `m`; rename it onto `p`; stat `p`. The hash is verified before the rename. If the blob is unavailable, remove the temporary file and any directories just created.
+To put content `h` with mtime `m` and executable bit `x` at path `p`: create the parent directories; `fetch(h)` into `.syncit-tmp-<unique>` in the same directory; set its mtime to `m`; if `x`, make it executable; rename it onto `p`; stat `p`. Making a file executable adds execute wherever read is allowed, and always for the owner (`mode | 0o100 | (mode & 0o444) >> 2`), so the umask is respected as `chmod +x` respects it; taking the bit away clears `0o111`. No other permission is touched. The hash is verified before the rename. If the blob is unavailable, remove the temporary file and any directories just created.
 
 ### Per path
 
@@ -398,25 +401,27 @@ Let `S = resolve(p)`, `row` the dirstate row, `W` the winner, `h` its hash.
 2. `S` is `Incomplete`: report `incomplete`. Nothing else.
 3. The path is excluded or ignored: nothing. (`R5`. The scan has included every file on disk, section 7, so a path with a row is skipped here only if it is ignored.)
 4. **`W` is a tombstone.** If there is a row: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. Then, row or not, set the path's deletion record to the heads: with no file here, this vault's state reflects all of them. A path that reaches this step is included, so an included path the vault never had gets a record too.
-5. **`W` is a file, and there is a row with `row.hash == h`.** The content is in place. Go to "copies and base".
+5. **`W` is a file, and there is a row with `row.hash == h`.** The content is in place. If `row.exec` differs from the winner's: run the safety checks, set the bit on the file where it is, set `row.exec`, and report `updated`. Nothing is fetched and the mtime does not change. Go to "copies and base".
 6. **`W` is a file, and there is a row with a different hash.** Run the safety checks.
    - If `row.hash` is a loser hash and its copy path `c` has no entries in the log: the local file is a conflicting version and must stay visible. If something already exists at `c`, report `skipped` (name clash) and stop. Otherwise write the winner to its temporary name first; rename `p` to `c`; rename the temporary file onto `p`; remove the old row. `c` gets no row.
    - Otherwise the local version is superseded, or its copy was already recorded: write the winner over it.
    - If the winner's blob is unavailable: report `pending`, change nothing, and leave the row and its base alone.
-   - On success the row becomes `(size, mtime as stat reports, h, base)`. Report `updated`. Go to "copies and base".
+   - On success the row becomes `(size, mtime as stat reports, the winner's exec, h, base)`. Report `updated`. Go to "copies and base".
 7. **`W` is a file, and there is no row.** Run the safety checks and write the file. Unavailable: `pending`, and a deletion record stays as it is. On success create the row, remove any deletion record and report `added`. Go to "copies and base".
 
 ### Copies and base
 
 Reached only when the winner's content is the file at `p`.
 
-For each loser `l` (a distinct losing hash, with `l.mtime` the largest mtime among heads with that hash), with `c = copy_name(p, l.hash)`:
+For each loser `l` (a distinct losing hash, with `l.mtime` and `l.exec` taken from the head with that hash that is greatest by `(mtime, id)`), with `c = copy_name(p, l.hash)`:
 
 - If `c` has entries in the log: the version was surfaced before. Nothing to write. (`PRD.md`: a copy the user deleted stays deleted.)
 - Else if a file exists at `c`: surfaced if its hash is `l.hash`; otherwise a name clash, not surfaced, reported as `skipped`.
-- Else write `l.hash` to `c` with mtime `l.mtime`, without a dirstate row. Surfaced on success; report `copied`. Unavailable: not surfaced; report `pending`.
+- Else write `l.hash` to `c` with mtime `l.mtime` and executable bit `l.exec`, without a dirstate row. Surfaced on success; report `copied`. Unavailable: not surfaced; report `pending`.
 
-Setting the copy's mtime from the entry means vaults that create the same copy independently will record identical entries for it.
+Setting the copy's mtime and executable bit from the entry means vaults that create the same copy independently will record identical entries for it.
+
+Heads with the winner's hash and the other executable bit are not losers: no content is lost, so there is no copy, and the file has the winner's bit.
 
 Then set the row's base to:
 
@@ -596,7 +601,7 @@ Without `--in-place`:
 
 1. Open and lock the vault. Nothing is scanned.
 2. Let `c = copy_name(path, hash)`. If `c` is ignored: error. If a file is at `c`: with that hash, say so and stop, exit 0; with other content, error.
-3. Write the content at `c` as materialise writes a file (safety checks, temporary name, verified, renamed), with the current time as its mtime. No source has it: error.
+3. Write the content at `c` as materialise writes a file (safety checks, temporary name, verified, renamed), with the current time as its mtime. It is executable if the newest valid entry with that hash, by `(mtime, id)`, is. No source has it: error.
 4. Report `copied`. No row and no entry is written: `c` is an ordinary file that the next scan records, as it does a conflict copy.
 
 With `--in-place`:
@@ -641,7 +646,7 @@ How it is built:
 | `setting` | `name`, `value` | `<name>: <value>` | stdout |
 | `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
 | `state` | `path`, `files`, `ours`, `theirs` when there are two vaults, and `conflict` (the copies) when a vault is in that state | `<mark>[ <mark>]`, the path padded to the widest of the listing, each vault's state as a word padded to 10, then `<n> files` for a folder or the conflict's copies; two spaces between columns, none at the end. The states and marks are in `status`, section 11 | stdout |
-| `version` | `path`, `hash`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
+| `version` | `path`, `hash`, `exec`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`, `executable`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
 | `info` | `message` | the message | stdout |
 | `summary` | the counts | `recorded 3, added 1, …` | stdout |
 | `warning` | `message` | `warning: <message>` | stderr |
@@ -730,6 +735,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `resolve_incomplete` | a missing parent gives `Incomplete`; adding it gives the expected heads |
 | `resolve_cross_path_parent` | an entry with a parent of another path is never a head and supersedes nothing |
 | `winner_order` | file beats tombstone regardless of mtime; later mtime wins; the id breaks a tie |
+| `resolve_exec` | heads with one hash and different executable bits are not a conflict; a loser has the bit of its newest head |
+| `executable_tombstone_rejected` | a tombstone with `exec` true does not decode |
 | `copy_name_cases` | the table in section 9 |
 | `includes_cases` | longest prefix decides; `foo` does not match `foobar`; nothing matching means excluded |
 
@@ -762,7 +769,10 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `status_states` | `status` in a partial vault and against the archive: current, behind, missing, excluded and ignored, in ours and in theirs; an unrecorded edit, new file and removal are `modified`, `new` and `removed` in the vault that has them; a file removed in one vault is `behind` in a vault that still has it, and `incomplete` with no such vault on the line; without `--all` only the lines that are not settled, and nothing for a vault with nothing to do; a folder in one state is one line with a count; a path argument lists that folder's children or that file; a recorded removal that no vault on the line still has the file of is not listed; neither vault is changed |
 | `log_lists_versions` | `log` lists a path's entries newest first with the recording vault, marks the current one, lists a deletion, finds a path with no file, and reports content as available only where a working file or a kept blob has it |
 | `restore_version` | `restore` writes the copy and leaves the file alone; again is a no-op; the copy syncs as a new file and, moved over the file, as an edit; `--in-place` records unrecorded edits first and then the old version on top of them; over a deleted file it stays in both vaults with no conflict; refused for an unknown or empty hash, content not kept, a taken copy name, and a path not on disk here |
-| `lost_dirstate` | delete `.syncit/dirstate`, sync: no entries written for unchanged files, no deletions invented, old files brought forward |
+| `lost_dirstate` | delete `.syncit/dirstate`, sync: no entries written for unchanged files, no deletions invented, old files brought forward; a known file with the other executable bit is recorded as a change to the version the log has |
+| `exec_bit_syncs` | `chmod` alone is recorded as a change and arrives without rewriting the file or its mtime, in both directions; new and edited files are written with their bit |
+| `exec_change_vs_edit` | `chmod +x` against a concurrent edit: the edit wins, the conflict copy is executable in both vaults and recorded as one entry |
+| `restore_keeps_exec` | a restored copy of a version that was executable is executable |
 | `copied_vault` | copy a vault folder with `cp -R` semantics, edit both, sync all: an ordinary conflict, nothing lost |
 | `restored_backup` | restore a vault to an old state, edit, sync: conflict with the newer head, nothing lost |
 | `pending_then_edit` | winner's blob unavailable, then a local edit: the result is a conflict, not an overwrite |
@@ -849,7 +859,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Attribution | each vault has a nickname, by default its folder's name, written into the header of the segments it records; `blame` prints it. A label: not unique, not verified, read by no rule. Hostnames and absolute paths are not recorded, since the log is permanent and replicated |
 | Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
 | `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target includes every file and, after the push, has the same content at every path |
-| File metadata | regular files only; symlinks skipped with a warning; permissions and extended attributes not recorded |
+| File metadata | regular files only; symlinks skipped with a warning. The executable bit is recorded, as Git does, and a change to it alone is a new version. Other permissions, ownership and extended attributes are not recorded. No setting for filesystems without the bit |
 | File mtimes | a materialised file gets its entry's mtime; a restored one gets the current time |
 | Re-creating a deleted file | a new version that replaces the tombstones the vault had seen, kept in a deletion record in the dirstate. With no record, a file at a deleted path is still kept as a new version: when it cannot be decided, data is retained |
 | Unicode paths | recorded as the OS returns them; names that are not UTF-8 are skipped with a warning |

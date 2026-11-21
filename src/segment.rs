@@ -71,6 +71,7 @@ mod tests {
 
     fn entry(path: &str, content: Option<&str>) -> Entry {
         Entry {
+            exec: false,
             hash: content.map(|c| sha256(c.as_bytes())),
             mtime: 5,
             parents: vec![],
@@ -100,7 +101,9 @@ mod tests {
     }
 
     fn line(hash: &str, mtime: &str, parents: &str, path: &str) -> String {
-        format!(r#"{{"hash":{hash},"mtime":{mtime},"parents":{parents},"path":{path}}}"#)
+        format!(
+            r#"{{"exec":false,"hash":{hash},"mtime":{mtime},"parents":{parents},"path":{path}}}"#
+        )
     }
 
     const HEADER: &str = r#"{"nickname":"notes","syncit":1}"#;
@@ -168,15 +171,28 @@ mod tests {
         let bad = [
             (
                 "extra field",
-                r#"{"hash":null,"mtime":1,"parents":[],"path":"x","size":1}"#.to_string(),
+                r#"{"exec":false,"hash":null,"mtime":1,"parents":[],"path":"x","size":1}"#
+                    .to_string(),
             ),
             (
                 "missing path",
-                r#"{"hash":null,"mtime":1,"parents":[]}"#.to_string(),
+                r#"{"exec":false,"hash":null,"mtime":1,"parents":[]}"#.to_string(),
             ),
             (
                 "missing hash",
-                r#"{"mtime":1,"parents":[],"path":"x"}"#.to_string(),
+                r#"{"exec":false,"mtime":1,"parents":[],"path":"x"}"#.to_string(),
+            ),
+            (
+                "missing exec",
+                r#"{"hash":null,"mtime":1,"parents":[],"path":"x"}"#.to_string(),
+            ),
+            (
+                "executable tombstone",
+                r#"{"exec":true,"hash":null,"mtime":1,"parents":[],"path":"x"}"#.to_string(),
+            ),
+            (
+                "exec is a number",
+                line("null", "1", "[]", "\"x\"").replace("false", "0"),
             ),
             ("not an object", r#"["x"]"#.to_string()),
             ("blank line", String::new()),
@@ -185,11 +201,11 @@ mod tests {
             ("hash is a number", line("7", "1", "[]", "\"x\"")),
             (
                 "whitespace",
-                r#"{"hash":null, "mtime":1,"parents":[],"path":"x"}"#.to_string(),
+                r#"{"exec":false,"hash":null, "mtime":1,"parents":[],"path":"x"}"#.to_string(),
             ),
             (
                 "key order",
-                r#"{"mtime":1,"hash":null,"parents":[],"path":"x"}"#.to_string(),
+                r#"{"hash":null,"exec":false,"mtime":1,"parents":[],"path":"x"}"#.to_string(),
             ),
             ("escaped slash", line("null", "1", "[]", r#""a\/b""#)),
             ("uppercase hex", line(&upper, "1", "[]", "\"x\"")),

@@ -32,6 +32,8 @@ pub struct Version {
     pub path: String,
     /// The content's hash; null for a deletion.
     pub hash: Option<String>,
+    /// Whether the file is executable in this version.
+    pub exec: bool,
     pub mtime: i64,
     /// The vaults that recorded it.
     pub nicknames: Vec<String>,
@@ -200,6 +202,9 @@ impl Display for Message {
                     None => notes.push("deleted"),
                     Some(_) if !v.available => notes.push("no content"),
                     Some(_) => {}
+                }
+                if v.exec {
+                    notes.push("executable");
                 }
                 let (time, names) = (utc(v.mtime), v.nicknames.join(","));
                 write!(f, "{hash} {time} {names} {}", v.path)?;
@@ -408,10 +413,11 @@ mod tests {
                 r#"{"type":"blame","path":"a/f.txt","nicknames":["drive","notes"]}"#.into()
             )
         );
-        let version = |hash: Option<&str>, current, available| {
+        let version = |hash: Option<&str>, current: bool, available| {
             Message::Version(Version {
                 path: "a/f.txt".into(),
                 hash: hash.map(|h| h.repeat(8)),
+                exec: hash.is_some() && !current,
                 mtime: 1_700_000_000_000,
                 nicknames: vec!["drive".into()],
                 current,
@@ -423,14 +429,14 @@ mod tests {
             (
                 "3f9a1c2e 2023-11-14 22:13Z drive a/f.txt (current)".into(),
                 format!(
-                    r#"{{"type":"version","path":"a/f.txt","hash":"{}","mtime":1700000000000,"nicknames":["drive"],"current":true,"available":true}}"#,
+                    r#"{{"type":"version","path":"a/f.txt","hash":"{}","exec":false,"mtime":1700000000000,"nicknames":["drive"],"current":true,"available":true}}"#,
                     "3f9a1c2e".repeat(8)
                 )
             )
         );
         assert_eq!(
             line(&version(Some("3f9a1c2e"), false, false), false),
-            "3f9a1c2e 2023-11-14 22:13Z drive a/f.txt (no content)"
+            "3f9a1c2e 2023-11-14 22:13Z drive a/f.txt (no content, executable)"
         );
         assert_eq!(
             line(&version(None, true, false), false),

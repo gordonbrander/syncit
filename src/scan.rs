@@ -1,7 +1,7 @@
 //! Scan: compare the working folder with the stat dirstate and write entries.
 
 use crate::blobs::hash_file;
-use crate::dirstate::{Row, mtime_ms};
+use crate::dirstate::{Row, is_exec, mtime_ms};
 use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
 use crate::output::{Options, warn};
@@ -48,17 +48,17 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
         let file = v.root.join(path);
         let row = dirstate.rows.get(path).cloned();
         if let (Some(row), Ok(meta)) = (&row, file.symlink_metadata())
-            && dirstate.unchanged(row, meta.len(), mtime_ms(&meta))
+            && dirstate.unchanged(row, &meta)
         {
             continue;
         }
-        let Ok(Some((size, mtime, hash))) = hash_stable(&file) else {
+        let Ok(Some((size, mtime, exec, hash))) = hash_stable(&file) else {
             out.skipped.push(path.clone());
             continue;
         };
         v.hint(&hash, file);
         let (parents, kind) = match row {
-            Some(row) if row.hash == hash => {
+            Some(row) if row.hash == hash && row.exec == exec => {
                 dirstate
                     .rows
                     .insert(path.clone(), Row { size, mtime, ..row });
@@ -77,29 +77,38 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
                 } else {
                     // A file this vault did not know it had: if the log knows
                     // this content at this path, the vault has that version.
-                    let known = v
-                        .log
-                        .valid(path)
-                        .into_iter()
-                        .filter(|(_, e)| e.hash.as_ref() == Some(&hash));
-                    let known: Vec<Id> = known.map(|(id, _)| id.clone()).collect();
-                    if !known.is_empty() {
+                    // With the other executable bit, it has changed that version.
+                    let known = v.log.valid(path).into_iter();
+                    let known: Vec<_> = known
+                        .filter(|(_, e)| e.hash.as_ref() == Some(&hash))
+                        .collect();
+                    let ids = |exec: Option<bool>| -> Vec<Id> {
+                        let same = known
+                            .iter()
+                            .filter(|(_, e)| exec.is_none_or(|x| x == e.exec));
+                        same.map(|(id, _)| (*id).clone()).collect()
+                    };
+                    let same = ids(Some(exec));
+                    if !same.is_empty() {
                         dirstate.rows.insert(
                             path.clone(),
                             Row {
                                 size,
                                 mtime,
+                                exec,
                                 hash,
-                                base: known,
+                                base: same,
                             },
                         );
                         continue;
                     }
-                    (vec![], "new")
+                    let kind = if known.is_empty() { "new" } else { "modified" };
+                    (ids(None), kind)
                 }
             }
         };
         let entry = Entry {
+            exec,
             hash: Some(hash.clone()),
             mtime,
             parents,
@@ -110,6 +119,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             Row {
                 size,
                 mtime,
+                exec,
                 hash,
                 base: vec![entry.id()],
             },
@@ -128,6 +138,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             .unwrap_or_default();
         out.changes.push((path.clone(), "deleted"));
         let entry = Entry {
+            exec: false,
             hash: None,
             mtime: now,
             parents,
@@ -229,11 +240,12 @@ fn walk(
     Ok(())
 }
 
-/// Size, mtime and hash of a file, or None if it changed while being read.
-fn hash_stable(file: &Path) -> io::Result<Option<(u64, i64, String)>> {
+/// Size, mtime, executable bit and hash of a file, or None if it changed
+/// while being read.
+fn hash_stable(file: &Path) -> io::Result<Option<(u64, i64, bool, String)>> {
     let before = file.symlink_metadata()?;
     let hash = hash_file(file)?;
     let after = file.symlink_metadata()?;
     let same = before.len() == after.len() && mtime_ms(&before) == mtime_ms(&after);
-    Ok(same.then(|| (before.len(), mtime_ms(&before), hash)))
+    Ok(same.then(|| (before.len(), mtime_ms(&before), is_exec(&after), hash)))
 }

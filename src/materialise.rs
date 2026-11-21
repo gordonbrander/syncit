@@ -9,6 +9,7 @@ use crate::vault::{TMP_PREFIX, Vault, unique};
 use anyhow::{Context, Result, bail, ensure};
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -110,7 +111,7 @@ fn one(
             }
             (0, w.mtime) // in memory only
         } else {
-            let Some(tmp) = stage(v, peer, p, &h, w.mtime)? else {
+            let Some(tmp) = stage(v, peer, p, &h, w.mtime, w.exec)? else {
                 v.event(opts, sum, "pending", p, UNAVAILABLE);
                 return Ok(());
             };
@@ -129,6 +130,7 @@ fn one(
             Row {
                 size,
                 mtime,
+                exec: w.exec,
                 hash: h.clone(),
                 base: vec![],
             },
@@ -141,6 +143,16 @@ fn one(
             "",
         );
         renamed = copy;
+    } else if row.is_some_and(|row| row.exec != w.exec) {
+        // Same content, other executable bit: nothing to fetch.
+        safe(v, p)?;
+        if !opts.dry_run {
+            set_exec(&file, w.exec)?;
+        }
+        if let Some(row) = v.dirstate.rows.get_mut(p) {
+            row.exec = w.exec;
+        }
+        v.event(opts, sum, "updated", p, "");
     }
     copies_and_base(opts, v, peer, p, &h, heads, &losers, renamed, sum);
     Ok(())
@@ -210,7 +222,7 @@ fn write_copy(
     if opts.dry_run {
         return Ok(available(v, peer, &l.hash));
     }
-    let Some(tmp) = stage(v, peer, c, &l.hash, l.mtime)? else {
+    let Some(tmp) = stage(v, peer, c, &l.hash, l.mtime, l.exec)? else {
         return Ok(false);
     };
     place(v, &tmp, c, &l.hash)?;
@@ -245,9 +257,30 @@ fn safe(v: &Vault, p: &str) -> Result<()> {
     Ok(())
 }
 
+/// Give or take the executable bit as `chmod +x` and `chmod -x` do: execute
+/// goes wherever read is allowed, and always to the owner.
+fn set_exec(file: &Path, exec: bool) -> io::Result<()> {
+    let mut perms = file.symlink_metadata()?.permissions();
+    let mode = perms.mode();
+    perms.set_mode(if exec {
+        mode | 0o100 | (mode & 0o444) >> 2
+    } else {
+        mode & !0o111
+    });
+    fs::set_permissions(file, perms)
+}
+
 /// Fetch content `h` into a scratch file beside `p`, verified and with its
-/// mtime set. None if no source has the blob; then nothing is left behind.
-fn stage(v: &Vault, peer: Option<&Vault>, p: &str, h: &str, mtime: i64) -> Result<Option<PathBuf>> {
+/// mtime and executable bit set. None if no source has the blob; then
+/// nothing is left behind.
+fn stage(
+    v: &Vault,
+    peer: Option<&Vault>,
+    p: &str,
+    h: &str,
+    mtime: i64,
+    exec: bool,
+) -> Result<Option<PathBuf>> {
     let file = v.root.join(p);
     let dir = file.parent().context("no parent folder")?;
     let (mut top, mut d) = (None, dir); // the topmost folder this call creates
@@ -269,6 +302,9 @@ fn stage(v: &Vault, peer: Option<&Vault>, p: &str, h: &str, mtime: i64) -> Resul
         };
         let time = time.ok_or_else(|| io::Error::other("mtime out of range"))?;
         File::options().write(true).open(&tmp)?.set_modified(time)?;
+        if exec {
+            set_exec(&tmp, true)?; // a new file is not executable
+        }
         Ok(true)
     })();
     if !matches!(staged, Ok(true)) {
@@ -297,17 +333,17 @@ fn place(v: &mut Vault, tmp: &Path, p: &str, h: &str) -> Result<(u64, i64)> {
     Ok((meta.len(), mtime_ms(&meta)))
 }
 
-/// Write content `h` at `p`, dated now, for `restore`. A file already there
+/// Write content `h` at `p`, dated now, for `restore`, executable or not. A file already there
 /// must be unchanged since it was scanned, as for any write; a row whose
 /// file is gone is no obstacle. False if no source has the content.
-pub fn write_now(v: &mut Vault, p: &str, h: &str) -> Result<bool> {
+pub fn write_now(v: &mut Vault, p: &str, h: &str, exec: bool) -> Result<bool> {
     if v.root.join(p).symlink_metadata().is_ok() {
         safe(v, p)?;
     } else {
         no_symlinked_parent(v, p)?;
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
-    let Some(tmp) = stage(v, None, p, h, now)? else {
+    let Some(tmp) = stage(v, None, p, h, now, exec)? else {
         return Ok(false);
     };
     place(v, &tmp, p, h)?;

@@ -661,6 +661,7 @@ pub fn log(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>
             let version = Version {
                 path: path.clone(),
                 hash: e.hash.clone(),
+                exec: e.exec,
                 mtime: e.mtime,
                 nicknames: v.log.authors[id].iter().cloned().collect(),
                 current: winner.as_ref() == Some(id),
@@ -740,8 +741,14 @@ pub fn restore(
             return Ok(dest);
         }
     }
+    // Executable if the newest entry with this content was.
+    let newest = v.log.valid(&p).into_iter();
+    let newest = newest
+        .filter(|(_, e)| e.hash.as_ref() == Some(&h))
+        .max_by_key(|(id, e)| (e.mtime, *id));
+    let exec = newest.is_some_and(|(_, e)| e.exec);
     ensure!(
-        write_now(&mut v, &dest, &h)?,
+        write_now(&mut v, &dest, &h, exec)?,
         "the content of that version is not in this vault; old versions are kept only while local-history is on"
     );
     if in_place {
