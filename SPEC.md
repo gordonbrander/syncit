@@ -501,6 +501,21 @@ Scanning precedes exchange, so entries are written from what each vault had befo
 
 The output is the line `dry run: nothing is changed` (an `info` message), then exactly what the real run would print, summary included. The exit code is the real run's. Both vaults are locked and every changed file is hashed, as in a real run.
 
+### No remove
+
+`sync`, `push` and `pull` take `--no-remove`: no receiver removes a file because it was deleted. A file a receiver still has is kept, and recorded as re-created, so the deletion is undone in every vault. `Options.no_remove` carries the flag. Between steps 4 and 5:
+
+1. In each receiver, for every path it takes that has a row and whose winner is a tombstone: replace the row with a deletion record whose base is the heads, and report `added` with the note `kept`. This is the state of a vault whose user put the file back.
+2. Scan each receiver that kept something (section 7, "File, deletion record"): the file gets an entry whose parents are the tombstones.
+3. Exchange segments again, so that each receiver has the other's re-creations before it materialises. One `sync` therefore brings the file back to the vault that deleted it.
+
+Nothing else changes: materialise finds a file as the winner at those paths.
+
+- `push` writes nothing to the local vault, so a file deleted there comes back at its next `pull` or `sync`; `pull` likewise for the peer.
+- A file deleted in every vault of the run stays deleted: there is nothing to keep.
+- A file replaced by a newer version is replaced as usual.
+- `move`, `clone` and `get` do not take the flag.
+
 ### A run with a store
 
 > **Milestone 9, not built.** Version 1 as built has no store: no `store` setting, no store argument, and local history is the only place old versions are kept. This subsection is the design to build.
@@ -529,9 +544,9 @@ The vault is found by walking up from the current directory to the first folder 
 |---|---|
 | `syncit init [dir]` | `dir` defaults to `.`. Error if `dir/.syncit` exists. Create `.syncit/` with `log/`, `blobs/`, `tmp/` and a config of `include: [""]`. Existing files are untouched and recorded by the first scan. |
 | `syncit clone <src> <dir>` | Find the vault root `R` above `src`; `sub` is `src` relative to `R` (`""` if equal). `dir` must not exist or must be empty. Create it as a vault with `include: [sub]`. Then run `pull` from `R`. Nothing about `R` is recorded. (`R4`) |
-| `syncit sync [--dry-run] <vault>` | Section 10, both directions. (`R1`, `R12`) |
-| `syncit push [--dry-run] <vault>` | Section 10; only the peer receives. (`R2`) |
-| `syncit pull [--dry-run] <vault>` | Section 10; only the local vault receives. (`R2`) |
+| `syncit sync [--dry-run] [--no-remove] <vault>` | Section 10, both directions. (`R1`, `R12`) |
+| `syncit push [--dry-run] [--no-remove] <vault>` | Section 10; only the peer receives. (`R2`) |
+| `syncit pull [--dry-run] [--no-remove] <vault>` | Section 10; only the local vault receives. (`R2`) |
 | `syncit snapshot` | Scan, `retain()`. No peer. (`R17`) |
 | `syncit status [-a] [path]... [--vs <vault>]` | See below. (`R18`, `R27`) |
 | `syncit get <path>...` | See below. (`R7`) |
@@ -660,7 +675,7 @@ How it is built:
 
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
-- `Options` holds the process-wide settings (`json`, and `dry_run` of section 10) and is passed to everything that can print or write.
+- `Options` holds the process-wide settings (`json`, and `dry_run` and `no_remove` of section 10) and is passed to everything that can print or write.
 - What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages
@@ -796,6 +811,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `same_edit_no_conflict` | identical content written on both sides is not a conflict |
 | `new_file_at_existing_path` | a file created in a partial vault at a path another vault already has: equal content is adopted or merges silently, different content is an ordinary conflict with a copy |
 | `recreate_after_delete` | a file deleted, synced, and created again at the same path, with an old version's bytes or new ones, in the vault that deleted it or the one that received the deletion, and with the dirstate lost: it stays in both vaults as one head whose parents are the tombstones, with no conflict; both vaults have a deletion record in between |
+| `no_remove_keeps_deleted` | with `--no-remove`, a file deleted in one vault stays in the other and is back in the first after one `sync`, as one head whose parents are the tombstones, and the dry run says the same; after a `push` it comes back at the next `sync`; a file deleted in both vaults stays deleted |
 | `recreate_against_unseen_recreation` | a path deleted here, re-created in another vault whose content has not arrived, then re-created here with an old version's bytes: a conflict with a copy, not an old file brought forward |
 | `status_states` | `status` in a partial vault and against the archive: current, behind, missing, excluded and ignored, in ours and in theirs; an unrecorded edit, new file and removal are `modified`, `new` and `removed` in the vault that has them; a file removed in one vault is `behind` in a vault that still has it, and `incomplete` with no such vault on the line; without `--all` only the lines that are not settled, and nothing for a vault with nothing to do; a folder in one state is one line with a count; a path argument lists that folder's children or that file; a recorded removal that no vault on the line still has the file of is not listed; neither vault is changed |
 | `log_lists_versions` | `log` lists a path's entries newest first with the recording vault, marks the current one, lists a deletion, finds a path with no file, and reports content as available only where a working file or a kept blob has it |

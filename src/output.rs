@@ -11,6 +11,8 @@ pub struct Options {
     pub json: bool,
     /// Run in full but write nothing to either vault.
     pub dry_run: bool,
+    /// Keep files the log says are deleted, and record them as re-created.
+    pub no_remove: bool,
 }
 
 /// Something that happened to one file.

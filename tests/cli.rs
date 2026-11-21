@@ -108,6 +108,8 @@ fn cli_smoke() {
     assert_eq!(code, 2, "{planned}");
     assert_eq!(fs::read_to_string(a.join("sub/f.txt")).unwrap(), "from a");
     assert_eq!(run(&b, &["status", "--dry-run"]).0, 1, "not for status");
+    assert_eq!(run(&b, &["status", "--no-remove"]).0, 1, "not for status");
+    assert_eq!(run(&b, &["sync", "--dry-run", "--no-remove", "../a"]).0, 2);
     let (code, out) = run(&b, &["sync", "../a"]);
     assert_eq!(code, 2, "{out}");
     assert_eq!(planned, format!("dry run: nothing is changed\n{out}"));

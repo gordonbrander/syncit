@@ -177,7 +177,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
 
 /// The heads of a path whose every head is a tombstone; None for any other
 /// path. A file beats a tombstone, so a tombstone winner means all of them.
-fn deleted_heads(log: &Log, path: &str) -> Option<Vec<Id>> {
+pub fn deleted_heads(log: &Log, path: &str) -> Option<Vec<Id>> {
     match log.resolve(path) {
         PathState::Resolved { heads, winner, .. } if log.entries[&winner].hash.is_none() => {
             Some(heads)

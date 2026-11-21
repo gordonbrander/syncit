@@ -9,7 +9,7 @@ use crate::materialise::{copy_name, materialise, prune, write_now};
 use crate::output::{
     Event, Message, Options, State, Summary, Version, print_states, print_stdout, warn,
 };
-use crate::scan::scan;
+use crate::scan::{deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
 use crate::vault::{Vault, find_root, relative, resolve_path, write_atomic};
 use anyhow::{Context, Result, bail, ensure};
@@ -175,6 +175,23 @@ fn exchange(
     if to_a {
         receive(opts, a, b, sum)?;
     }
+    if opts.no_remove {
+        if to_b {
+            keep(opts, b, a, sum)?;
+        }
+        if to_a {
+            keep(opts, a, b, sum)?;
+        }
+        // Each receiver takes the other's re-creations, so one run converges.
+        // ponytail: a corrupt segment is reported as rejected a second time
+        // here; have `receive` remember what it rejected if that matters.
+        if to_b {
+            receive(opts, b, a, sum)?;
+        }
+        if to_a {
+            receive(opts, a, b, sum)?;
+        }
+    }
     // Both retain before either materialises, so that a version is saved
     // before it is replaced.
     if to_b {
@@ -202,6 +219,30 @@ fn exchange(
         conflicts(opts, b, &mut seen);
     }
     sum.conflicts += seen.len();
+    Ok(())
+}
+
+/// `--no-remove`: a file here whose path the log says is deleted is kept, and
+/// recorded as re-created, as if the user had put it back. Its row becomes a
+/// deletion record of the tombstones, and the scan writes the entry.
+fn keep(opts: &Options, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result<()> {
+    let rows: Vec<String> = v.dirstate.rows.keys().cloned().collect();
+    let mut kept = false;
+    for path in rows {
+        if !v.takes(&path) {
+            continue;
+        }
+        let Some(heads) = deleted_heads(&v.log, &path) else {
+            continue;
+        };
+        v.dirstate.rows.remove(&path);
+        v.dirstate.deleted.insert(path.clone(), heads);
+        v.event(opts, sum, "added", &path, "kept");
+        kept = true;
+    }
+    if kept {
+        record(opts, v, Some(peer), sum)?;
+    }
     Ok(())
 }
 
@@ -402,6 +443,7 @@ pub fn status(
     let opts = &Options {
         json: opts.json,
         dry_run: true,
+        no_remove: false,
     };
     let mut v = Vault::open(opts, cwd, true)?;
     let mut scopes = prefixes(&v.root, cwd, paths)
