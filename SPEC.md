@@ -99,7 +99,7 @@ Out:
 
 - One Cargo package named `syncit`, with a library (`src/lib.rs`) and a binary (`src/main.rs`). Integration tests call the library.
 - Rust edition 2024. Minimum Rust version 1.89, for `std::fs::File::try_lock`.
-- Dependencies: `clap` (with `derive`), `serde` (with `derive`), `serde_json`, `sha2`, `anyhow`.
+- Dependencies: `clap` (with `derive`), `serde` (with `derive`), `serde_json`, `sha2`, `anyhow`, and `diffy` for the three-way merge of text (section 9).
 - For S3 stores (milestone 10) one more is needed: an S3 client. Which one is open; see section 16.
 - Dev dependency: `tempfile`.
 - From the standard library, not from crates: directory walking (`fs::read_dir`), hex encoding, setting file times (`File::set_modified`), file locking, atomic rename.
@@ -117,7 +117,7 @@ Suggested layout. Merge or split if it reads better, but keep the pure parts fre
 | `dirstate` | `Dirstate`, `Row`, the deletion records, load and save, the unchanged test | load, save, stat |
 | `scan` | walk, the write table, segment writing | yes |
 | `blobs` | hashing, blob sources, fetch, retain | yes |
-| `materialise` | the per-path procedure, conflict copies, setting base | yes |
+| `materialise` | the per-path procedure, merging text, conflict copies, setting base | yes |
 | `vault` | `Vault` (root, config, dirstate, log, lock), finding the root | yes |
 | `commands` | one function per command; a command that runs a sync returns a `Summary` | yes |
 | `output` | `Options`, the `Message` types with their text and JSON forms, `print_stdout`, `print_stderr`, `Summary` | no |
@@ -401,6 +401,7 @@ Let `S = resolve(p)`, `row` the dirstate row, `W` the winner, `h` its hash.
 2. `S` is `Incomplete`: report `incomplete`. Nothing else.
 3. The path is excluded or ignored: nothing. (`R5`. The scan has included every file on disk, section 7, so a path with a row is skipped here only if it is ignored.)
 4. **`W` is a tombstone.** If there is a row: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. Then, row or not, set the path's deletion record to the heads: with no file here, this vault's state reflects all of them. A path that reaches this step is included, so an included path the vault never had gets a record too.
+   **4a. `W` is a file, and the path can be merged** ("Merging", below). Run the safety checks, write the merged text and record it. Report `updated`, or `added` if there was no row, with the note `merged`. Nothing else is done for the path: there are no copies.
 5. **`W` is a file, and there is a row with `row.hash == h`.** The content is in place. If `row.exec` differs from the winner's: run the safety checks, set the bit on the file where it is, set `row.exec`, and report `updated`. Nothing is fetched and the mtime does not change. Go to "copies and base".
 6. **`W` is a file, and there is a row with a different hash.** Run the safety checks.
    - If `row.hash` is a loser hash and its copy path `c` has no entries in the log: the local file is a conflicting version and must stay visible. If something already exists at `c`, report `skipped` (name clash) and stop. Otherwise write the winner to its temporary name first; rename `p` to `c`; rename the temporary file onto `p`; remove the old row. `c` gets no row.
@@ -430,6 +431,31 @@ Then set the row's base to:
 - every head whose hash is a surfaced loser.
 
 Heads of losers that were not surfaced stay out, so the conflict stays open (`CRDT.md`, "Setting base").
+
+### Merging
+
+Implements `PRD.md`, "Merging text", and `CRDT.md`, "Merging". A path is merged when all of these hold; if any fails, the steps for a conflict apply unchanged.
+
+1. The versions it replaces are retained in this run: a vault that receives keeps history. A run computes this once, as `kept` = (the local vault receives and has `keep_local_history`) or (the peer receives and has it), and passes it to `materialise`. Such a vault calls `retain()` after the exchange and before anything is materialised (section 10, step 5), and `retain()` collects from the sources the merge reads, so every version a merge reads is already in that vault's `.syncit/blobs/`. The test is the setting, not the blobs on disk, because a dry run retains nothing and must decide alike. Milestone 9 widens it to a vault with a `store`, as it widens `retain()`.
+2. Its file name has the extension `md`, `markdown` or `txt`, compared without regard to ASCII case, after a non-empty stem. A constant, not a setting.
+3. It has exactly two heads, both files, with different hashes.
+4. `merge_base(path, a, b)` gives an entry: the heads' one lowest common ancestor, a file. It is a pure function of the log.
+5. The content of the base, the winner and the loser can each be read from a blob source (section 8, in the same order as `fetch`), with the right hash, at most 1 MiB, and valid UTF-8. The read is into memory and writes nothing, so a dry run makes the same decision by the same means.
+6. `diffy::merge(base, winner, loser)` is clean.
+
+Then, after the safety checks:
+
+- Write the merged text at the path as a file is written (temporary name, mtime, executable bit, rename), whatever the row was.
+- Build the entry of `CRDT.md`, "Merging", add it to the log, and write it as a segment of its own. File, then segment, then the dirstate at the end of materialise, as a scan orders them. Stopped in between, the next scan records the file as an ordinary edit, or a second head with the same hash; nothing is lost.
+- The row becomes `(size, mtime as stat reports, the entry's exec, its hash, [the entry])`, and any deletion record is removed.
+
+A dry run does all of this in memory and writes nothing. The entry is not counted in `recorded`, which counts what scans wrote.
+
+Limits, accepted:
+
+- A vault without history that merges, because the other vault in a `sync` keeps it, lists the versions replaced as `no content`. They are restored from the other vault.
+- A conflict first given copies, by a `pull` into a vault without history, may be merged by a later `sync` with a vault that keeps it. The copy stays, an ordinary file.
+- `status` shows a conflict that the next run would merge as `conflict`.
 
 ### copy_name
 
@@ -663,7 +689,7 @@ An event's text form is a marker, one letter, then `path`, the file's path in it
 | `R` | `moved`: `move` removed the file from this vault |
 | `!` | anything that needs attention: `skipped`, `pending`, `incomplete`, `rejected` |
 
-Anything more goes in parentheses after the path. A `!` line gives its kind and reason: `(skipped: changed since it was scanned)`. A rejected segment has no file, so its path is `.`, the vault itself: `-> ! . (rejected: segment 77b0…: not in canonical form)`.
+Anything more goes in parentheses after the path. A file whose conflicting versions were merged (section 9) is `M notes.md (merged)`. A `!` line gives its kind and reason: `(skipped: changed since it was scanned)`. A rejected segment has no file, so its path is `.`, the vault itself: `-> ! . (rejected: segment 77b0…: not in canonical form)`.
 
 ```
 <- M notes.txt
@@ -761,6 +787,11 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 
 | Test | Asserts |
 |---|---|
+| `merge_base_cases` | the lowest common ancestor of two entries: concurrent edits, from further down each side, the lowest of several; none for independent creations, a criss-cross, or a deletion |
+| `mergeable_names` | which file names are merged |
+| `merge_text_conflict` | edits to different lines of a text file in two vaults, with the earlier version in one vault's history: both vaults have the merged text, no copy and no conflict; the path has one head whose parents are both edits, which stay in the log and can be restored; a second sync does nothing |
+| `merge_on_pull` | a `pull` into a vault that keeps history merges there, changes nothing in the other vault, and leaves both versions replaced in its `.syncit/blobs/` |
+| `merge_falls_back` | an ordinary conflict with a copy when the edits overlap, the file is not text, no vault keeps history though the earlier version can be read from another file, or only the vault that is not receiving keeps it; an edit against a deletion is as before |
 | `edit_beats_delete` | edit on one side, delete on the other: the file survives everywhere and the delete is reported |
 | `same_edit_no_conflict` | identical content written on both sides is not a conflict |
 | `new_file_at_existing_path` | a file created in a partial vault at a path another vault already has: equal content is adopted or merges silently, different content is an ordinary conflict with a copy |
@@ -799,7 +830,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `message_forms` | each message type's text form and JSON form; the summary's counts and exit code |
 | `push_counts_excluded` | the files a push would not deliver: those the target excludes, and those it ignores |
 | `interrupted_move` | an exclude over files the vault still has, as a `move` stopped partway leaves: the next scan includes them again, they sync as before, and a second `move` completes and leaves one exclude |
-| `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion and a conflict, and for `move`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` that would be refused is refused |
+| `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion, a conflict and a merge of text, and for `move`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` that would be refused is refused |
 
 ### Requirement coverage
 
@@ -842,6 +873,7 @@ Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warning
 - [x] **8d. ls.** The `holding` message and the command `ls`, with its `--help` legend. Tests: `ls_states`, and the `holding` parts of `message_forms` and `cli_smoke`.
 - [x] **8e. One status.** `ls` is folded into `status`: one state and one mark for each case, unrecorded changes, conflicts and incomplete paths as states, `--all`, and the text form in columns. Tests: `status_states` (in place of `ls_states`), and the `holding` parts of `message_forms` and `cli_smoke`.
 - [x] **8f. Have, present, dirstate, state.** *Held* is retired: a vault *has* a file, which is then *present*; the record of it is a row in the *dirstate*, the file once called the cache; the `holding` message is `state`. A rename, with no change of behaviour. Tests: `lost_dirstate` and `interrupted_before_dirstate` (renamed), and the `state` parts of `message_forms` and `cli_smoke`.
+- [x] **8g. Merging text.** `merge_base`, reading a blob into memory, and the merge step of materialise (section 9, "Merging"). Tests: `merge_base_cases`, `mergeable_names`, `merge_text_conflict`, `merge_on_pull`, `merge_falls_back`, and the merge in `dry_run_matches_real_run`.
 - [ ] **9. Stores.** Everything under "Stores" in section 8 and "A run with a store" in section 10, for directory stores: the layout, the `store` setting and `config store`, `flush`, the store as a blob source, and `sync`, `push`, `pull` and `move` with a store. Tests: `story_c2_sync_through_store`, `store_layout`, `store_hostile`, `store_configured_gets_log`.
 - [ ] **10. S3 stores.** The second kind of store, behind the same four operations. Test: `s3_store`.
 
@@ -868,6 +900,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | A file on disk outside the included paths | added to `include` by the scan, whether new or already with a row (section 7): the filter follows the disk, so data is kept. `move` undoes it |
 | Seeing a partial vault | `status --all`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
 | Terms for partial replication | three independent facts, one word each: included or excluded (the filter), present (the disk, which the dirstate records), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
+| Merging conflicting files | text only (`.md`, `.markdown`, `.txt`), only in a run where a receiving vault keeps history, so the versions replaced can be restored, and only when a line-by-line three-way merge from their common ancestor is clean; otherwise copies. The merge is an entry with both versions as parents. `PRD.md` first listed merging as a non-goal |
 | Tie-break timestamp | file mtime |
 | Empty directories | not tracked; directories emptied by a deletion are removed |
 | Cross-path parents | a read rule, not a segment rejection (`CRDT.md` was corrected to match) |

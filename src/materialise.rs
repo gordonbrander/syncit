@@ -1,11 +1,12 @@
 //! Materialise: bring the working folder to the state the log describes.
 
-use crate::blobs::{available, fetch, hash_file};
-use crate::dirstate::{Row, mtime_ms};
-use crate::entry::Id;
+use crate::blobs::{available, fetch, hash_file, read};
+use crate::dirstate::{Row, TICK_MARGIN_MS, mtime_ms};
+use crate::entry::{Entry, Id, sha256};
 use crate::log::{Loser, PathState};
 use crate::output::{Options, Summary};
-use crate::vault::{TMP_PREFIX, Vault, unique};
+use crate::segment;
+use crate::vault::{TMP_PREFIX, Vault, unique, write_atomic};
 use anyhow::{Context, Result, bail, ensure};
 use std::fs::{self, File};
 use std::io;
@@ -26,18 +27,69 @@ pub fn copy_name(path: &str, hash: &str) -> String {
     }
 }
 
-/// Visit every path in the log. The peer is only a blob source.
+/// Files whose conflicting edits are merged line by line. Only plain prose:
+/// a line merge of structured text can be clean and still broken.
+const MERGE_EXTENSIONS: [&str; 3] = ["markdown", "md", "txt"];
+
+/// Larger versions are not merged: they are read into memory and diffed.
+const MERGE_MAX_BYTES: u64 = 1 << 20;
+
+fn mergeable(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && MERGE_EXTENSIONS.iter().any(|x| ext.eq_ignore_ascii_case(x))
+    })
+}
+
+/// The clean three-way merge of a text file's two conflicting versions, and
+/// the entry that records it: a child of both, so they stay in the log. None
+/// unless there are exactly two heads, both files, with one common ancestor,
+/// all three contents can be read, and the edits do not overlap. The winner
+/// is "ours" and the mtime is fixed, so every vault writes the same entry.
+fn merged(
+    v: &Vault,
+    peer: Option<&Vault>,
+    p: &str,
+    heads: &[Id],
+    winner: &Id,
+) -> Option<(String, Entry)> {
+    let [a, b] = heads else { return None };
+    if !mergeable(p) {
+        return None;
+    }
+    let (w, l) = (&v.log.entries[winner], if a == winner { b } else { a });
+    let l = &v.log.entries[l];
+    let base = &v.log.entries[&v.log.merge_base(p, a, b)?];
+    let text =
+        |e: &Entry| String::from_utf8(read(v, peer, e.hash.as_ref()?, MERGE_MAX_BYTES)?).ok();
+    let text = diffy::merge(&text(base)?, &text(w)?, &text(l)?).ok()?;
+    let entry = Entry {
+        // The bit is merged as the text is: a change on either side is kept.
+        exec: if w.exec == base.exec { l.exec } else { w.exec },
+        hash: Some(sha256(text.as_bytes())),
+        // Later than both, by enough that any filesystem shows the change.
+        mtime: w.mtime.checked_add(TICK_MARGIN_MS)?,
+        parents: heads.to_vec(),
+        path: p.to_string(),
+    };
+    Some((text, entry))
+}
+
+/// Visit every path in the log. The peer is only a blob source. `kept` says
+/// that the versions a merge replaces are retained in this run; without it
+/// nothing is merged.
 pub fn materialise(
     opts: &Options,
     v: &mut Vault,
     peer: Option<&Vault>,
+    kept: bool,
     sum: &mut Summary,
 ) -> Result<()> {
     let paths: Vec<String> = v.log.paths.keys().cloned().collect();
     for path in paths {
         // A path that fails a safety check or hits a filesystem error is
         // left as it was, and the run goes on.
-        if let Err(e) = one(opts, v, peer, &path, sum) {
+        if let Err(e) = one(opts, v, peer, kept, &path, sum) {
             v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
         }
     }
@@ -51,6 +103,7 @@ fn one(
     opts: &Options,
     v: &mut Vault,
     peer: Option<&Vault>,
+    kept: bool,
     p: &str,
     sum: &mut Summary,
 ) -> Result<()> {
@@ -86,6 +139,40 @@ fn one(
         v.dirstate.deleted.insert(p.to_string(), heads);
         return Ok(());
     };
+    let merge = kept.then(|| merged(v, peer, p, &heads, &winner)).flatten();
+    if let Some((text, entry)) = merge {
+        safe(v, p)?;
+        let hash = sha256(text.as_bytes());
+        let (size, mtime) = if opts.dry_run {
+            (0, entry.mtime) // in memory only
+        } else {
+            let fill = |tmp: &Path| fs::write(tmp, &text).map(|_| true);
+            let tmp = stage(v, p, entry.mtime, entry.exec, fill)?.context("nothing staged")?;
+            let placed = place(v, &tmp, p, &hash)?;
+            // The file, then its entry: an entry is never published for
+            // content that is nowhere. Stopped in between, the next scan
+            // records the file as an ordinary edit.
+            let (name, bytes) = segment::encode(&v.config.nickname, std::slice::from_ref(&entry));
+            write_atomic(&v.root, &v.dot().join("log").join(name), &bytes)?;
+            placed
+        };
+        v.dirstate.deleted.remove(p);
+        v.dirstate.rows.insert(
+            p.to_string(),
+            Row {
+                size,
+                mtime,
+                exec: entry.exec,
+                hash,
+                base: vec![entry.id()],
+            },
+        );
+        let nickname = v.config.nickname.clone();
+        v.log.add(entry, &nickname);
+        let kind = if row.is_some() { "updated" } else { "added" };
+        v.event(opts, sum, kind, p, "merged");
+        return Ok(());
+    }
     // The copy name the local version was renamed to, if it was.
     let mut renamed = None;
     if row.as_ref().is_none_or(|row| row.hash != h) {
@@ -111,7 +198,7 @@ fn one(
             }
             (0, w.mtime) // in memory only
         } else {
-            let Some(tmp) = stage(v, peer, p, &h, w.mtime, w.exec)? else {
+            let Some(tmp) = stage(v, p, w.mtime, w.exec, |tmp| fetch(v, peer, &h, tmp))? else {
                 v.event(opts, sum, "pending", p, UNAVAILABLE);
                 return Ok(());
             };
@@ -222,7 +309,7 @@ fn write_copy(
     if opts.dry_run {
         return Ok(available(v, peer, &l.hash));
     }
-    let Some(tmp) = stage(v, peer, c, &l.hash, l.mtime, l.exec)? else {
+    let Some(tmp) = stage(v, c, l.mtime, l.exec, |tmp| fetch(v, peer, &l.hash, tmp))? else {
         return Ok(false);
     };
     place(v, &tmp, c, &l.hash)?;
@@ -270,16 +357,15 @@ fn set_exec(file: &Path, exec: bool) -> io::Result<()> {
     fs::set_permissions(file, perms)
 }
 
-/// Fetch content `h` into a scratch file beside `p`, verified and with its
-/// mtime and executable bit set. None if no source has the blob; then
-/// nothing is left behind.
+/// Fill a scratch file beside `p` with content, usually a verified blob, and
+/// set its mtime and executable bit. None if `fill` says there is no content
+/// (no source has the blob); then nothing is left behind.
 fn stage(
     v: &Vault,
-    peer: Option<&Vault>,
     p: &str,
-    h: &str,
     mtime: i64,
     exec: bool,
+    fill: impl FnOnce(&Path) -> io::Result<bool>,
 ) -> Result<Option<PathBuf>> {
     let file = v.root.join(p);
     let dir = file.parent().context("no parent folder")?;
@@ -291,7 +377,7 @@ fn stage(
     let tmp = dir.join(format!("{TMP_PREFIX}{}", unique()));
     let staged = (|| -> io::Result<bool> {
         fs::create_dir_all(dir)?;
-        if !fetch(v, peer, h, &tmp)? {
+        if !fill(&tmp)? {
             return Ok(false);
         }
         let span = Duration::from_millis(mtime.unsigned_abs());
@@ -343,7 +429,7 @@ pub fn write_now(v: &mut Vault, p: &str, h: &str, exec: bool) -> Result<bool> {
         no_symlinked_parent(v, p)?;
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
-    let Some(tmp) = stage(v, None, p, h, now, exec)? else {
+    let Some(tmp) = stage(v, p, now, exec, |tmp| fetch(v, None, h, tmp))? else {
         return Ok(false);
     };
     place(v, &tmp, p, h)?;
@@ -363,7 +449,24 @@ pub fn prune(root: &Path, file: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::copy_name;
+    use super::{copy_name, mergeable};
+
+    #[test]
+    fn mergeable_names() {
+        for yes in ["notes.md", "a/b/Read.Me.TXT", "x.markdown", ".hidden.md"] {
+            assert!(mergeable(yes), "{yes}");
+        }
+        for no in [
+            "data.json",
+            "Makefile",
+            ".md",
+            "md",
+            "a.md/photo.jpg",
+            "x.mdx",
+        ] {
+            assert!(!mergeable(no), "{no}");
+        }
+    }
 
     #[test]
     fn copy_name_cases() {

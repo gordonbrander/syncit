@@ -276,6 +276,115 @@ fn story_b1_conflict() {
     assert!(status(&b).is_empty());
 }
 
+/// A pair with `files` where `b` keeps history and has the files' first
+/// versions in it: what a later merge starts from.
+fn pair_with_history(files: &[(&str, &str)]) -> (TempDir, PathBuf, PathBuf) {
+    let (tmp, a, b) = pair(files);
+    configure(&b, |c| c.keep_local_history = true);
+    cmd::snapshot(O, &b).unwrap();
+    (tmp, a, b)
+}
+
+#[test]
+fn merge_text_conflict() {
+    let (_tmp, a, b) = pair_with_history(&[("notes.md", "one\ntwo\nthree\n")]);
+    put(&a, "notes.md", "ONE\ntwo\nthree\n", 1);
+    put(&b, "notes.md", "one\ntwo\nTHREE\n", 2);
+    let report = cmd::sync(O, &a, &b).unwrap();
+    assert_eq!((report.exit_code(), report.conflicts), (0, 0), "{report:?}");
+    assert_eq!(report.updated, 2, "merged in each vault");
+    assert!(report.events.iter().all(|e| e.note == "merged"));
+    for dir in [&a, &b] {
+        assert!(is(dir, "notes.md", "ONE\ntwo\nTHREE\n"));
+        assert_eq!(tree(dir).len(), 1, "no conflict copy");
+    }
+    // The merge is one more entry, a child of both edits: they stay in the
+    // log. Both vaults wrote the same one.
+    for dir in [&a, &b] {
+        let log = log(dir);
+        assert_eq!(log.paths["notes.md"].len(), 4);
+        let PathState::Resolved { heads, losers, .. } = log.resolve("notes.md") else {
+            panic!("not resolved");
+        };
+        assert!(heads.len() == 1 && losers.is_empty());
+        assert_eq!(log.entries[&heads[0]].parents.len(), 2);
+    }
+    // Nothing is left to do, and the versions merged can be brought back.
+    assert_eq!(cmd::sync(O, &a, &b).unwrap(), Summary::default());
+    assert!(status(&a).is_empty() && status(&b).is_empty());
+    let old = sha256(b"ONE\ntwo\nthree\n");
+    cmd::restore(O, &b, Path::new("notes.md"), &old, false).unwrap();
+    assert!(is(&b, &copy_name("notes.md", &old), "ONE\ntwo\nthree\n"));
+}
+
+/// One vault receiving is enough, if it is the one that keeps history.
+#[test]
+fn merge_on_pull() {
+    let (_tmp, a, b) = pair_with_history(&[("notes.md", "one\ntwo\nthree\n")]);
+    put(&a, "notes.md", "ONE\ntwo\nthree\n", 1);
+    put(&b, "notes.md", "one\ntwo\nTHREE\n", 2);
+    let report = cmd::pull(O, &b, &a).unwrap();
+    assert_eq!((report.exit_code(), report.updated), (0, 1), "{report:?}");
+    assert!(is(&b, "notes.md", "ONE\ntwo\nTHREE\n"));
+    assert!(
+        is(&a, "notes.md", "ONE\ntwo\nthree\n"),
+        "a pull changes one vault"
+    );
+    // Both versions it replaced are in the history of the vault that merged.
+    for old in ["ONE\ntwo\nthree\n", "one\ntwo\nTHREE\n"] {
+        assert!(
+            b.join(".syncit/blobs")
+                .join(sha256(old.as_bytes()))
+                .is_file()
+        );
+    }
+}
+
+#[test]
+fn merge_falls_back() {
+    let conflict = |a: &Path, b: &Path, path: &str, ours: &str, theirs: &str| {
+        put(a, path, ours, 1);
+        put(b, path, theirs, 2);
+        let report = cmd::sync(O, a, b).unwrap();
+        assert_eq!((report.exit_code(), report.conflicts), (2, 1), "{path}");
+        for dir in [a, b] {
+            assert!(is(dir, path, theirs) && is(dir, &copy_of(path, ours), ours));
+        }
+    };
+    let text = "one\ntwo\nthree\n";
+    // Edits to the same line.
+    let (_tmp, a, b) = pair_with_history(&[("notes.md", text)]);
+    conflict(&a, &b, "notes.md", "ONE\ntwo\nthree\n", "uno\ntwo\nthree\n");
+    // Not a text file.
+    let (_tmp, a, b) = pair_with_history(&[("data.json", text)]);
+    conflict(
+        &a,
+        &b,
+        "data.json",
+        "ONE\ntwo\nthree\n",
+        "one\ntwo\nTHREE\n",
+    );
+    // No vault keeps history, so the versions replaced would be lost: though
+    // the one both edits started from can be read, from another file.
+    let (_tmp, a, b) = pair(&[("notes.md", text), ("spare.md", text)]);
+    conflict(&a, &b, "notes.md", "ONE\ntwo\nthree\n", "one\ntwo\nTHREE\n");
+    // Only the vault that is not receiving keeps history.
+    let (_tmp, a, b) = pair_with_history(&[("notes.md", text)]);
+    put(&a, "notes.md", "ONE\ntwo\nthree\n", 1);
+    put(&b, "notes.md", "one\ntwo\nTHREE\n", 2);
+    let report = cmd::pull(O, &a, &b).unwrap();
+    assert_eq!((report.exit_code(), report.conflicts), (2, 1));
+    let copy = copy_of("notes.md", "ONE\ntwo\nthree\n");
+    assert!(is(&a, "notes.md", "one\ntwo\nTHREE\n") && a.join(copy).is_file());
+    // An edit against a deletion.
+    let (_tmp, a, b) = pair_with_history(&[("notes.md", text)]);
+    put(&a, "notes.md", "ONE\ntwo\nthree\n", 1);
+    fs::remove_file(b.join("notes.md")).unwrap();
+    let report = cmd::sync(O, &a, &b).unwrap();
+    assert_eq!((report.exit_code(), report.conflicts), (2, 1));
+    assert!(is(&b, "notes.md", "ONE\ntwo\nthree\n"));
+}
+
 #[test]
 fn story_c1_three_vaults() {
     let (tmp, a, b) = pair(&[("f.txt", "v1")]);
@@ -873,7 +982,7 @@ fn changed_during_run() {
         put(&b, "gone.txt", "kept", 2);
         let mut report = Summary::default();
         cmd::receive(O, &mut vb, &va, &mut report).unwrap();
-        materialise(O, &mut vb, Some(&va), &mut report).unwrap();
+        materialise(O, &mut vb, Some(&va), false, &mut report).unwrap();
         assert!(report.has("skipped", "f.txt") && report.has("skipped", "gone.txt"));
         assert_eq!(report.exit_code(), 2);
     }
@@ -905,7 +1014,7 @@ fn untracked_in_the_way() {
         put(&b, "d", "a file where a folder is needed", 1);
         let mut report = Summary::default();
         cmd::receive(O, &mut vb, &va, &mut report).unwrap();
-        materialise(O, &mut vb, Some(&va), &mut report).unwrap();
+        materialise(O, &mut vb, Some(&va), false, &mut report).unwrap();
         assert!(report.has("skipped", "f.txt") && report.has("skipped", "d/g.txt"));
         let way = |e: &syncit::output::Event| e.note == "an untracked file is in the way";
         assert!(report.events.iter().any(way));
@@ -973,7 +1082,7 @@ fn interrupted_transfer() {
     {
         let mut report = Summary::default();
         let mut vb = Vault::open(O, &b, true).unwrap();
-        materialise(O, &mut vb, None, &mut report).unwrap();
+        materialise(O, &mut vb, None, false, &mut report).unwrap();
         assert_eq!((report.incomplete, report.exit_code()), (1, 2));
     }
     assert!(is(&b, "f.txt", "v1"));
@@ -1485,9 +1594,12 @@ fn dry_run_matches_real_run() {
             ("notes.txt", "base"),
             ("gone.txt", "x"),
             ("d/both.txt", "base"),
+            ("merge.md", "one\ntwo\nthree\n"),
         ];
-        let (tmp, a, b) = pair(&files);
-        configure(&b, |c| c.keep_local_history = true);
+        let (tmp, a, b) = pair_with_history(&files);
+        configure(&a, |c| c.keep_local_history = true);
+        put(&a, "merge.md", "ONE\ntwo\nthree\n", 1);
+        put(&b, "merge.md", "one\ntwo\nTHREE\n", 2);
         put(&a, "notes.txt", "edited in a", 1);
         put(&a, "new/in-a.txt", "new", 1);
         fs::remove_file(a.join("gone.txt")).unwrap();
@@ -1505,7 +1617,8 @@ fn dry_run_matches_real_run() {
         assert!(before == listing(), "a dry run wrote something");
         let done = run(O, &a, &b).unwrap();
         assert!(before != listing());
-        assert!(done.conflicts == 1 && done.recorded == 6, "{done:?}");
+        assert!(done.conflicts == 1 && done.recorded == 8, "{done:?}");
+        assert!(done.has("updated", "merge.md"));
         assert_eq!(planned, done);
     }
 

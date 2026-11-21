@@ -183,11 +183,15 @@ fn exchange(
     if to_a {
         retain(opts, a, Some(b))?;
     }
+    // A merge replaces two versions. It is made only if a vault receiving in
+    // this run keeps history: its `retain` above then has them, so they can
+    // be restored. The setting, not the blobs, so a dry run decides alike.
+    let kept = (to_a && a.config.keep_local_history) || (to_b && b.config.keep_local_history);
     if to_b {
-        materialise(opts, b, Some(a), sum)?;
+        materialise(opts, b, Some(a), kept, sum)?;
     }
     if to_a {
-        materialise(opts, a, Some(b), sum)?;
+        materialise(opts, a, Some(b), kept, sum)?;
     }
     // A conflict open in both vaults is reported once, for the local one.
     let mut seen = BTreeSet::new();

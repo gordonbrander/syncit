@@ -85,6 +85,32 @@ impl Log {
             .collect()
     }
 
+    /// The one lowest common ancestor of two entries of a path, if it is a
+    /// file: the version a three-way merge starts from. None if they share
+    /// no ancestor (created independently) or have several (a criss-cross).
+    pub fn merge_base(&self, path: &str, a: &Id, b: &Id) -> Option<Id> {
+        fn ancestors<'a>(valid: &BTreeMap<&'a Id, &'a Entry>, id: &'a Id) -> BTreeSet<&'a Id> {
+            let (mut seen, mut todo) = (BTreeSet::new(), vec![id]);
+            while let Some(id) = todo.pop() {
+                for p in valid.get(id).into_iter().flat_map(|e| &e.parents) {
+                    if valid.contains_key(p) && seen.insert(p) {
+                        todo.push(p);
+                    }
+                }
+            }
+            seen
+        }
+        let valid: BTreeMap<&Id, &Entry> = self.valid(path).into_iter().collect();
+        let (of_a, of_b) = (ancestors(&valid, a), ancestors(&valid, b));
+        let common: Vec<&Id> = of_a.intersection(&of_b).copied().collect();
+        let above: BTreeSet<&Id> = common.iter().flat_map(|c| ancestors(&valid, c)).collect();
+        let mut lowest = common.into_iter().filter(|c| !above.contains(c));
+        match (lowest.next(), lowest.next()) {
+            (Some(id), None) if valid[id].hash.is_some() => Some(id.clone()),
+            _ => None,
+        }
+    }
+
     pub fn resolve(&self, path: &str) -> PathState {
         let ids = self.paths.get(path).into_iter().flatten();
         let missing = |p: &Id| !self.entries.contains_key(p);
@@ -223,6 +249,36 @@ mod tests {
         let t = e("p", None, 5, &[&c]);
         expect(&log(&[&a, &b, &c, &t]), &[&t], &t, &[], false);
         assert_eq!(log(&[&a]).resolve("elsewhere"), PathState::Absent);
+    }
+
+    #[test]
+    fn merge_base_cases() {
+        let a = e("p", Some("a"), 1, &[]);
+        let b = e("p", Some("b"), 2, &[&a]);
+        let c = e("p", Some("c"), 3, &[&a]);
+        let base = |entries: &[&Entry], x: &Entry, y: &Entry| {
+            log(entries).merge_base("p", &x.id(), &y.id())
+        };
+        // Concurrent edits, and the same from further down each side.
+        assert_eq!(base(&[&a, &b, &c], &b, &c), Some(a.id()));
+        let b2 = e("p", Some("b2"), 4, &[&b]);
+        let c2 = e("p", Some("c2"), 5, &[&c]);
+        assert_eq!(base(&[&a, &b, &c, &b2, &c2], &b2, &c2), Some(a.id()));
+        // The lowest one: B, not A above it.
+        let d = e("p", Some("d"), 6, &[&b]);
+        assert_eq!(base(&[&a, &b, &b2, &d], &b2, &d), Some(b.id()));
+        // Created independently: nothing in common.
+        let x = e("p", Some("x"), 1, &[]);
+        assert_eq!(base(&[&a, &b, &x], &b, &x), None);
+        // A criss-cross: two merges of B and C have both as lowest ancestors.
+        let m1 = e("p", Some("m1"), 7, &[&b, &c]);
+        let m2 = e("p", Some("m2"), 8, &[&b, &c]);
+        assert_eq!(base(&[&a, &b, &c, &m1, &m2], &m1, &m2), None);
+        // A deletion has no content to merge from.
+        let t = e("p", None, 2, &[&a]);
+        let r1 = e("p", Some("r1"), 3, &[&t]);
+        let r2 = e("p", Some("r2"), 4, &[&t]);
+        assert_eq!(base(&[&a, &t, &r1, &r2], &r1, &r2), None);
     }
 
     #[test]

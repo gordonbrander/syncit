@@ -1,6 +1,6 @@
 //! Blobs: file contents addressed by SHA-256, and where to find them.
 
-use crate::entry::hex;
+use crate::entry::{hex, sha256};
 use crate::output::Options;
 use crate::vault::{Vault, unique};
 use anyhow::Result;
@@ -60,6 +60,16 @@ fn sources(v: &Vault, peer: Option<&Vault>, hash: &str) -> Vec<PathBuf> {
         sources.push(vault.dot().join("blobs").join(hash));
     }
     sources
+}
+
+/// The blob's bytes, from the first source that yields them and is no larger
+/// than `max`. Nothing is written, so a dry run reads as a real one does.
+pub fn read(v: &Vault, peer: Option<&Vault>, hash: &str, max: u64) -> Option<Vec<u8>> {
+    sources(v, peer, hash).into_iter().find_map(|src| {
+        let small = src.metadata().is_ok_and(|m| m.is_file() && m.len() <= max);
+        let bytes = small.then(|| fs::read(&src).ok()).flatten()?;
+        (sha256(&bytes) == hash).then_some(bytes)
+    })
 }
 
 /// Whether `fetch` would find the blob, for a dry run.
