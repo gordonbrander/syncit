@@ -260,9 +260,8 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit sync <vault or store>` | Sync both ways with another vault, or with a store. |
 | `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
-| `syncit status` | Print pending changes, pending blobs and open conflicts. Writes nothing to the log. |
+| `syncit status [path]... [--vs <vault>]` | Show each file that needs something: unrecorded changes, files behind or missing, open conflicts. `--all` lists every file, with those held, excluded and ignored; `--vs` shows another vault's state beside this one's. Writes nothing. |
 | `syncit get <path in another vault>...` / `syncit move <path>... <vault>` | Change what this vault holds. |
-| `syncit ls [path]... [--vs <vault>]` | List each file as held, missing, behind, excluded, ignored or deleted here, and with `--vs` in another vault too. Writes nothing. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
 | `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
@@ -280,7 +279,7 @@ A vault records no other vault. Every command that involves a second vault names
 |---|---|---|
 | A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
 | A.3 | R5, R7 | `move` removes cache rows, so absence is "not held" |
-| A.4 | R4, R5, R27 | `clone` of a sub-path; same directory structure; `ls` shows what is held and what is excluded |
+| A.4 | R4, R5, R27 | `clone` of a sub-path; same directory structure; `status --all` shows what is held and what is excluded |
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become included |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |

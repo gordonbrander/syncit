@@ -63,8 +63,13 @@ fn pair(files: &[(&str, &str)]) -> (TempDir, PathBuf, PathBuf) {
     (tmp, a, b)
 }
 
-fn has(found: &[(&str, String)], kind: &str, path: &str) -> bool {
-    found.iter().any(|(k, p)| *k == kind && p == path)
+/// What `status` lists for the vault at `dir`: the lines that need something.
+fn status(dir: &Path) -> Vec<Holding> {
+    cmd::status(O, dir, &[], None, false).unwrap()
+}
+
+fn has(found: &[Holding], state: &str, path: &str) -> bool {
+    found.iter().any(|h| h.ours == state && h.path == path)
 }
 
 fn paths(list: &[&str]) -> Vec<PathBuf> {
@@ -248,14 +253,16 @@ fn story_b1_conflict() {
     assert_eq!(tree(&a), tree(&b));
     // It repeats until it is closed, and status shows it without failing.
     assert_eq!(cmd::sync(O, &b, &a).unwrap().conflicts, 1);
-    assert!(has(&cmd::status(O, &a).unwrap(), "conflict", "notes.txt"));
+    let open = status(&a);
+    assert!(has(&open, "conflict", "notes.txt"));
+    assert_eq!(open[0].conflict.as_ref(), Some(&copy));
     // Editing the winner where both versions are visible closes it everywhere.
     put(&a, "notes.txt", "merged", 3);
     let report = cmd::sync(O, &b, &a).unwrap();
     assert_eq!((report.exit_code(), report.conflicts), (0, 0));
     assert!(is(&a, "notes.txt", "merged") && is(&b, "notes.txt", "merged"));
     assert_eq!(tree(&a), tree(&b));
-    assert!(cmd::status(O, &b).unwrap().is_empty());
+    assert!(status(&b).is_empty());
 }
 
 #[test]
@@ -555,16 +562,13 @@ fn restore_version() {
     assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy);
     assert!(is(&a, "f.txt", "v2") && is(&a, &copy, "v1"));
     assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy, "again");
-    assert!(has(&cmd::status(O, &a).unwrap(), "new", &copy));
+    assert!(has(&status(&a), "new", &copy));
     assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
     assert!(is(&b, &copy, "v1"));
     // A copy deleted since the last scan can be had again.
     fs::remove_file(a.join(&copy)).unwrap();
     assert_eq!(restore(&a, "f.txt", "v1", false).unwrap(), copy);
-    assert!(
-        cmd::status(O, &a).unwrap().is_empty(),
-        "the same file as before"
-    );
+    assert!(status(&a).is_empty(), "the same file as before");
     // The copy moved over the file is an edit like any other.
     fs::rename(a.join(&copy), a.join("f.txt")).unwrap();
     assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
@@ -583,7 +587,7 @@ fn restore_version() {
     assert_eq!((heads.len(), head.hash.clone()), (1, Some(hash("v2"))));
     let parent = &log_a.entries[&head.parents[0]];
     assert_eq!(parent.hash, Some(hash("unrecorded")));
-    assert!(cmd::status(O, &a).unwrap().is_empty(), "already recorded");
+    assert!(status(&a).is_empty(), "already recorded");
     assert_eq!(restore(&a, "f.txt", "v2", true).unwrap(), "f.txt", "again");
     // The replaced version was kept, and can be had back in turn.
     assert!(restore(&a, "f.txt", "unrecorded", false).is_ok());
@@ -744,7 +748,7 @@ fn pending_then_edit() {
     let report = cmd::sync(O, &b, &c).unwrap();
     assert_eq!((report.pending, report.exit_code()), (1, 2));
     assert!(is(&b, "f.txt", "v1"));
-    assert!(has(&cmd::status(O, &b).unwrap(), "behind", "f.txt"));
+    assert!(has(&status(&b), "behind", "f.txt"));
     // An edit made without having seen v2 conflicts with it.
     put(&b, "f.txt", "mine", 2);
     let report = cmd::sync(O, &b, &a).unwrap();
@@ -829,7 +833,7 @@ fn same_tick_edit() {
         .unwrap()
         .set_modified(mtime)
         .unwrap();
-    assert!(has(&cmd::status(O, a).unwrap(), "modified", "f.txt"));
+    assert!(has(&status(a), "modified", "f.txt"));
     assert_eq!(cmd::snapshot(O, a).unwrap().recorded, 1);
     assert_eq!(cmd::snapshot(O, a).unwrap().recorded, 0);
 }
@@ -868,7 +872,7 @@ fn interrupted_transfer() {
         )
         .unwrap();
     }
-    assert!(has(&cmd::status(O, &b).unwrap(), "incomplete", "f.txt"));
+    assert!(has(&status(&b), "incomplete", "f.txt"));
     {
         let mut report = Summary::default();
         let mut vb = Vault::open(O, &b, true).unwrap();
@@ -1188,8 +1192,7 @@ fn nested_vault_is_ordinary_files() {
     put(&b, "inner/new.txt", "edited", 2);
     cmd::sync(O, &b, &a).unwrap();
     assert!(is(&a, "inner/new.txt", "edited"));
-    let status = cmd::status(O, &a.join("inner")).unwrap();
-    assert!(has(&status, "modified", "new.txt"));
+    assert!(has(&status(&a.join("inner")), "modified", "new.txt"));
     // Vaults that share files do not sync with each other.
     assert!(cmd::sync(O, &a, &a.join("inner")).is_err());
     assert!(cmd::pull(O, &a.join("inner"), &a).is_err());
@@ -1240,7 +1243,7 @@ fn push_counts_excluded() {
 }
 
 #[test]
-fn ls_states() {
+fn status_states() {
     let (tmp, a) = vault(&[
         ("d/g.txt", "g"),
         ("d/sub/1.txt", "1"),
@@ -1256,16 +1259,14 @@ fn ls_states() {
         files,
         ours,
         theirs,
-        deleted: false,
+        conflict: None,
     };
-    // A line for a deleted path that a vault still has the file of.
-    let gone = |path: &str, ours, theirs| Holding {
-        deleted: true,
-        ..line(path, 1, ours, theirs)
-    };
-    // One vault: a folder in one state is one line; the rest is excluded.
+    let list = |dir: &Path, paths: &[PathBuf], peer| cmd::status(O, dir, paths, peer, true);
+    // One vault: nothing needs anything. Of every file, a folder in one
+    // state is one line; the rest is excluded.
+    assert!(status(&c).is_empty());
     assert_eq!(
-        cmd::ls(O, &c, &[], None).unwrap(),
+        list(&c, &[], None).unwrap(),
         [
             line("d/", 3, "held", None),
             line("f.txt", 1, "excluded", None),
@@ -1274,7 +1275,7 @@ fn ls_states() {
     );
     // A path lists that folder's children, or that file.
     assert_eq!(
-        cmd::ls(O, &c, &paths(&["music", "d/g.txt"]), None).unwrap(),
+        list(&c, &paths(&["music", "d/g.txt"]), None).unwrap(),
         [
             line("music/m.mp3", 1, "excluded", None),
             line("music/n.mp3", 1, "excluded", None),
@@ -1282,11 +1283,11 @@ fn ls_states() {
         ]
     );
     // A path outside the vault is refused, and says how to compare.
-    let error = cmd::ls(O, &c, std::slice::from_ref(&a), None).unwrap_err();
+    let error = list(&c, std::slice::from_ref(&a), None).unwrap_err();
     assert!(format!("{error:#}").contains("--vs <vault>"), "{error:#}");
-    // Unrecorded changes count: an edit, a new file and a deletion there, a
-    // new file and a deletion here, and a file that is ignored here. A
-    // deleted path is listed while the other vault still has the file.
+    // Unrecorded changes are states: an edit, a new file and a deletion
+    // there, a new file and a deletion here, and a file that is ignored here.
+    // A vault that still has a file removed in the other is behind it.
     fs::remove_file(c.join("d/sub/1.txt")).unwrap();
     put(&a, "d/g.txt", "edit", 1);
     put(&a, "d/tmp/t.txt", "t", 1);
@@ -1299,40 +1300,46 @@ fn ls_states() {
         out
     };
     let before = listing();
-    assert_eq!(
-        cmd::ls(O, &c, &[], Some(&a)).unwrap(),
-        [
-            line("d/g.txt", 1, "behind", Some("held")),
-            line("d/new.txt", 1, "held", Some("missing")),
-            gone("d/sub/1.txt", "deleted", Some("behind")),
-            line("d/sub/2.txt", 1, "held", Some("held")),
-            line("d/tmp/t.txt", 1, "ignored", Some("held")),
-            line("music/", 2, "excluded", Some("held")),
-        ]
-    );
+    let every = [
+        line("d/g.txt", 1, "behind", Some("modified")),
+        line("d/new.txt", 1, "new", Some("missing")),
+        line("d/sub/1.txt", 1, "removed", Some("behind")),
+        line("d/sub/2.txt", 1, "held", Some("held")),
+        line("d/tmp/t.txt", 1, "ignored", Some("new")),
+        line("f.txt", 1, "excluded", Some("removed")),
+        line("music/", 2, "excluded", Some("held")),
+    ];
+    assert_eq!(list(&c, &[], Some(&a)).unwrap(), every);
+    // Without `all`, only the lines where a vault needs something.
+    let needy: Vec<Holding> = [0, 1, 2, 4, 5].map(|i| every[i].clone()).into();
+    assert_eq!(cmd::status(O, &c, &[], Some(&a), false).unwrap(), needy);
     // The other way round, and limited to a file or a folder here.
     assert_eq!(
-        cmd::ls(O, &a, &paths(&["d/g.txt"]), Some(&c)).unwrap(),
-        [line("d/g.txt", 1, "held", Some("behind"))]
+        list(&a, &paths(&["d/g.txt"]), Some(&c)).unwrap(),
+        [line("d/g.txt", 1, "modified", Some("behind"))]
     );
     assert_eq!(
-        cmd::ls(O, &a, &paths(&["music"]), Some(&c)).unwrap(),
+        list(&a, &paths(&["music"]), Some(&c)).unwrap(),
         [
             line("music/m.mp3", 1, "held", Some("excluded")),
             line("music/n.mp3", 1, "held", Some("excluded")),
         ]
     );
     assert_eq!(
-        cmd::ls(O, &a, &paths(&["d/sub/1.txt"]), Some(&c)).unwrap(),
-        [gone("d/sub/1.txt", "behind", Some("deleted"))]
+        list(&a, &paths(&["d/sub/1.txt"]), Some(&c)).unwrap(),
+        [line("d/sub/1.txt", 1, "behind", Some("removed"))]
     );
-    // With no vault that has the file, a deleted path is not listed.
+    // One vault: what a scan would record here.
     assert_eq!(
-        cmd::ls(O, &c, &paths(&["d/sub"]), None).unwrap(),
-        [line("d/sub/2.txt", 1, "held", None)]
+        status(&c),
+        [
+            line("d/new.txt", 1, "new", None),
+            line("d/sub/1.txt", 1, "removed", None),
+        ]
     );
-    assert!(before == listing(), "ls wrote something");
-    // One vault that has heard of a deletion and still has the file.
+    assert!(before == listing(), "status wrote something");
+    // One vault that has heard of a deletion and still has the file: a sync
+    // did not finish.
     fs::remove_file(a.join("d/sub/2.txt")).unwrap();
     cmd::snapshot(O, &a).unwrap();
     {
@@ -1341,8 +1348,18 @@ fn ls_states() {
         cmd::receive(O, &mut vc, &va, &mut Summary::default()).unwrap();
     }
     assert_eq!(
-        cmd::ls(O, &c, &paths(&["d/sub"]), None).unwrap(),
-        [gone("d/sub/2.txt", "behind", None)]
+        list(&c, &paths(&["d/sub"]), None).unwrap(),
+        [
+            line("d/sub/1.txt", 1, "removed", None),
+            line("d/sub/2.txt", 1, "incomplete", None),
+        ]
+    );
+    // A removal that is recorded, with no vault that has the file, is not
+    // listed.
+    cmd::snapshot(O, &c).unwrap();
+    assert_eq!(
+        list(&c, &paths(&["d/sub"]), None).unwrap(),
+        [line("d/sub/2.txt", 1, "incomplete", None)]
     );
 }
 

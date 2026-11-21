@@ -44,7 +44,7 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["init"]).0, 1, "already a vault");
     let (code, out) = run(&a, &["status"]);
     assert_eq!(code, 0);
-    assert_eq!(out, "? sub/f.txt\n");
+    assert_eq!(out, "+  sub/f.txt  new\n");
     assert!(
         names(&a.join(".syncit/log")).is_empty(),
         "status writes nothing"
@@ -145,7 +145,9 @@ fn cli_smoke() {
     assert!(!err.contains("excludes"), "only push says so: {err}");
     let (code, out, err) = both(&a, &["status", "--json"]);
     assert!(
-        code == 0 && out.starts_with(r#"{"type":"conflict","#),
+        code == 0
+            && out.starts_with(r#"{"type":"holding","#)
+            && out.contains(r#""ours":"conflict""#),
         "{out}{err}"
     );
 
@@ -169,15 +171,19 @@ fn cli_smoke() {
     let (code, _, err) = both(&a, &["sync", "../nowhere"]);
     assert!(code == 1 && err.starts_with("error: "), "{err}");
 
-    // ls: one vault, then two; c holds only d/ of a.
-    let (code, out) = run(&tmp.path().join("c"), &["ls"]);
+    // status --all: one vault, then two; c holds only d/ of a.
+    let (code, out) = run(&tmp.path().join("c"), &["status", "--all"]);
     assert!(
-        code == 0 && out.contains("✓ d/g.txt") && out.contains("- sub/"),
+        code == 0 && out.contains("✓  d/g.txt") && out.contains("-  sub/"),
         "{out}"
     );
-    let (code, out) = run(&a, &["ls", "d", "--vs", "../c"]);
-    assert_eq!((code, out.as_str()), (0, "✓ ✓ d/g.txt\n"));
-    let (code, out, err) = both(&a, &["--json", "ls", "--vs", "../c", "d", "sub"]);
+    let (code, out) = run(&a, &["status", "-a", "d", "--vs", "../c"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "✓ ✓  d/g.txt  held        held\n")
+    );
+    let args = ["--json", "status", "--all", "--vs", "../c", "d", "sub"];
+    let (code, out, err) = both(&a, &args);
     assert_eq!(code, 0, "{out}{err}");
     assert!(
         types(&out).iter().all(|t| t == "holding") && !out.is_empty(),
@@ -188,17 +194,17 @@ fn cli_smoke() {
         "{out}"
     );
 
-    let (code, help) = run(&a, &["ls", "--help"]);
+    let (code, help) = run(&a, &["status", "--help"]);
     assert!(
-        code == 0 && help.contains("✗ ○  deleted in ours, sync removes it in theirs"),
+        code == 0 && help.contains("!  incomplete  an earlier sync did not finish; sync again"),
         "{help}"
     );
 
     let (code, help) = run(&a, &["--help"]);
     assert_eq!(code, 0);
     for command in [
-        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "ls",
-        "blame", "log", "restore", "config",
+        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "blame",
+        "log", "restore", "config",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),
