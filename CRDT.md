@@ -106,7 +106,7 @@ Scanning is unaffected, because new entries take their parents from the dirstate
 
 ## Writing an entry
 
-The only operation is "this vault's file at `p` is now this content". A scan writes it when the disk differs from the dirstate.
+The only operation is "this vault's file at `p` is now this content". A scan writes it when the disk differs from the dirstate. Materialise writes it in one case: when it merges two conflicting versions of a text file (see "Merging").
 
 The dirstate row for a path is `(size, mtime, exec, hash, base)`. A path this vault has seen deleted has a deletion record in place of a row, holding only a base. **`base` is the set of entries this vault's file, or its absence, was derived from, and a new entry's parents are the base.** They are not the log's current heads. The two differ whenever the vault has heard of a newer version it has not yet put on disk: the blob was unavailable, the file was skipped because it was being edited, or a run was interrupted after merging. Using the heads there would supersede a version the person never saw.
 
@@ -143,6 +143,17 @@ When every head is in the base, the next edit names them all as parents and the 
 
 A conflict copy is written without a dirstate row, so the next scan records it as a new file.
 
+## Merging
+
+When materialise merges the two heads of a text file (`PRD.md`, "Merging text"), it writes the merged content at the path and then one entry for it:
+
+- `parents` are the two heads. This is the entry a person's edit would produce with both versions in view ("Closing a conflict" below). The heads are superseded, not removed: the log only grows.
+- The merge starts from the heads' lowest common ancestor: the one entry that is an ancestor of both and of no other common ancestor. With none (the file was created independently in two vaults) or several (two vaults merged the same heads differently), there is no merge.
+- The winner's content is "ours", `mtime` is the winner's plus 2000 ms, and `exec` is the loser's if the winner kept the ancestor's, else the winner's. Nothing depends on the vault or the clock, so vaults that merge the same heads write the same entry.
+- The file is written before the entry. An entry is never published for content that exists nowhere.
+
+No read rule changes. A vault that cannot merge sees an ordinary conflict until the merge entry arrives from one that could.
+
 ## Worked cases
 
 | Case | What the log holds | Result |
@@ -150,6 +161,7 @@ A conflict copy is written without a dirstate row, so the next scan records it a
 | Linear edits | `A ← B ← C` | head C |
 | Concurrent edits | `A ← B`, `A ← C` | heads B and C; conflict; newest wins, other becomes a copy |
 | Closing a conflict | `D` with parents `[B, C]` | head D |
+| Text merged by a run | `A ← B`, `A ← C`, then `M` with parents `[B, C]`, merged from A | head M; B and C stay in the log |
 | Edit against delete | `A ← B`, `A ← tombstone` | B wins; the delete is reported |
 | Same edit in two vaults | byte-identical entries | one entry |
 | Folder copied, both copies edited | `A ← B`, `A ← C` | ordinary conflict; no identity needed |

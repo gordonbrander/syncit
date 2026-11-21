@@ -26,7 +26,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - Using a vault feels like ordinary file management: dragging, dropping, editing in applications, saving, renaming, deleting. There is no staging, committing or branching, and no step between changing a file and syncing it. The experience to aim for is Dropbox, not git.
 - The folder a person works in contains ordinary files, readable and editable by any application.
 - Any vault can sync with any other vault, and any set of vaults converges to the same state regardless of the order of syncs.
-- No edit is silently lost: a conflicting, deleted, or overwritten version is either still on disk under a visible name or was explicitly discarded by policy.
+- No edit is silently lost: a conflicting, deleted, or overwritten version is either still on disk under a visible name, merged line for line into the file that replaced it, or was explicitly discarded by policy.
 - A vault can have part of the whole without that being mistaken for deletion.
 - Whether old versions are kept, and where, is a local choice per vault that does not affect how sync behaves.
 - The model is small enough to hold in one's head: files, a log, and blobs.
@@ -36,7 +36,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - Garbage collection of blobs and compaction of the log. When compaction is added it will be a command the user runs and coordinates across vaults, never automatic.
 - Chunking or delta transfer; a changed file is transferred whole.
 - Rename detection; a rename is a delete and a create.
-- Merging the contents of conflicting files.
+- Merging the contents of conflicting files, other than plain text whose edits do not overlap (see "Merging text").
 - A background daemon or file watcher; syncit runs when invoked.
 - Mapping a sub-folder of one vault onto a different path in another.
 - A hub-only mode with a privileged central vault.
@@ -152,6 +152,23 @@ conflict: notes.txt — kept the newer version, other saved as notes-3f9a1c2e.tx
 - On other vaults the loser's content is fetched like any other blob.
 - Once written, a copy is an ordinary file, recorded by the next scan. Vaults creating the same copy independently produce equal content, which is not a conflict.
 - A losing deletion produces no copy; it is reported in the output.
+
+### Merging text
+
+Two conflicting versions of a text file (`.md`, `.markdown`, `.txt`) are merged instead of copied when it can be done without guessing:
+
+- there are exactly two versions, both files, and they descend from one common earlier version;
+- a vault receiving in the run keeps history, so the two versions are retained before they are replaced;
+- the content of all three can be fetched from some blob source and is UTF-8 text of at most 1 MiB;
+- the two sets of edits do not overlap, so a line-by-line three-way merge is clean.
+
+The merged text replaces the file, and is recorded as one more entry whose parents are both versions. They stay in the log, and either can be restored wherever its content is kept. The run reports the file as updated, with the note `merged`, and there is no conflict to report.
+
+- It is opportunistic. Where any condition above fails, the conflict is handled with copies as before.
+- A merge never loses a version. It is made only in a run where a vault that receives keeps history: in a `sync` either vault, in a `push` or `pull` the one that receives. That vault retains both versions before either is replaced, so they can always be restored from it. Two vaults that keep no history never merge. A store will count as history does.
+- Overlapping edits are never written with conflict markers. That file would sync as if it were the resolution.
+- Every vault computes the same merge from the same three versions, and records the identical entry.
+- Other formats are left alone: a line merge of structured text can be clean and still broken.
 
 ### Restoring a version
 
@@ -302,7 +319,7 @@ The design keeps three things separate that sync tools usually fuse: what happen
 - **Symlinks into a blob directory.** The working folder would hold links, as in git-annex. Editors that save by replacing a file break the link, editors that write through it corrupt the blob, and other tools see links where they expect files. It ties the user's files to the storage layout.
 - **Sub-path given on every command.** Passing `--path` per run makes scope depend on what was typed last. A bare sync would pull the whole vault, and widening the scope after pruning locally would turn the pruned files into deletions.
 - **Mapping a sub-folder to a different root.** Checking out `a/zing/zap` as `b/` needs a path translation at every boundary. Keeping the structure identical removes it.
-- **Writing an entry to resolve each conflict.** Unnecessary, since every vault computes the same winner from the log. It would also close a conflict before anyone had looked at it.
+- **Writing an entry to resolve each conflict.** Unnecessary, since every vault computes the same winner from the log. It would also close a conflict before anyone had looked at it. The one exception is a clean merge of text ("Merging text"): there nothing is chosen over anything else, since every changed line of both versions is in the result, so there is nothing left for a person to decide.
 - **Version vectors instead of parent hashes.** A counter per vault per path tolerates an incomplete log and compacts easily. It requires every vault to have a unique identity, and fails silently when that breaks: a vault copied or restored from backup reuses a counter, and a later entry from its twin then replaces a new edit it never saw. Parent hashes name exactly what an entry replaced, so identity is not needed.
 - **BLAKE3 instead of SHA-256.** BLAKE3 is faster on a first scan of a large archive and is the hash used by `iroh-blobs`, so blob ids would work unchanged if iroh were later used as a transport. SHA-256 was chosen for now because its tooling is on every machine and it is hardware-accelerated on current CPUs. The format version keeps the switch possible.
 - **Requiring blobs to be stored before an entry is published.** This would force every vault to keep or upload history. Treating a missing blob as "not yet" or "not kept" lets retention be optional.

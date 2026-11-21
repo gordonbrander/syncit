@@ -168,6 +168,14 @@ Both folders end up with the same two files. To settle it:
 3. Run `syncit sync`. The conflict is closed in every folder.
 4. Delete the `notes-…` copy when you no longer need it. It is an ordinary file, and deleting it deletes it everywhere on the next sync.
 
+Text files (`.md`, `.markdown`, `.txt`) can settle themselves. If the two edits touch different lines, and one of the folders keeps history, syncit merges them into one file:
+
+```
+-> M notes.md (merged)
+```
+
+There is no copy and no conflict. Turn history on where you want this (`syncit config local-history on`): syncit merges only when it can keep both versions, so that nothing is lost. For `push` and `pull` that means history in the folder being written to; for `sync`, in either. Both edits stay in the file's history there, where `syncit log` and `syncit restore` can reach them. Edits to the same lines are never merged: you get the two files, as above.
+
 The `U … (conflict: …)` line is repeated on every sync until you edit the file. If you delete the copy before syncing in step 3, it may reappear once from the other folder; delete it again and it stays gone.
 
 **Edited in one place, deleted in another.** The edit wins and the file is kept everywhere:
