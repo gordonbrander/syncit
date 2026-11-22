@@ -75,13 +75,15 @@ pub fn init_remote(
     nickname: Option<String>,
     save_key: bool,
 ) -> Result<Option<String>> {
-    use crate::{crypt, keys, remote::Bucket};
+    use crate::remote::{Bucket, credentials};
+    use crate::{crypt, keys};
     let nickname = nickname.unwrap_or_else(|| "origin".to_string());
     ensure!(
         valid_nickname(&nickname),
         "a nickname is 1 to 64 bytes, with no spaces or control characters"
     );
-    let bucket = Bucket::new(url)?;
+    let local = find_root(cwd).ok();
+    let bucket = Bucket::new(url, credentials(opts, local.as_deref()))?;
     ensure!(bucket.is_empty()?, "{url} is not empty");
     let (key, generated) = match &opts.secret_key {
         Some(phrase) => (
@@ -107,7 +109,6 @@ pub fn init_remote(
         *words
     );
     print_stdout(&Message::Info { message }, opts.json);
-    let local = find_root(cwd).ok();
     keys::save(
         opts,
         url,
@@ -675,10 +676,9 @@ pub fn status(
     all: bool,
 ) -> Result<Vec<State>> {
     let opts = &Options {
-        json: opts.json,
         dry_run: true,
         no_remove: false,
-        secret_key: opts.secret_key.clone(),
+        ..opts.clone()
     };
     let mut v = Vault::open(opts, cwd, true)?;
     let mut scopes = prefixes(&v.root, cwd, paths)
@@ -933,7 +933,8 @@ fn find_remote(opts: &Options, root: &Path, url: &str) -> Result<(Config, Found)
     if let Some(phrase) = &opts.secret_key {
         keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
     }
-    let bucket = crate::remote::Bucket::new(url)?;
+    let settings = crate::remote::credentials(opts, Some(root));
+    let bucket = crate::remote::Bucket::new(url, settings)?;
     let check = bucket.check()?;
     let found = match keys::find(opts, url, &check, Some(root)) {
         Ok(found) => found,

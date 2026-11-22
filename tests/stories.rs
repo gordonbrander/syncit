@@ -14,6 +14,7 @@ const O: &Options = &Options {
     dry_run: false,
     no_remove: false,
     secret_key: None,
+    credentials: None,
 };
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
@@ -538,6 +539,7 @@ fn compact_command() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
+        credentials: None,
     };
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("c.bin", "c1"), ("d.txt", "d")]);
     configure(&a, |c| c.autocompact = false);
@@ -655,6 +657,7 @@ fn no_remove_keeps_deleted() {
         dry_run,
         no_remove: true,
         secret_key: None,
+        credentials: None,
     };
     let files = [
         ("f.txt", "f"),
@@ -1827,6 +1830,7 @@ fn dry_run_matches_real_run() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
+        credentials: None,
     };
     type Run = fn(&Options, &Path, &Path) -> anyhow::Result<Summary>;
     for run in [cmd::sync as Run, cmd::push, cmd::pull] {
@@ -1900,6 +1904,7 @@ fn cp_from_plain_folder() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
+        credentials: None,
     };
     let files = [
         ("same.txt", "s"),
@@ -1987,6 +1992,7 @@ mod remote {
             dry_run: false,
             no_remove: false,
             secret_key: phrase.map(String::from),
+            credentials: None,
         }
     }
 
@@ -2019,7 +2025,7 @@ mod remote {
             .unwrap();
         assert!(syncit::entry::is_hash(check), "{format}");
         let key = keys::parse_phrase(&words).unwrap();
-        let remote = Remote::open(Bucket::new(&url(&r)).unwrap(), key, None).unwrap();
+        let remote = Remote::open(Bucket::new(&url(&r), vec![]).unwrap(), key, None).unwrap();
         let config = remote.load_config().unwrap();
         assert_eq!(
             (config.include, config.keep_history, config.autocompact),
@@ -2055,7 +2061,7 @@ mod remote {
             format.replace("\"syncit\":1", "\"syncit\":2"),
         )
         .unwrap();
-        let err = Bucket::new(&url(&s)).unwrap().check().unwrap_err();
+        let err = Bucket::new(&url(&s), vec![]).unwrap().check().unwrap_err();
         assert!(err.to_string().contains("format version 2"), "{err}");
     }
 
@@ -2080,7 +2086,7 @@ mod remote {
     fn storage(target: &Path) -> Remote {
         let target = target.to_str().unwrap();
         let key = keys::parse_phrase(&phrase()).unwrap();
-        Remote::open(Bucket::new(target).unwrap(), key, None).unwrap()
+        Remote::open(Bucket::new(target, vec![]).unwrap(), key, None).unwrap()
     }
 
     fn configure_remote(target: &Path, change: impl FnOnce(&mut Config)) {
@@ -2105,11 +2111,12 @@ mod remote {
     fn story_c2_sync_through_remote() {
         let tmp = TempDir::new().unwrap();
         let (_r, origin) = remote(&tmp, "r");
-        story_c2(tmp, &origin);
+        story_c2(&o(), tmp, &origin);
     }
 
     /// Run against `SYNCIT_TEST_REMOTE_URL`, in a new prefix under it, with
-    /// credentials from the environment. Skipped when it is not set.
+    /// credentials from the user's `credentials.env` and the environment.
+    /// Skipped when it is not set.
     #[test]
     fn cloud_remote() {
         let Ok(base) = std::env::var("SYNCIT_TEST_REMOTE_URL") else {
@@ -2122,13 +2129,16 @@ mod remote {
             .unwrap()
             .as_nanos();
         let url = format!("{}/syncit-test-{unique}", base.trim_end_matches('/'));
-        cmd::init_remote(&o(), tmp.path(), &url, None, false).unwrap();
-        story_c2(tmp, Path::new(&url));
+        let o = Options {
+            credentials: syncit::output::user_credentials(),
+            ..o()
+        };
+        cmd::init_remote(&o, tmp.path(), &url, None, false).unwrap();
+        story_c2(&o, tmp, Path::new(&url));
     }
 
     /// Story C.2 through the remote vault `origin`, made in or for `tmp`.
-    fn story_c2(tmp: TempDir, origin: &Path) {
-        let o = &o();
+    fn story_c2(o: &Options, tmp: TempDir, origin: &Path) {
         let a = place(&tmp, "a");
         for (path, content) in [("notes.txt", "from a"), ("d/shared.txt", "base")] {
             put(&a, path, content, 0);

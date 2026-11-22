@@ -523,7 +523,16 @@ syncit compact --vault origin
 
 **Where the key is kept.** `remote add` and `clone` ask for the words once, then keep them in the system keychain (macOS Keychain, or the Secret Service on Linux). After you reinstall or rebuild syncit, macOS asks once whether it may read the keychain item again. Where there is no keychain, such as a server over SSH, you can put the key in the vault's `.syncit/secrets.env` (`--save-key`, or answer yes when asked); it is then stored there unencrypted, readable by your user only. Or set `SYNCIT_SECRET_KEY` to the 24 words for each command, which is what scripts and cron jobs usually do.
 
-**Credentials** for the storage come from the usual environment variables, never from a file syncit writes: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (for R2, MinIO and other S3-compatible services) and `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. `~/.aws/credentials` is not read.
+**Credentials** for the storage are the usual settings: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (for R2, MinIO and other S3-compatible services) and `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. Put them in `~/.config/syncit/credentials.env` (or `$XDG_CONFIG_HOME/syncit/credentials.env`) and every command finds them. For Cloudflare R2:
+
+```sh
+AWS_ACCESS_KEY_ID=…
+AWS_SECRET_ACCESS_KEY=…
+AWS_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+AWS_DEFAULT_REGION=auto
+```
+
+A vault's own `.syncit/credentials.env` overrides that file, for a bucket only that vault uses, and environment variables override both. These files are plain text, so make them readable by your user only (`chmod 600`). Syncit never writes them. `~/.aws/credentials` is not read.
 
 **Interrupted uploads.** Files of 16 MB or more are uploaded in parts. If an upload is interrupted, the parts already sent stay in the bucket, unseen, until the bucket removes them. Give the bucket a lifecycle rule that aborts incomplete multipart uploads after a few days.
 

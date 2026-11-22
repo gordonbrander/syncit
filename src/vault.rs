@@ -187,10 +187,10 @@ impl Vault {
     /// `.syncit/tmp`. A remote is bare and is not locked.
     #[cfg(feature = "remote")]
     pub fn open_url(opts: &Options, url: &str, local: Option<&Vault>) -> Result<Vault> {
-        use crate::remote::{Bucket, Remote};
-        let bucket = Bucket::new(url)?;
-        let check = bucket.check()?;
+        use crate::remote::{Bucket, Remote, credentials};
         let root = local.map(|v| v.root.as_path());
+        let bucket = Bucket::new(url, credentials(opts, root))?;
+        let check = bucket.check()?;
         let (key, _) = crate::keys::find(opts, url, &check, root)?;
         let storage = Remote::open(bucket, key, root.map(Dir::new))?;
         let config = storage.load_config()?;

@@ -280,6 +280,7 @@ mod tests {
             dry_run: false,
             no_remove: false,
             secret_key,
+            credentials: None,
         }
     }
 

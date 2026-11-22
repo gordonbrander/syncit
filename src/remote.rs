@@ -6,6 +6,7 @@ use crate::blobs::hash_file;
 use crate::config::Config;
 use crate::crypt::{self, Key};
 use crate::entry::{is_hash, sha256};
+use crate::output::Options;
 use crate::storage::{Dir, Storage};
 use crate::vault::unique;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -42,10 +43,36 @@ fn not_found(e: &object_store::Error) -> bool {
     matches!(e, object_store::Error::NotFound { .. })
 }
 
+/// The `KEY=value` lines of an env file, in order; none if it is missing.
+/// `#` comments, blank lines, `export ` and one pair of quotes are dropped.
+pub fn env_file(path: &Path) -> Vec<(String, String)> {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.strip_prefix("export ").unwrap_or(l).split_once('='))
+        .map(|(k, v)| {
+            let v = v.trim();
+            let unquoted = ['"', '\'']
+                .iter()
+                .find_map(|q| v.strip_prefix(*q)?.strip_suffix(*q));
+            (k.trim().to_string(), unquoted.unwrap_or(v).to_string())
+        })
+        .collect()
+}
+
+/// Settings for a bucket from the user's `credentials.env`, then from that
+/// of the vault at `local`; a later one wins.
+pub fn credentials(opts: &Options, local: Option<&Path>) -> Vec<(String, String)> {
+    let user = opts.credentials.as_deref().map(env_file);
+    let vault = local.map(|root| env_file(&root.join(".syncit/credentials.env")));
+    user.into_iter().chain(vault).flatten().collect()
+}
+
 impl Bucket {
-    /// Reach the prefix at `url`, with credentials from the environment.
-    /// Nothing is read yet.
-    pub fn new(url: &str) -> Result<Bucket> {
+    /// Reach the prefix at `url`, with `settings` (from `credentials`), then
+    /// the environment, which wins. Nothing is read yet.
+    pub fn new(url: &str, settings: Vec<(String, String)>) -> Result<Bucket> {
         let parsed = url::Url::parse(url).with_context(|| format!("not a URL: {url}"))?;
         // A file:// backend creates directories as it writes; syncit never
         // creates one.
@@ -53,7 +80,8 @@ impl Bucket {
             let dir = parsed.to_file_path().ok().context("not a local path")?;
             ensure!(dir.is_dir(), "cannot reach {url}: no such directory");
         }
-        let (store, root) = object_store::parse_url_opts(&parsed, std::env::vars())
+        let settings = settings.into_iter().chain(std::env::vars());
+        let (store, root) = object_store::parse_url_opts(&parsed, settings)
             .with_context(|| format!("cannot reach {url}"))?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -456,5 +484,54 @@ impl Storage for Remote {
             }
         }
         Ok((found.len(), found.iter().map(|(_, size)| size).sum()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn env_file_format() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("credentials.env");
+        let text = "# R2\n\nexport AWS_ACCESS_KEY_ID=\"abc\"\nAWS_SECRET_ACCESS_KEY = 'x=y'\nAWS_DEFAULT_REGION=auto\nnot a setting\n  # indented comment\n";
+        fs::write(&file, text).unwrap();
+        assert_eq!(
+            env_file(&file),
+            pairs(&[
+                ("AWS_ACCESS_KEY_ID", "abc"),
+                ("AWS_SECRET_ACCESS_KEY", "x=y"),
+                ("AWS_DEFAULT_REGION", "auto"),
+            ])
+        );
+        assert!(env_file(&tmp.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn credentials_order() {
+        let tmp = TempDir::new().unwrap();
+        let user = tmp.path().join("user.env");
+        fs::write(&user, "A=user\nB=user\n").unwrap();
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(vault.join(".syncit")).unwrap();
+        fs::write(vault.join(".syncit/credentials.env"), "B=vault\n").unwrap();
+        let opts = Options {
+            json: false,
+            dry_run: false,
+            no_remove: false,
+            secret_key: None,
+            credentials: Some(user),
+        };
+        let both = pairs(&[("A", "user"), ("B", "user"), ("B", "vault")]);
+        assert_eq!(credentials(&opts, Some(&vault)), both);
+        assert_eq!(credentials(&opts, None), both[..2]);
     }
 }
