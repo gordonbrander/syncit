@@ -13,6 +13,7 @@ const O: &Options = &Options {
     json: false,
     dry_run: false,
     no_remove: false,
+    secret_key: None,
 };
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
@@ -536,6 +537,7 @@ fn compact_command() {
         json: false,
         dry_run: true,
         no_remove: false,
+        secret_key: None,
     };
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("c.bin", "c1"), ("d.txt", "d")]);
     configure(&a, |c| c.autocompact = false);
@@ -652,6 +654,7 @@ fn no_remove_keeps_deleted() {
         json: false,
         dry_run,
         no_remove: true,
+        secret_key: None,
     };
     let files = [
         ("f.txt", "f"),
@@ -1823,6 +1826,7 @@ fn dry_run_matches_real_run() {
         json: false,
         dry_run: true,
         no_remove: false,
+        secret_key: None,
     };
     type Run = fn(&Options, &Path, &Path) -> anyhow::Result<Summary>;
     for run in [cmd::sync as Run, cmd::push, cmd::pull] {
@@ -1895,6 +1899,7 @@ fn cp_from_plain_folder() {
         json: false,
         dry_run: true,
         no_remove: false,
+        secret_key: None,
     };
     let files = [
         ("same.txt", "s"),

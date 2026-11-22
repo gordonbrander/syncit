@@ -13,6 +13,9 @@ pub struct Options {
     pub dry_run: bool,
     /// Keep files the log says are deleted, and record them as re-created.
     pub no_remove: bool,
+    /// A remote vault's secret key, as its 24 words: `SYNCIT_SECRET_KEY`.
+    /// Read by `main`; the library never reads the environment for it.
+    pub secret_key: Option<String>,
 }
 
 /// Something that happened to one file.

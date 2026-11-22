@@ -204,6 +204,7 @@ fn main() {
         json: cli.json,
         dry_run,
         no_remove,
+        secret_key: std::env::var("SYNCIT_SECRET_KEY").ok(),
     };
     // Commands that run a sync return a summary, printed last.
     let result = match cli.command {

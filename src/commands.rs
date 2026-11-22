@@ -487,6 +487,7 @@ pub fn status(
         json: opts.json,
         dry_run: true,
         no_remove: false,
+        secret_key: opts.secret_key.clone(),
     };
     let mut v = Vault::open(opts, cwd, true)?;
     let mut scopes = prefixes(&v.root, cwd, paths)
