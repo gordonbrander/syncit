@@ -1,6 +1,6 @@
 # Remote vaults: encrypted, hash-addressed stores
 
-Status: built. Milestone 7 ran against S3Mock, not a real cloud bucket (`SPEC.md` section 17). This is the specification of stores. [`SPEC.md`](SPEC.md) summarises it in section 8 ("Stores") and section 10 ("A run with a remote vault") and lists it as milestone 9; where they disagree, this document wins. `SPEC.md` and [`CRDT.md`](CRDT.md) govern everything else.
+Status: built. Milestone 7 ran against S3Mock and Cloudflare R2; GCS and Azure are untested (`SPEC.md` section 17). This is the specification of stores. [`SPEC.md`](SPEC.md) summarises it in section 8 ("Stores") and section 10 ("A run with a remote vault") and lists it as milestone 9; where they disagree, this document wins. `SPEC.md` and [`CRDT.md`](CRDT.md) govern everything else.
 
 Serves stories C.2 and D.2 and requirements `R16`, `R24` and `R28` of [`PRD.md`](PRD.md): a content-addressed store a vault can send to, that vaults can sync through, encrypted where it is kept.
 
