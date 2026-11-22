@@ -258,6 +258,16 @@ fn seal_config(key: &Key, config: &Config) -> Result<Vec<u8>> {
     seal(&crypt::config_key(key), text.as_bytes())
 }
 
+/// The vault's config, read with its key.
+pub fn read_config(bucket: &Bucket, key: &Key) -> Result<Config> {
+    let url = &bucket.url;
+    let sealed = bucket.get("config")?;
+    let sealed = sealed.with_context(|| format!("{url} has no config"))?;
+    let plain = open(&crypt::config_key(key), &sealed)
+        .with_context(|| format!("{url}: cannot decrypt its config"))?;
+    serde_json::from_slice(&plain).with_context(|| format!("corrupt config {url}"))
+}
+
 /// A segment of the remote, by plaintext name.
 enum Segment {
     /// The local vault has it.
@@ -342,12 +352,7 @@ impl Remote {
 
 impl Storage for Remote {
     fn load_config(&self) -> Result<Config> {
-        let url = &self.bucket.url;
-        let sealed = self.bucket.get("config")?;
-        let sealed = sealed.with_context(|| format!("{url} has no config"))?;
-        let plain = open(&crypt::config_key(&self.key), &sealed)
-            .with_context(|| format!("{url}: cannot decrypt its config"))?;
-        serde_json::from_slice(&plain).with_context(|| format!("corrupt config {url}"))
+        read_config(&self.bucket, &self.key)
     }
 
     fn save_config(&self, config: &Config) -> Result<()> {

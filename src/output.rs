@@ -138,6 +138,11 @@ pub enum Message {
         name: &'static str,
         value: String,
     },
+    /// A vault this one remembers, in `remotes`.
+    Remote {
+        name: String,
+        location: String,
+    },
     /// The vaults that recorded the current version of a file.
     Blame {
         path: String,
@@ -221,6 +226,7 @@ impl Display for Message {
             }
             Message::State(h) => write!(f, "{}", h.row(0)),
             Message::Setting { name, value } => write!(f, "{name}: {value}"),
+            Message::Remote { name, location } => write!(f, "{name} {location}"),
             Message::Blame { path, nicknames } => write!(f, "{} {path}", nicknames.join(",")),
             Message::Info { message } => write!(f, "{message}"),
             Message::Warning { message } => write!(f, "warning: {message}"),

@@ -28,10 +28,13 @@ enum Mode {
 }
 
 /// Make `dir` a vault that includes `include`, nicknamed after the folder.
-fn create(dir: &Path, include: String) -> Result<Config> {
+fn create(dir: &Path, include: Vec<String>) -> Result<Config> {
     let folder = resolve_path(dir)?;
     let folder = folder.file_name().unwrap_or_default().to_string_lossy();
-    let config = Config::new(include, default_nickname(&folder));
+    let config = Config {
+        include,
+        ..Config::new(String::new(), default_nickname(&folder))
+    };
     for sub in ["log", "blobs", "tmp"] {
         fs::create_dir_all(dir.join(".syncit").join(sub))?;
     }
@@ -46,7 +49,7 @@ pub fn init(opts: &Options, dir: &Path) -> Result<()> {
         "{} is already a vault",
         dir.display()
     );
-    let config = create(dir, String::new())?;
+    let config = create(dir, vec![String::new()])?;
     let message = format!(
         "Vault initialized: {}\nNickname: {}",
         resolve_path(dir)?.display(),
@@ -127,18 +130,60 @@ pub fn init_remote(
     Err(no_remote())
 }
 
-pub fn clone(opts: &Options, src: &Path, dir: &Path) -> Result<Summary> {
-    let src = resolve_path(src)?;
-    let root = find_root(&src)?;
-    let sub = relative(&root, &src)?;
-    ensure!(
-        !resolve_path(dir)?.starts_with(&root),
-        "cannot clone a vault into itself"
-    );
+/// Paths from a vault's root, as given on the command line.
+fn vault_paths(paths: &[String]) -> Result<()> {
+    for path in paths {
+        ensure!(valid_path(path), "{path} is not a path a vault can have");
+    }
+    Ok(())
+}
+
+/// Make `dir` a vault with the files of the vault `src`: a URL, or a path in
+/// a vault. Without `only`, it includes the sub-folder the path names, or
+/// everything. With it, `src` is a URL or a vault's root, and it includes
+/// exactly those paths. The source is remembered in `remotes`, then pulled.
+pub fn clone(
+    opts: &Options,
+    src: &Path,
+    dir: &Path,
+    only: &[String],
+    save_key: bool,
+) -> Result<Summary> {
+    vault_paths(only)?;
+    let (source, include) = match url(src) {
+        Some(_) if only.is_empty() => (src.to_path_buf(), vec![String::new()]),
+        Some(_) => (src.to_path_buf(), only.to_vec()),
+        None => {
+            let src = resolve_path(src)?;
+            let root = find_root(&src)?;
+            let sub = relative(&root, &src)?;
+            ensure!(
+                !resolve_path(dir)?.starts_with(&root),
+                "cannot clone a vault into itself"
+            );
+            ensure!(
+                only.is_empty() || sub.is_empty(),
+                "{} is inside the vault {}: with --only, give the vault's root",
+                src.display(),
+                root.display()
+            );
+            match only.is_empty() {
+                true => (root, vec![sub]),
+                false => (root, only.to_vec()),
+            }
+        }
+    };
     let empty = !dir.exists() || dir.read_dir()?.next().is_none();
     ensure!(empty, "{} exists and is not empty", dir.display());
-    create(dir, sub)?;
-    run(opts, dir, &root, Mode::Pull)
+    create(dir, include)?;
+    let location = source.to_str().context("the source is not UTF-8")?;
+    let added =
+        Vault::open(opts, dir, true).and_then(|mut v| add(opts, &mut v, location, None, save_key));
+    if let Err(e) = added {
+        let _ = fs::remove_dir_all(dir.join(".syncit"));
+        return Err(e);
+    }
+    run(opts, dir, &source, Mode::Pull)
 }
 
 pub fn sync(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
@@ -165,6 +210,13 @@ fn url(target: &Path) -> Option<&str> {
     target.to_str().filter(|t| t.contains("://"))
 }
 
+/// A target after the local vault's `remotes`: a nickname there is replaced
+/// by its location.
+fn resolve(local: Option<&Vault>, target: &Path) -> PathBuf {
+    let location = target.to_str().and_then(|t| local?.config.remotes.get(t));
+    location.map_or_else(|| target.to_path_buf(), PathBuf::from)
+}
+
 /// Open the vault a target names, for a command run in `local`.
 fn open_target(opts: &Options, local: Option<&Vault>, target: &Path) -> Result<Vault> {
     match url(target) {
@@ -181,7 +233,13 @@ fn open_target(opts: &Options, local: Option<&Vault>, target: &Path) -> Result<V
 
 /// Open another vault for a run with `v`.
 fn other(opts: &Options, v: &mut Vault, target: &Path) -> Result<Vault> {
+    let target = &resolve(Some(v), target);
     if url(target).is_none() {
+        ensure!(
+            target.exists(),
+            "no vault at {}: not a folder, a URL or the name of a remote",
+            target.display()
+        );
         ensure!(
             !nested(&find_root(target)?, &v.root),
             "cannot sync a vault with itself or with a vault inside it"
@@ -516,8 +574,8 @@ fn versions(n: usize) -> String {
 /// Drop from `.syncit/blobs/` the versions older than the vault's
 /// `keep_history` keeps. The log stays whole: only content goes. Returns how
 /// many were dropped, or with `--dry-run` would be, and their bytes.
-pub fn compact(opts: &Options, cwd: &Path) -> Result<(usize, u64)> {
-    let v = Vault::open(opts, cwd, true)?;
+pub fn compact(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<(usize, u64)> {
+    let v = open_vault(opts, cwd, vault)?;
     announce(opts);
     let (n, bytes) = blobs::compact(opts, &v)?;
     let message = match n {
@@ -730,14 +788,174 @@ pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
             "{} is in this vault: give a path in the vault to get it from",
             first.display()
         );
-        for prefix in prefixes(&source, cwd, paths)? {
-            v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
-            v.config.include.retain(|x| !prefix_matches(&prefix, x));
-            v.config.include.push(prefix);
-        }
-        v.storage.save_config(&v.config)?;
+        include(&mut v, prefixes(&source, cwd, paths)?)?;
     }
     run(opts, cwd, &source, Mode::Pull)
+}
+
+/// Include `prefixes` in the vault, and save its config.
+fn include(v: &mut Vault, prefixes: Vec<String>) -> Result<()> {
+    for prefix in prefixes {
+        v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
+        v.config.include.retain(|x| !prefix_matches(&prefix, x));
+        v.config.include.push(prefix);
+    }
+    v.storage.save_config(&v.config)
+}
+
+/// `get --from`: add paths of the vault `from`, a target, each given from
+/// that vault's root. This is the form that reaches a remote vault.
+pub fn get_from(opts: &Options, cwd: &Path, paths: &[String], from: &Path) -> Result<Summary> {
+    ensure!(!paths.is_empty(), "no path given");
+    vault_paths(paths)?;
+    {
+        let mut v = Vault::open(opts, cwd, true)?;
+        let target = resolve(Some(&v), from);
+        if url(&target).is_none() {
+            ensure!(
+                !nested(&find_root(&target)?, &v.root),
+                "cannot get files from this vault or a vault inside it"
+            );
+        }
+        include(&mut v, paths.to_vec())?;
+    }
+    run(opts, cwd, from, Mode::Pull)
+}
+
+/// The vault a command acts on: the one `vault` names if given (`--vault`),
+/// otherwise the one here. A remote needs no local vault.
+fn open_vault(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<Vault> {
+    let Some(target) = vault else {
+        return Vault::open(opts, cwd, true);
+    };
+    let local = Vault::open(opts, cwd, true).ok();
+    let target = resolve(local.as_ref(), target);
+    match url(&target) {
+        Some(_) => open_target(opts, local.as_ref(), &target),
+        None => {
+            std::mem::drop(local); // it may be the target, which is locked
+            Vault::open(opts, &target, true)
+        }
+    }
+}
+
+/// List the remotes this vault remembers. Returns them, as printed.
+pub fn remotes(opts: &Options, cwd: &Path) -> Result<Vec<(String, String)>> {
+    let v = Vault::open(opts, cwd, true)?;
+    for (name, location) in &v.config.remotes {
+        let message = Message::Remote {
+            name: name.clone(),
+            location: location.clone(),
+        };
+        print_stdout(&message, opts.json);
+    }
+    Ok(v.config.remotes.into_iter().collect())
+}
+
+/// Remember the vault at `location`, a URL or a path, under `name` or its
+/// own nickname. Returns the name.
+pub fn remote_add(
+    opts: &Options,
+    cwd: &Path,
+    location: &str,
+    name: Option<String>,
+    save_key: bool,
+) -> Result<String> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    add(opts, &mut v, location, name, save_key)
+}
+
+fn add(
+    opts: &Options,
+    v: &mut Vault,
+    location: &str,
+    name: Option<String>,
+    save_key: bool,
+) -> Result<String> {
+    let (location, config, found) = if location.contains("://") {
+        let (config, found) = find_remote(opts, &v.root, location)?;
+        (location.to_string(), config, Some(found))
+    } else {
+        let root = resolve_path(Path::new(location))?;
+        ensure!(
+            root.join(".syncit").is_dir(),
+            "{} is not a vault",
+            root.display()
+        );
+        ensure!(!nested(&root, &v.root), "a vault cannot be its own remote");
+        (root.display().to_string(), Config::load(&root)?, None)
+    };
+    let name = name.unwrap_or(config.nickname);
+    ensure!(
+        valid_nickname(&name) && !name.contains('/'),
+        "{name} cannot name a remote: pass --name <name>"
+    );
+    ensure!(
+        !v.config.remotes.contains_key(&name),
+        "{name} is already a remote here: pass --name <name>"
+    );
+    if let Some(found) = found {
+        save_found(opts, &location, found, &v.root, save_key)?;
+    }
+    v.config.remotes.insert(name.clone(), location.clone());
+    v.storage.save_config(&v.config)?;
+    let message = format!("remote {name}: {location}");
+    print_stdout(&Message::Info { message }, opts.json);
+    Ok(name)
+}
+
+/// Forget a remote. Its `secrets.env` entry goes too; its keychain item
+/// stays, since other vaults on this machine may use it.
+pub fn remote_remove(opts: &Options, cwd: &Path, name: &str) -> Result<()> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    let location = v.config.remotes.remove(name);
+    let location = location.with_context(|| format!("no remote named {name}"))?;
+    #[cfg(feature = "remote")]
+    crate::keys::remove_secret(&v.root, &location)?;
+    v.storage.save_config(&v.config)?;
+    let message = format!("removed remote {name}: {location}");
+    print_stdout(&Message::Info { message }, opts.json);
+    Ok(())
+}
+
+/// A remote's key, found or asked for, and where it came from.
+#[cfg(feature = "remote")]
+type Found = (crate::crypt::Key, crate::keys::Source);
+#[cfg(not(feature = "remote"))]
+type Found = ();
+
+/// The config of the remote at `url`, and its key: found (store.md,
+/// section 8), or else asked for on a terminal.
+#[cfg(feature = "remote")]
+fn find_remote(opts: &Options, root: &Path, url: &str) -> Result<(Config, Found)> {
+    use crate::keys::{self, Source};
+    use std::io::IsTerminal;
+    if let Some(phrase) = &opts.secret_key {
+        keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
+    }
+    let bucket = crate::remote::Bucket::new(url)?;
+    let check = bucket.check()?;
+    let found = match keys::find(opts, url, &check, Some(root)) {
+        Ok(found) => found,
+        Err(e) if !std::io::stdin().is_terminal() => return Err(e),
+        Err(_) => (keys::prompt(url, &check)?, Source::New),
+    };
+    Ok((crate::remote::read_config(&bucket, &found.0)?, found))
+}
+
+#[cfg(not(feature = "remote"))]
+fn find_remote(_opts: &Options, _root: &Path, _url: &str) -> Result<(Config, Found)> {
+    Err(no_remote())
+}
+
+#[cfg(feature = "remote")]
+fn save_found(opts: &Options, url: &str, found: Found, root: &Path, save: bool) -> Result<()> {
+    crate::keys::save(opts, url, &found.0, found.1, Some(root), save)
+}
+
+#[cfg(not(feature = "remote"))]
+fn save_found(_: &Options, _: &str, _: Found, _: &Path, _: bool) -> Result<()> {
+    Ok(())
 }
 
 /// Move files to another vault: push to it, confirm each file arrived, then
@@ -1168,8 +1386,13 @@ pub enum Setting {
 
 /// Print this vault's settings, after changing one if asked. Returns the
 /// config as it now is.
-pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Config> {
-    let mut v = Vault::open(opts, cwd, true)?;
+pub fn config(
+    opts: &Options,
+    cwd: &Path,
+    vault: Option<&Path>,
+    change: Option<Setting>,
+) -> Result<Config> {
+    let mut v = open_vault(opts, cwd, vault)?;
     let changed = change.is_some();
     match change {
         Some(Setting::KeepHistory(depth)) => v.config.keep_history = depth,
