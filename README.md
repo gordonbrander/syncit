@@ -125,7 +125,7 @@ To see what it would change in the vault first, add `--dry-run`:
 syncit cp --dry-run . /Volumes/Backup/Archive
 ```
 
-`cp` only copies. The files are then ordinary changes in that vault, as if you had dragged them in, and its next `sync` or `snapshot` records them. Before replacing anything, `cp` records the vault as it is, so with [history](#version-history) on, a replaced version can be restored.
+`cp` only copies. The files are then ordinary changes in that vault, as if you had dragged them in, and its next `sync` or `snapshot` records them. Before replacing anything, `cp` records the vault as it is, so a replaced version can be restored from [history](#version-history).
 
 ## Working with part of a larger backup
 
@@ -215,13 +215,13 @@ Both folders end up with the same two files. To settle it:
 3. Run `syncit sync`. The conflict is closed in every folder.
 4. Delete the `notes-…` copy when you no longer need it. It is an ordinary file, and deleting it deletes it everywhere on the next sync.
 
-Text files (`.md`, `.markdown`, `.txt`) can settle themselves. If the two edits touch different lines, and one of the folders keeps history, syncit merges them into one file:
+Text files (`.md`, `.markdown`, `.txt`) can settle themselves. If the two edits touch different lines, and one of the folders keeps history (they do unless you turned it off), syncit merges them into one file:
 
 ```
 -> M notes.md (merged)
 ```
 
-There is no copy and no conflict. Turn history on where you want this (`syncit config local-history on`): syncit merges only when it can keep both versions, so that nothing is lost. For `push` and `pull` that means history in the folder being written to; for `sync`, in either. Both edits stay in the file's history there, where `syncit log` and `syncit restore` can reach them. Edits to the same lines are never merged: you get the two files, as above.
+There is no copy and no conflict. syncit merges only when it can keep both versions, so that nothing is lost. For `push` and `pull` that means history in the folder being written to; for `sync`, in either. Both edits stay in the file's history there, where `syncit log` and `syncit restore` can reach them. Edits to the same lines are never merged: you get the two files, as above.
 
 The `U … (conflict: …)` line is repeated on every sync until you edit the file. If you delete the copy before syncing in step 3, it may reappear once from the other folder; delete it again and it stays gone.
 
@@ -235,28 +235,51 @@ Delete it again if that is what you want, or edit it to keep it; either one clea
 
 ## Version history
 
-By default syncit keeps only the latest version of each file and uses no extra disk space. One setting changes that. Each vault has its own; it is never synced. See it with:
+Each vault keeps the content of old versions in `.syncit/blobs/`, as far back as its `keep-history` setting says. The setting is the vault's own and is never synced. See it with:
 
 ```sh
 syncit config
 ```
 
 ```
-local-history: off
+keep-history: 1
+autocompact: on
 nickname: Documents
 ```
 
 (`nickname` is explained under "Who changed what".)
 
-### Turning history on and off
+### How much history to keep
+
+A new vault keeps one version back: for every file, the current version and the one before it. That is enough to undo your last change, to bring back a file you just deleted, and to let syncit [merge text files](#in-case-of-conflict-keep-both).
 
 ```sh
-syncit config local-history on
+syncit config keep-history 10     # ten versions back
+syncit config keep-history all    # every version: a good choice for a large backup drive
+syncit config keep-history 0      # none
 ```
 
-Every version of every file this vault sees from now on, whether saved here or received from another folder, is stored in `.syncit/blobs/`. A good choice for the copy on a large backup drive.
+History costs disk. With any setting above 0 the vault stores a second copy of every current file, since the version you are about to replace has to be saved before you replace it, plus the older versions you asked for. `keep-history 0` gives that space back: the vault then stores nothing but your files and a small log.
 
-History is simply what has been collected: turn it on late and it starts from there. Turn it off with `syncit config local-history off`. syncit stops storing new versions; the ones already stored stay where they are, and you can delete the contents of `.syncit/blobs/` yourself to get the space back.
+History is what has been collected: raise the number late and it grows from there.
+
+### Dropping old versions
+
+syncit drops the versions older than `keep-history` reaches at the end of every `sync`, `push`, `pull` and `snapshot`. Only content is dropped. The record of every version stays: `syncit log` still lists it, and other vaults sync with this one exactly as before.
+
+If you would rather nothing were deleted until you say so:
+
+```sh
+syncit config autocompact off
+syncit compact --dry-run    # what would go
+syncit compact
+```
+
+```
+dropped 12 versions (3.4 MB)
+```
+
+Lowering `keep-history` deletes nothing at that moment; `syncit config` tells you how many stored versions the new setting no longer covers and what will drop them. The current version of a file is never dropped, whatever the setting.
 
 ### Snapshots
 
@@ -283,7 +306,7 @@ syncit log notes.txt
 5c02e8aa 2026-11-18 08:05Z laptop notes.txt (no content)
 ```
 
-Each line starts with the first characters of the version's hash; times are UTC. `(no content)` marks a version this vault did not keep, which is every old version unless history was on when it passed through. `(executable)` marks a version in which the file could be run.
+Each line starts with the first characters of the version's hash; times are UTC. `(no content)` marks a version this vault did not keep, because it is older than the vault's `keep-history` reaches, or never passed through here. `(executable)` marks a version in which the file could be run.
 
 `restore` takes a file and enough of a hash to pick one version:
 
@@ -303,7 +326,7 @@ To replace the file in one step, or to bring back a file you deleted:
 syncit restore --in-place notes.txt 3f9a
 ```
 
-syncit records the file as it is first, so with history on, the version you replace can itself be restored later. With history off it cannot, unless another vault still has it.
+syncit records the file as it is first, so the version you replace can itself be restored later, unless `keep-history` is 0; then only another vault may still have it.
 
 Each stored version is also a plain file in `.syncit/blobs/`, named by the SHA-256 of its content.
 
@@ -500,7 +523,9 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `st
 | `syncit log [path]...` | list the recorded versions of each file, newest first |
 | `syncit restore <path> <hash>` | bring back an old version as a copy beside the file; `--in-place` replaces the file |
 | `syncit config` | show this vault's settings |
-| `syncit config local-history on\|off` | keep old versions inside the vault, or stop |
+| `syncit config keep-history <n>\|all` | how many old versions of each file to keep inside the vault |
+| `syncit config autocompact on\|off` | drop older versions after every sync, or only on `syncit compact` |
+| `syncit compact [--dry-run]` | drop the old versions `keep-history` no longer covers |
 | `syncit config nickname <name>` | name this vault in the changes it records |
 
 A `<vault>` is the path of any folder in the other vault.

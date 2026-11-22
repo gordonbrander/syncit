@@ -59,6 +59,9 @@ fn merged(
     }
     let (w, l) = (&v.log.entries[winner], if a == winner { b } else { a });
     let l = &v.log.entries[l];
+    if w.hash == l.hash {
+        return None; // the same content twice is not a conflict
+    }
     let base = &v.log.entries[&v.log.merge_base(p, a, b)?];
     let text =
         |e: &Entry| String::from_utf8(read(v, peer, e.hash.as_ref()?, MERGE_MAX_BYTES)?).ok();

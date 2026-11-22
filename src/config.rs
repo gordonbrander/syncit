@@ -12,8 +12,12 @@ pub struct Config {
     pub syncit: u32,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
-    /// Keep every version this vault sees in `.syncit/blobs/`.
-    pub keep_local_history: bool,
+    /// How many versions back from a head this vault keeps content for in
+    /// `.syncit/blobs/`. 0 keeps no history; `None` (null) keeps every version.
+    pub keep_history: Option<u32>,
+    /// Drop the stored versions `keep_history` no longer covers at the end
+    /// of every run. Off, only `syncit compact` drops them.
+    pub autocompact: bool,
     /// A label for this vault, written into every segment it records. Not
     /// unique and not an identity: `blame` shows it, and nothing else reads it.
     pub nickname: String,
@@ -53,7 +57,8 @@ impl Config {
             syncit: 1,
             include: vec![include],
             exclude: vec![],
-            keep_local_history: false,
+            keep_history: Some(1),
+            autocompact: true,
             nickname,
         }
     }

@@ -33,7 +33,7 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 
 ### Non-goals
 
-- Garbage collection of blobs and compaction of the log. When compaction is added it will be a command the user runs and coordinates across vaults, never automatic.
+- Compaction of the log. Compaction keeps the whole log and drops only old blobs. If the log is ever compacted it will be by a command the user runs and coordinates across vaults, never automatically.
 - Chunking or delta transfer; a changed file is transferred whole.
 - Rename detection; a rename is a delete and a create.
 - Merging the contents of conflicting files, other than plain text whose edits do not overlap (see "Merging text").
@@ -57,12 +57,12 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 - **R10** Never overwrite or delete a local file whose content changed after it was last scanned. (B.1, E.1)
 - **R11** Verify the hash of any content before writing it into a working folder. (E.1)
 - **R12** Any number of vaults, synced pairwise in any order, converge. A vault can relay changes between two vaults that never meet. (C.1)
-- **R13** A vault can operate with no stored history: no blob copies, no extra disk beyond a small log. (D.1)
+- **R13** A vault can operate with no stored history: no blob copies, no extra disk beyond a small log. This is a setting, `keep_history` 0, not the default. (D.1)
 - **R14** An interrupted run leaves both vaults valid, and re-running completes the work. (E.1)
 
 **Should**
 
-- **R15** A vault can keep every version it sees in a local blob store. (D.2)
+- **R15** A vault keeps the content of old versions in a local blob store, as many versions back as it is set to: none, a number, or all. Older content is dropped, by the vault itself or on command; the log is kept whole. (D.2)
 - **R16** A vault can send what it has to a content-addressed store, a folder or a bucket, keeping it locally while the store is unreachable. (D.2, D.3)
 - **R24** A store holds the log as well as blobs, so vaults that never see each other can sync through it. `R16` and `R24` are one mechanism. (C.1, C.2)
 - **R17** Record a snapshot of the current state without syncing. (D.3)
@@ -89,7 +89,7 @@ A vault is a folder containing a `.syncit/` directory. There is no other kind of
 ```
 b/
   .syncit/
-    config     # format version, include and exclude prefixes, store, keep_local_history
+    config     # format version, include and exclude prefixes, store, keep_history, autocompact
     log/       # immutable log segments, named by their hash
     dirstate      # local: path -> (size, mtime, hash, base), and deletions seen
     blobs/     # optional: content-addressed file copies
@@ -187,7 +187,7 @@ C notes-3f9a1c2e.txt
 - Moving the copy over the original is an ordinary edit: the old content becomes a new version on top of the current one.
 - `--in-place` writes the version at the path itself, replacing the file or bringing back a deleted one. The folder is scanned first, so an edit not yet recorded is in the log before it is replaced, and again afterwards, so the restored version is recorded like any other edit.
 - A restored file is dated now, not with the old version's time. Restoring is a new edit, and should not lose a conflict to something older.
-- Only content this vault can supply can be restored: a file on disk, or a blob kept by `keep_local_history`. With history off, the version `--in-place` replaces survives only as a hash, unless another vault has it.
+- Only content this vault can supply can be restored: a file on disk, or a blob kept under `keep_history`. With no history kept, the version `--in-place` replaces survives only as a hash, unless another vault has it.
 
 ### Scanning
 
@@ -229,10 +229,11 @@ Two independent settings in `config` decide what a vault retains:
 
 | Setting | Values | Effect |
 |---|---|---|
-| `keep_local_history` | off / on | When on, every version scanned or received is retained in `.syncit/blobs/`, and blobs offered by peers for versions it lacks are collected. |
+| `keep_history` | 0 / n / all | How many versions back from the current one are retained in `.syncit/blobs/`, for the files the vault includes; blobs offered by peers for versions it keeps and lacks are collected. 0 retains nothing. A new vault has 1. |
+| `autocompact` | on / off | When on, each run drops the blobs `keep_history` no longer covers. When off, `syncit compact` does. Either way the log is kept whole. |
 | `store` | unset / store location | When set, blobs are uploaded to the store. While the store is unreachable they wait in `.syncit/blobs/`. |
 
-With both off, the vault stores no blobs and its log records hashes only. With both on, blobs are uploaded and also kept locally. Local history is never required to be complete: a vault has the blobs it has. Both are set with `syncit config`.
+With `keep_history` 0 and no store, the vault stores no blobs and its log records hashes only. With both, blobs are uploaded and also kept locally. Local history is never required to be complete: a vault has the blobs it has. Both are set with `syncit config`.
 
 ### Stores
 
@@ -252,7 +253,7 @@ Keeping history and syncing through a third place are deliberately one feature. 
 Both vaults do each step, acting on their own folder:
 
 1. Scan, and write a segment of new entries.
-2. Stash or upload blobs for the new entries, per `keep_local_history` and `store`.
+2. Stash or upload blobs for the new entries, per `keep_history` and `store`.
 3. Exchange log segments.
 4. Compute current state from the merged log.
 5. Fetch the blobs needed for included paths.
@@ -285,7 +286,8 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
 | `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
-| `syncit config` | Show or change `keep_local_history`, `nickname` and `store`. |
+| `syncit compact` | Drop the stored versions `keep_history` no longer covers. |
+| `syncit config` | Show or change `keep_history`, `autocompact`, `nickname` and `store`. |
 
 `sync`, `push`, `pull`, `move`, `drop` and `cp` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
 
@@ -306,8 +308,8 @@ A vault records no other vault. Every command that involves a second vault names
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
 | C.2 | R16, R24 | a store holds the log and blobs; both vaults sync with it |
-| D.1 | R13 | `keep_local_history` off, `store` unset |
-| D.2 | R15, R16, R26 | `keep_local_history` on, or `store` set; `log` and `restore` |
+| D.1 | R13 | `keep_history` 0, `store` unset |
+| D.2 | R15, R16, R26 | `keep_history` above 0, or `store` set; `log` and `restore`; `compact` |
 | D.3 | R17 | `snapshot` |
 | E.1 | R10, R11, R14, R18, R25 | immutable segments, atomic writes, hash checks, `status`, format version |
 
@@ -347,6 +349,6 @@ The design keeps three things separate that sync tools usually fuse: what happen
 - **Mass-delete guard.** Whether R23 is on by default, and at what threshold.
 - **Tie-break timestamp.** File mtime reflects when the edit happened but can be set arbitrarily; scan time cannot be forged but reflects when the tool ran.
 - **Conflict-copy names.** Behaviour when a short hash collides with an existing unrelated file, and for names with several extensions such as `.tar.gz`.
-- **Log growth.** Compaction is a non-goal for now; at what size it becomes necessary is unknown, and its mechanism is undesigned (see `CRDT.md`).
+- **Log growth.** Compaction of the log is a non-goal for now; at what size it becomes necessary is unknown, and its mechanism is undesigned (see `CRDT.md`).
 - **Unicode paths.** Whether paths are normalised, and what happens to file names that are not valid UTF-8.
 - **Size in the entry.** Whether entries record file size, so `status` can report how much data is pending.
