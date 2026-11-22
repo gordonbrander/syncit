@@ -2103,21 +2103,49 @@ mod remote {
 
     #[test]
     fn story_c2_sync_through_remote() {
-        let o = &o();
-        let (tmp, a) = vault(&[("notes.txt", "from a"), ("d/shared.txt", "base")]);
+        let tmp = TempDir::new().unwrap();
         let (_r, origin) = remote(&tmp, "r");
+        story_c2(tmp, &origin);
+    }
+
+    /// Run against `SYNCIT_TEST_REMOTE_URL`, in a new prefix under it, with
+    /// credentials from the environment. Skipped when it is not set.
+    #[test]
+    fn cloud_remote() {
+        let Ok(base) = std::env::var("SYNCIT_TEST_REMOTE_URL") else {
+            eprintln!("skipped: SYNCIT_TEST_REMOTE_URL is not set");
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let url = format!("{}/syncit-test-{unique}", base.trim_end_matches('/'));
+        cmd::init_remote(&o(), tmp.path(), &url, None, false).unwrap();
+        story_c2(tmp, Path::new(&url));
+    }
+
+    /// Story C.2 through the remote vault `origin`, made in or for `tmp`.
+    fn story_c2(tmp: TempDir, origin: &Path) {
+        let o = &o();
+        let a = place(&tmp, "a");
+        for (path, content) in [("notes.txt", "from a"), ("d/shared.txt", "base")] {
+            put(&a, path, content, 0);
+        }
+        cmd::init(o, &a).unwrap();
         // A vault with no history supplies its current files.
         no_history(&[&a]);
-        assert_eq!(cmd::push(o, &a, &origin).unwrap().exit_code(), 0);
+        assert_eq!(cmd::push(o, &a, origin).unwrap().exit_code(), 0);
 
         let c = tmp.path().join("c");
         fs::create_dir(&c).unwrap();
         put(&c, "music/song.mp3", "la", 0);
         cmd::init(o, &c).unwrap();
         // a and c never sync with each other.
-        assert_eq!(cmd::sync(o, &c, &origin).unwrap().exit_code(), 0);
+        assert_eq!(cmd::sync(o, &c, origin).unwrap().exit_code(), 0);
         assert!(is(&c, "notes.txt", "from a") && is(&c, "d/shared.txt", "base"));
-        assert_eq!(cmd::pull(o, &a, &origin).unwrap().exit_code(), 0);
+        assert_eq!(cmd::pull(o, &a, origin).unwrap().exit_code(), 0);
         assert!(is(&a, "music/song.mp3", "la"));
         assert_eq!(tree(&a), tree(&c));
 
@@ -2126,22 +2154,22 @@ mod remote {
         put(&c, "d/shared.txt", "edit in c", 6);
         put(&a, "new-a.txt", "na", 5);
         put(&c, "new-c.txt", "nc", 5);
-        assert_eq!(cmd::sync(o, &c, &origin).unwrap().exit_code(), 0);
-        assert_eq!(cmd::sync(o, &a, &origin).unwrap().conflicts, 1);
-        assert_eq!(cmd::sync(o, &c, &origin).unwrap().conflicts, 1);
+        assert_eq!(cmd::sync(o, &c, origin).unwrap().exit_code(), 0);
+        assert_eq!(cmd::sync(o, &a, origin).unwrap().conflicts, 1);
+        assert_eq!(cmd::sync(o, &c, origin).unwrap().conflicts, 1);
         assert_eq!(tree(&a), tree(&c));
         assert!(is(&a, "d/shared.txt", "edit in c"));
         assert!(is(&a, &copy_of("d/shared.txt", "edit in a"), "edit in a"));
         assert!(is(&c, "new-a.txt", "na") && is(&a, "new-c.txt", "nc"));
         // A deletion travels too.
         fs::remove_file(a.join("notes.txt")).unwrap();
-        cmd::sync(o, &a, &origin).unwrap();
-        cmd::sync(o, &c, &origin).unwrap();
+        cmd::sync(o, &a, origin).unwrap();
+        cmd::sync(o, &c, origin).unwrap();
         assert!(!c.join("notes.txt").exists());
         assert_eq!(tree(&a), tree(&c));
         // A third machine clones the URL and has everything.
         let m = tmp.path().join("m");
-        assert_eq!(cmd::clone(o, &origin, &m, &[], false).unwrap().conflicts, 1);
+        assert_eq!(cmd::clone(o, origin, &m, &[], false).unwrap().conflicts, 1);
         assert_eq!(tree(&m), tree(&a));
     }
 
