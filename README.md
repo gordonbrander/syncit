@@ -107,7 +107,7 @@ Say a backup drive has a large archive and you only want one folder of it on you
 syncit clone /Volumes/Backup/Archive/photos/2024 ~/Archive
 ```
 
-You get `~/Archive/photos/2024/…` and nothing else. The folder structure is the same as in the archive, so paths always match. The vault *includes* that folder and *excludes* the rest. What is excluded is simply "not here"; syncing will never delete it from the archive. `get` includes more, and `move` excludes again.
+You get `~/Archive/photos/2024/…` and nothing else. The folder structure is the same as in the archive, so paths always match. The vault *includes* that folder and *excludes* the rest. What is excluded is simply "not here"; syncing will never delete it from the archive. `get` includes more, and `move` or `drop` excludes again.
 
 **Get more.** To bring in another folder (or a single file) later, point `get` at it in the archive:
 
@@ -149,6 +149,25 @@ error: nothing moved: /Volumes/Small excludes photos/2024/a.jpg
 ```
 
 The same goes if the other vault has its own newer version of a file: nothing is removed. Sync with it, then move again.
+
+**Remove without sending.** If another vault already has the files, `drop` removes them here and sends nothing. Say which vault has them:
+
+```sh
+syncit drop --check /Volumes/Backup/Archive music
+```
+
+```
+-> R music/m.mp3
+recorded 0, added 0, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
+```
+
+`drop` first records any unsaved changes, then removes a file only if its current version is in the vault you named. If something has not been synced there yet, nothing is dropped and the files are listed; sync and try again. Without `--check`, `drop` goes ahead only for files whose versions this vault keeps in its [history](#version-history):
+
+```
+error: nothing dropped: no other copy is known of music/m.mp3. Name a vault that has them with --check <vault>, or use --force
+```
+
+`--force` skips the check, if you really mean it: that may remove the only copy. As with `move`, later syncs neither bring dropped files back nor delete them elsewhere, and `syncit get` brings them back. You can also drop a folder you don't have yet, so that it is never fetched.
 
 ## In case of conflict, keep both
 
@@ -328,7 +347,7 @@ dry run: nothing is changed
 recorded 3, added 1, updated 1, deleted 1, conflicts 0, pending 0, skipped 0
 ```
 
-`push`, `pull` and `move` take `--dry-run` too. For `move` it shows which files would be removed here, or the error if the move would be refused.
+`push`, `pull`, `move` and `drop` take `--dry-run` too. For `move` and `drop` it shows which files would be removed here, or the error if they would refuse.
 
 To sync without removing anything, add `--no-remove`. A file deleted in one folder is kept in the other and put back where it was deleted. Both are adds:
 
@@ -354,7 +373,7 @@ Every line about a file has a letter, then the file's path in its vault. When a 
 | `M` | modified |
 | `D` | deleted |
 | `C` | a conflict copy was written |
-| `R` | removed from this folder by `move` |
+| `R` | removed from this folder by `move` or `drop` |
 | `U` | a conflict is open |
 | `!` | needs a look; the reason follows in parentheses |
 
@@ -418,7 +437,7 @@ Results go to standard output; warnings and errors go to standard error.
 | Exit code | Meaning |
 |---|---|
 | 0 | done, nothing needs attention |
-| 1 | failed: not a vault, vault in use, bad arguments, a refused `move` |
+| 1 | failed: not a vault, vault in use, bad arguments, a refused `move` or `drop` |
 | 2 | done, but something needs a look: a conflict, or a file that was skipped or is still pending |
 
 Add `--json` to any command and every line, on both streams, is a JSON object with a `type`:
@@ -447,6 +466,7 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `st
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | add those files to this vault, and fetch them |
 | `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
+| `syncit drop [--check <vault>] [--force] <path>...` | remove these files here only, sending nothing; takes `--dry-run` |
 | `syncit blame [path]...` | show which vault recorded the current version of each file |
 | `syncit log [path]...` | list the recorded versions of each file, newest first |
 | `syncit restore <path> <hash>` | bring back an old version as a copy beside the file; `--in-place` replaces the file |

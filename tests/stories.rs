@@ -1337,6 +1337,61 @@ fn move_refuses() {
 }
 
 #[test]
+fn drop_refuses_sole_copy() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("d/g.txt", "g")]);
+    let both = paths(&["d", "f.txt"]);
+    // No vault to check against and no history: nothing vouches for a copy.
+    let error = cmd::drop(O, &b, &both, None, false)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("f.txt") && error.contains("--check"),
+        "{error}"
+    );
+    // An unrecorded edit is recorded, and then blocks the drop even against
+    // a vault. With two paths given, nothing is dropped.
+    put(&b, "f.txt", "edit", 1);
+    let error = cmd::drop(O, &b, &both, Some(&a), false)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("f.txt") && !error.contains("d/g.txt"),
+        "{error}"
+    );
+    assert!(is(&b, "f.txt", "edit") && is(&b, "d/g.txt", "g"));
+    let recorded = |e: &syncit::entry::Entry| e.hash == Some(sha256(b"edit"));
+    assert!(log(&b).entries.values().any(recorded));
+    assert_eq!(Config::load(&b).unwrap().exclude.len(), 0);
+    cmd::push(O, &b, &a).unwrap();
+    // The checked vault is scanned: a file it has since lost does not count.
+    fs::remove_file(a.join("d/g.txt")).unwrap();
+    let error = cmd::drop(O, &b, &both, Some(&a), false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("d/g.txt"), "{error}");
+    put(&a, "d/g.txt", "g", 2);
+    let report = cmd::drop(O, &b, &both, Some(&a), false).unwrap();
+    assert!(report.has("dropped", "f.txt") && report.has("dropped", "d/g.txt"));
+    assert!(tree(&b).is_empty() && is(&a, "f.txt", "edit"));
+    // Nothing reads as deleted afterwards.
+    assert_eq!(cmd::sync(O, &b, &a).unwrap().recorded, 0);
+    assert!(is(&a, "f.txt", "edit") && is(&a, "d/g.txt", "g"));
+    // A path with no files here is excluded all the same.
+    cmd::drop(O, &b, &paths(&["later"]), None, false).unwrap();
+    assert!(!Config::load(&b).unwrap().includes("later/x.txt"));
+    // Local history is another copy; --force skips the check.
+    assert!(cmd::drop(O, &a, &paths(&["f.txt"]), None, false).is_err());
+    cmd::config(O, &a, Some(Setting::LocalHistory(true))).unwrap();
+    cmd::snapshot(O, &a).unwrap();
+    cmd::drop(O, &a, &paths(&["f.txt"]), None, false).unwrap();
+    assert!(!a.join("f.txt").exists() && a.join(".syncit/blobs").join(sha256(b"edit")).exists());
+    cmd::config(O, &a, Some(Setting::LocalHistory(false))).unwrap();
+    assert!(cmd::drop(O, &a, &paths(&["d"]), Some(&a), false).is_err());
+    cmd::drop(O, &a, &paths(&["d"]), None, true).unwrap();
+    assert!(tree(&a).is_empty());
+}
+
+#[test]
 fn interrupted_move() {
     // A move stopped after it saved the filter and before it removed the
     // files: the folder is excluded and its files are still present.
@@ -1696,5 +1751,14 @@ fn dry_run_matches_real_run() {
     let done = cmd::move_to(O, &a, &paths(&["big"]), &b).unwrap();
     assert!(done.has("moved", "big/one.bin") && done.has("moved", "big/two.bin"));
     assert!(!a.join("big").exists() && is(&b, "big/two.bin", "2"));
+    assert_eq!(planned, done);
+    // `drop`, refused and then checked against a vault that has the files.
+    let refused = cmd::drop(dry, &b, &paths(&["keep.txt"]), None, false).unwrap_err();
+    assert!(refused.to_string().contains("nothing dropped"), "{refused}");
+    let before = listing();
+    let planned = cmd::drop(dry, &b, &paths(&["keep.txt"]), Some(&a), false).unwrap();
+    assert!(before == listing(), "a dry run wrote something");
+    let done = cmd::drop(O, &b, &paths(&["keep.txt"]), Some(&a), false).unwrap();
+    assert!(done.has("dropped", "keep.txt") && !b.join("keep.txt").exists());
     assert_eq!(planned, done);
 }

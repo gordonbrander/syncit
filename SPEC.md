@@ -213,7 +213,7 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 - `deleted`: one per path this vault has seen deleted, with its base: the heads, all tombstones, that the absence of a file here reflects. A path is in at most one of `rows` and `deleted`. A dirstate written before this field existed has none, and loads as if it were empty.
 - A missing dirstate file is an empty dirstate. That is the "lost dirstate" case and must work (`CRDT.md`, "Writing an entry", third row).
 
-**The unchanged test.** A file is unchanged against its row if its size, mtime and executable bit equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash; it is the row's version only if its executable bit also equals the row's. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise and `move`.
+**The unchanged test.** A file is unchanged against its row if its size, mtime and executable bit equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash; it is the row's version only if its executable bit also equals the row's. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise, `move` and `drop`.
 
 ### Segments
 
@@ -302,7 +302,7 @@ Let `now` be the time the scan started. For each file found, and for each row wh
 | `foo/new.txt` | `foo/new.txt` | `foo` is an ancestor of `foo/bar` |
 | `foo/bar/big/n/a.txt`, with `foo/bar/big` excluded | `foo/bar/big/n` | `foo/bar/big` is already a prefix |
 
-If every prefix is already listed, which happens only when the file's own path is in `exclude` (a moved file put back by hand), the path moves from `exclude` to `include`, as `get` would do. Includes are added after the walk, shortest first, re-checking the filter, so one dragged folder yields one include. The config is saved before the dirstate. A dry scan adds nothing. `move` undoes it.
+If every prefix is already listed, which happens only when the file's own path is in `exclude` (a moved file put back by hand), the path moves from `exclude` to `include`, as `get` would do. Includes are added after the walk, shortest first, re-checking the filter, so one dragged folder yields one include. The config is saved before the dirstate. A dry scan adds nothing. `move` and `drop` undo it.
 
 A file entry's `mtime` is the file's mtime in milliseconds, and its `exec` is the file's executable bit; a tombstone's `exec` is `false`. Stat the file before and after hashing; if size or mtime changed in between, leave the path and its row untouched this scan and report it as `skipped`.
 
@@ -490,7 +490,7 @@ Scanning precedes exchange, so entries are written from what each vault had befo
 
 ### Dry run
 
-`sync`, `push`, `pull` and `move` take `--dry-run`. It is the same procedure with every write to either vault left out; the vault values in memory are updated as usual, so each step sees what the real run would see and prints the same lines. `Options.dry_run` carries the flag.
+`sync`, `push`, `pull`, `move` and `drop` take `--dry-run`. It is the same procedure with every write to either vault left out; the vault values in memory are updated as usual, so each step sees what the real run would see and prints the same lines. `Options.dry_run` carries the flag.
 
 - Scan: dry mode (section 7).
 - Exchange: a segment is validated and its entries added to the receiver's log in memory, not stored. What the other vault's dry scan recorded exists only in its memory, so the receiver also takes every entry of the other vault's in-memory log.
@@ -498,6 +498,7 @@ Scanning precedes exchange, so entries are written from what each vault had befo
 - Materialise: the safety checks run. Where the real run would fetch a blob, the dry run asks only whether a source file for it exists; it does not hash it, so a corrupt source reads as available. Nothing is written, renamed or deleted, and the dirstate is not saved. Dirstate rows are updated in memory.
 
 - `move` (section 11): every check runs, on the in-memory state, so a move that would be refused is refused with the same error. The config and dirstate are not saved and no file is removed; the `moved` events are printed.
+- `drop` (section 11): likewise, with `dropped` events. `retain()` does nothing in a dry run, so an edit the dry scan records is not yet in local history: a dry `drop` that relies on local history for that edit is refused where the real run would go through.
 
 The output is the line `dry run: nothing is changed` (an `info` message), then exactly what the real run would print, summary included. The exit code is the real run's. Both vaults are locked and every changed file is hashed, as in a real run.
 
@@ -514,7 +515,7 @@ Nothing else changes: materialise finds a file as the winner at those paths.
 - `push` writes nothing to the local vault, so a file deleted there comes back at its next `pull` or `sync`; `pull` likewise for the peer.
 - A file deleted in every vault of the run stays deleted: there is nothing to keep.
 - A file replaced by a newer version is replaced as usual.
-- `move`, `clone` and `get` do not take the flag.
+- `move`, `drop`, `clone` and `get` do not take the flag.
 
 ### A run with a store
 
@@ -551,13 +552,14 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit status [-a] [path]... [--vs <vault>]` | See below. (`R18`, `R27`) |
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
+| `syncit drop [--check <vault>] [--force] [--dry-run] <path>...` | See below. (`R7`) |
 | `syncit blame [path]...` | See below. |
 | `syncit log [path]...` | See below. (`R26`) |
 | `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
 | `syncit config [local-history on\|off]` | See below. (`R15`) |
 | `syncit config nickname <name>` | See below. |
 
-`get` and `move` take one or more paths. The steps below run once over all the paths together: `move` makes its checks for every file before removing anything, so it either moves them all or refuses.
+`get`, `move` and `drop` take one or more paths. The steps below run once over all the paths together: `move` and `drop` make their checks for every file before removing anything, so they either remove them all or refuse.
 
 ### get
 
@@ -582,7 +584,16 @@ The paths of `get` lie inside the *other* vault, as the source of `clone` does: 
 
 A failure in steps 2, 3 or 5 is exit code 1.
 
-There is no way to exclude a path a vault has without naming a vault that takes it. An earlier `drop` command did that and was removed; see section 17.
+### drop
+
+`syncit drop [--check <vault>] [--force] <path>...` is the end of `move` without the push: the files are removed from this vault only, and sent nowhere. The paths are in this vault, relative to the current directory, and need not exist on disk. No deletion is recorded.
+
+1. Open and lock this vault, and the vault named by `--check` if there is one, as a run does (section 10). Scan both: unrecorded changes here are recorded before anything is removed, and the checked vault's rows say what it has now.
+2. Collect the paths this vault has a row for under the given prefixes. There may be none: the prefixes are excluded all the same, which is how to say "never fetch this folder".
+3. **Copy check**, unless `--force`. For each of those paths, the row's hash must be in this vault's `.syncit/blobs/`, or in the checked vault: a row of its dirstate with that hash, or a file in its `blobs/`. If any is not, fail with `nothing dropped: no other copy is known of <paths>.` and a hint: `Sync with it first` if a vault was named, `Name a vault that has them with --check <vault>` if not; then `, or use --force`. Exit code 1. This prevents dropping the only copy of a file, including a version the scan in step 1 has just recorded.
+4. Steps 6 to 8 of `move`. Each removed file is reported as `dropped`.
+
+Nothing is sent to the checked vault; scanning it may write a segment there, as any scan may. `move` is the command for "put it there, then remove it here"; `drop` is for files another vault already has, or that are not wanted at all.
 
 ### blame
 
@@ -701,7 +712,7 @@ An event's text form is a marker, one letter, then `path`, the file's path in it
 | `M` | `updated` |
 | `D` | `deleted` |
 | `C` | `copied`: a conflict copy was written |
-| `R` | `moved`: `move` removed the file from this vault |
+| `R` | `moved` or `dropped`: `move` or `drop` removed the file from this vault |
 | `!` | anything that needs attention: `skipped`, `pending`, `incomplete`, `rejected` |
 
 Anything more goes in parentheses after the path. A file whose conflicting versions were merged (section 9) is `M notes.md (merged)`. A `!` line gives its kind and reason: `(skipped: changed since it was scanned)`. A rejected segment has no file, so its path is `.`, the vault itself: `-> ! . (rejected: segment 77b0…: not in canonical form)`.
@@ -738,7 +749,7 @@ The same run's first and last lines with `--json`:
 | Exit code | Meaning |
 |---|---|
 | 0 | Completed; nothing needs attention. `init`, `status`, `blame`, `log`, `restore` and `config` always exit 0 unless they fail. |
-| 1 | Failed: bad arguments, not a vault, vault in use, version mismatch, corrupt local file, a refused `move`. |
+| 1 | Failed: bad arguments, not a vault, vault in use, version mismatch, corrupt local file, a refused `move` or `drop`. |
 | 2 | Completed, but there are conflicts or pending, skipped, incomplete or rejected items. |
 
 ## 13. Interruption
@@ -753,8 +764,8 @@ The same run's first and last lines with `--json`:
 | after replacing files, before saving the dirstate | files newer than their rows | the scan re-records them as entries with the winner's hash and mtime: either the same entry or a head with the same hash, which is the same version. Files with no row are adopted; one written over a deletion record is re-recorded with the winner's hash and mtime, which is again the same version |
 | after renaming a loser to its copy name, before placing the winner | the path is missing, the copy has no row | the scan records a tombstone and the copy; the winner still beats the tombstone, and the losing content is in the copy |
 | after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones. The deletion record names only the second until the next materialise sets it to both |
-| during `move`, after saving the config, before saving the dirstate | present files under an excluded prefix | the scan includes each file on disk again, one include per file; nothing is lost, and running `move` again completes it and leaves one exclude (`interrupted_move`) |
-| during `move`, after saving the dirstate | files with no rows | the scan adopts and includes them; nothing is recorded as deleted |
+| during `move` or `drop`, after saving the config, before saving the dirstate | present files under an excluded prefix | the scan includes each file on disk again, one include per file; nothing is lost, and running the command again completes it and leaves one exclude (`interrupted_move`) |
+| during `move` or `drop`, after saving the dirstate | files with no rows | the scan adopts and includes them; nothing is recorded as deleted |
 | while uploading to a store (milestone 9) | some blobs or segments are in the store and others are not | every object is whole or absent; a reader sees a path as `pending` or `incomplete` and waits; the next run uploads the rest |
 
 ## 14. Tests
@@ -835,6 +846,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `corrupt_blob_source` | a peer file changed behind its dirstate is not installed (`R11`) |
 | `copy_deleted_stays_deleted` | deleting a conflict copy and syncing does not bring it back |
 | `move_refuses` | `move` refuses, removing nothing, when the target excludes a path (and then sends nothing), when the target has a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
+| `drop_refuses_sole_copy` | `drop` refuses without `--check` when the vault keeps no history; an unrecorded edit under the path is recorded as an entry, and then blocks the drop against the checked vault until it is pushed; a file the checked vault has lost since its last scan blocks it too; with two paths given, nothing is dropped; nothing reads as deleted afterwards; a path with no files is excluded; local history counts as another copy; a vault cannot check itself; `--force` overrides |
 | `config_command` | `config` prints the settings, turns local history on and off, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | `store_layout` | a store has `format`, `log/` and `blobs/`; an empty directory is initialised on first write; a non-empty directory without `format`, and one with version 2, are refused and left untouched |
@@ -846,7 +858,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `message_forms` | each message type's text form and JSON form; the summary's counts and exit code |
 | `push_counts_excluded` | the files a push would not deliver: those the target excludes, and those it ignores |
 | `interrupted_move` | an exclude over files the vault still has, as a `move` stopped partway leaves: the next scan includes them again, they sync as before, and a second `move` completes and leaves one exclude |
-| `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion, a conflict and a merge of text, and for `move`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` that would be refused is refused |
+| `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion, a conflict and a merge of text, and for `move` and `drop`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` or `drop` that would be refused is refused |
 
 ### Requirement coverage
 
@@ -907,13 +919,14 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Attribution | each vault has a nickname, by default its folder's name, written into the header of the segments it records; `blame` prints it. A label: not unique, not verified, read by no rule. Hostnames and absolute paths are not recorded, since the log is permanent and replicated |
 | Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
 | `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target includes every file and, after the push, has the same content at every path |
+| `drop` safety | scans first, so unrecorded changes are recorded; refuses unless the content is in local history or in the vault named by `--check`, which is scanned too; `--force` overrides |
 | File metadata | regular files only; symlinks skipped with a warning. The executable bit is recorded, as Git does, and a change to it alone is a new version. Other permissions, ownership and extended attributes are not recorded. No setting for filesystems without the bit |
 | File mtimes | a materialised file gets its entry's mtime; a restored one gets the current time |
 | Re-creating a deleted file | a new version that replaces the tombstones the vault had seen, kept in a deletion record in the dirstate. With no record, a file at a deleted path is still kept as a new version: when it cannot be decided, data is retained |
 | Unicode paths | recorded as the OS returns them; names that are not UTF-8 are skipped with a warning |
 | Case-insensitive filesystems | no special handling; a case collision surfaces as "untracked file in the way" and nothing is overwritten |
 | Conflict-copy name clash | the existing file is left alone; the conflict is reported and stays open |
-| A file on disk outside the included paths | added to `include` by the scan, whether new or already with a row (section 7): the filter follows the disk, so data is kept. `move` undoes it |
+| A file on disk outside the included paths | added to `include` by the scan, whether new or already with a row (section 7): the filter follows the disk, so data is kept. `move` and `drop` undo it |
 | Seeing a partial vault | `status --all`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
 | Terms for partial replication | three independent facts, one word each: included or excluded (the filter), present (the disk, which the dirstate records), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
 | Merging conflicting files | text only (`.md`, `.markdown`, `.txt`), only in a run where a receiving vault keeps history, so the versions replaced can be restored, and only when a line-by-line three-way merge from their common ancestor is clean; otherwise copies. The merge is an entry with both versions as parents. `PRD.md` first listed merging as a non-goal |
@@ -944,5 +957,5 @@ Record here anything built differently from these documents, with the reason.
 - **A peer's log is read leniently.** Section 6 says a local segment that fails validation stops the command; section 10 says a bad segment in the other vault is rejected and does not stop the run. Both cannot hold for the peer, which must load its own log to scan. A vault opened as a peer skips its invalid segments with a warning; the receiving vault reports them as `rejected`. The vault a command runs in is still strict.
 - **`.syncit` is matched without regard to ASCII case** by the scan and by materialise, at any depth. A valid segment may name `.SYNCIT/x`, which on a case-insensitive filesystem is this vault's own `.syncit/`. Segment validation is unchanged (the format is not touched); the path is simply never written.
 - **An interrupted scan may be re-recorded as a smaller segment.** Section 7 says the next scan writes the same entries again. A new file whose entry already reached the log is instead recognised by the "file, no row" rule and adopted, so the second segment can hold fewer entries. The set of entries is the same (`interrupted_before_dirstate`).
-- **`drop` was replaced by `move`.** `drop [--check <vault>] [--force] <path>...` excluded paths a vault had without sending them anywhere, checking for another copy in local history or a named vault. The check could be stale, and the real task was always "put it there, then remove it here". Two uses went with it: saying "never fetch this folder" with no other vault involved, and discarding files no other copy is known for.
+- **`drop` was removed, then restored beside `move`.** `move` replaced it because its check could be stale and the usual task is "put it there, then remove it here". Two uses went with it: saying "never fetch this folder" with no other vault involved, and discarding files no other copy is known for. `drop` is back for those (section 11), and now scans the vault named by `--check`, so that vault's rows are current when they are read.
 - **A conflict copy deleted before any scan recorded it can come back** from the other vault, where the same copy was recorded as an ordinary new file. "A copy the user deleted stays deleted" holds from the first run after the copies were created (`copy_deleted_stays_deleted` syncs once before deleting). This follows from the documents as written; it is noted, not fixed.
