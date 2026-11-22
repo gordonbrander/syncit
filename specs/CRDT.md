@@ -1,6 +1,6 @@
 # The syncit log
 
-This document specifies the log that vaults replicate: its entries, its file format, how it is read, and how it is written. `PRD.md` describes the rest of the system.
+This document specifies the log that vaults replicate: its entries, its file format, how it is read, and how it is written. `PRD.md` describes the rest of the system. Nothing here changes for a store: it holds the same segments, encrypted (`store.md`).
 
 The model is the one CouchDB uses for a document's revision tree, generalised so that an entry may have several parents: a grow-only set of hash-linked entries, merged by union, with a pure function choosing the winner.
 
@@ -30,7 +30,7 @@ There is no replica id and no counter. Causality is carried entirely by `parents
 
 Entries are stored in segments.
 
-- A segment is one file in `.syncit/log/` holding the entries one scan produced.
+- A segment is one file in `.syncit/log/` holding the entries one scan produced. In a store it is one encrypted object, with the same bytes inside.
 - It has exactly one author: the vault that scanned. Every other holder has a byte-for-byte copy.
 - It is packaging only. The log is the union of entries across segments; how they are grouped does not affect the result.
 
@@ -60,10 +60,11 @@ The nickname says which vault recorded a segment's entries, for people to read (
 - It is 1 to 64 bytes of UTF-8 with no whitespace and no control characters, so that it can be printed as it is.
 - Renaming a vault changes the segments it writes from then on. Earlier segments are immutable and keep the old nickname.
 - An entry found in several segments was recorded by each of their vaults.
+- A vault may remember another under that vault's nickname, in its `remotes` (`store.md`, section 9). That is a local address book. It is not in the log, and the statement above still stands.
 
 ## Validation
 
-A segment arrives from another vault and is not trusted. It is rejected whole if:
+A segment arrives from another vault and is not trusted. One from a store is decrypted first and then held to the same rules (`store.md`, section 6). It is rejected whole if:
 
 - its hash does not match its name;
 - its first line is not a JSON object with exactly the fields `nickname` and `syncit`, its version is not 1, or its nickname is not valid (see "Nickname");
@@ -210,9 +211,9 @@ Not in version 1. This is the intended shape, to be designed together with netwo
 Unresolved:
 
 - Whether the key belongs to a vault or to a device. A vault key travels with the folder, so a secret sits on every drive and is copied with it, and a run that scans both vaults signs with each vault's key. A device key stays on the machine, where the operating system can store it, but then a vault's name is a claim the device makes and not something the key proves.
-- Where keys are stored and what happens when one is lost.
+- Where keys are stored and what happens when one is lost. A store's secret key (`store.md`, section 8) is a different key: it encrypts one store and signs nothing.
 - Which keys a vault accepts. Until that is decided a signature gives attribution, not authorisation.
-- How people name keys: a table of local petnames is the likely answer, with the nickname as the name a vault proposes for itself.
+- How people name keys: a table of local petnames is the likely answer, with the nickname as the name a vault proposes for itself. `remotes` (`store.md`, section 9) is already that table for where vaults are.
 - Compaction of the log, which would replace the original signatures with the compactor's.
 
 ## Open questions

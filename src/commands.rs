@@ -1,7 +1,7 @@
 //! One function per command. Each prints as it goes; a command that runs a
 //! sync returns a `Summary` for `main` to print last.
 
-use crate::blobs::{self, available, droppable, hash_file, retain};
+use crate::blobs::{self, available, hash_file, retain};
 use crate::config::{Config, default_nickname, prefix_matches};
 use crate::dirstate::is_exec;
 use crate::entry::valid_path;
@@ -12,7 +12,7 @@ use crate::output::{
 };
 use crate::scan::{deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
-use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique, write_atomic};
+use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
 use anyhow::{Context, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,10 +28,13 @@ enum Mode {
 }
 
 /// Make `dir` a vault that includes `include`, nicknamed after the folder.
-fn create(dir: &Path, include: String) -> Result<Config> {
+fn create(dir: &Path, include: Vec<String>) -> Result<Config> {
     let folder = resolve_path(dir)?;
     let folder = folder.file_name().unwrap_or_default().to_string_lossy();
-    let config = Config::new(include, default_nickname(&folder));
+    let config = Config {
+        include,
+        ..Config::new(String::new(), default_nickname(&folder))
+    };
     for sub in ["log", "blobs", "tmp"] {
         fs::create_dir_all(dir.join(".syncit").join(sub))?;
     }
@@ -46,7 +49,7 @@ pub fn init(opts: &Options, dir: &Path) -> Result<()> {
         "{} is already a vault",
         dir.display()
     );
-    let config = create(dir, String::new())?;
+    let config = create(dir, vec![String::new()])?;
     let message = format!(
         "Vault initialized: {}\nNickname: {}",
         resolve_path(dir)?.display(),
@@ -56,18 +59,127 @@ pub fn init(opts: &Options, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn clone(opts: &Options, src: &Path, dir: &Path) -> Result<Summary> {
-    let src = resolve_path(src)?;
-    let root = find_root(&src)?;
-    let sub = relative(&root, &src)?;
+/// The error for a URL in a build without remote vaults.
+#[cfg(not(feature = "remote"))]
+fn no_remote() -> anyhow::Error {
+    anyhow::anyhow!("this build has no remote support: install with the remote feature")
+}
+
+/// Make a remote vault at `url`, which must be reachable and empty. Returns
+/// the phrase it printed, if it generated the key.
+#[cfg(feature = "remote")]
+pub fn init_remote(
+    opts: &Options,
+    url: &str,
+    nickname: Option<String>,
+    save_key: bool,
+) -> Result<Option<String>> {
+    use crate::remote::{Bucket, credentials};
+    use crate::{crypt, keys};
+    let nickname = nickname.unwrap_or_else(|| "origin".to_string());
     ensure!(
-        !resolve_path(dir)?.starts_with(&root),
-        "cannot clone a vault into itself"
+        valid_nickname(&nickname),
+        "a nickname is 1 to 64 bytes, with no spaces or control characters"
     );
+    let bucket = Bucket::new(url, credentials(opts, url)?)?;
+    ensure!(bucket.is_empty()?, "{url} is not empty");
+    let (key, generated) = match &opts.secret_key {
+        Some(phrase) => (
+            keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?,
+            false,
+        ),
+        None => (crypt::new_key()?, true),
+    };
+    let config = Config {
+        keep_history: None,
+        autocompact: false,
+        ..Config::new(String::new(), nickname)
+    };
+    bucket.create(&key, &config)?;
+    let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
+    print_stdout(&Message::Info { message }, opts.json);
+    if !generated {
+        return Ok(None);
+    }
+    let words = keys::phrase(&key);
+    let message = format!(
+        "Secret key for {url}:\n\n  {}\n\nWrite these words down and keep them safe. They are the only way to\nread this vault from another computer, and they are not shown again.",
+        *words
+    );
+    print_stdout(&Message::Info { message }, opts.json);
+    keys::save(opts, url, &key, keys::Source::New, save_key)?;
+    Ok(Some(words.to_string()))
+}
+
+#[cfg(not(feature = "remote"))]
+pub fn init_remote(
+    _opts: &Options,
+    _url: &str,
+    _nickname: Option<String>,
+    _save_key: bool,
+) -> Result<Option<String>> {
+    Err(no_remote())
+}
+
+/// Paths from a vault's root, as given on the command line.
+fn vault_paths(paths: &[String]) -> Result<()> {
+    for path in paths {
+        ensure!(valid_path(path), "{path} is not a path a vault can have");
+    }
+    Ok(())
+}
+
+/// Make `dir` a vault with the files of the vault `src`: a URL, a path in a
+/// vault, or a nickname in the vault at `cwd`. Without `only`, it includes
+/// the sub-folder the path names, or everything. With it, `src` is a URL or
+/// a vault's root, and it includes exactly those paths. The source is
+/// remembered in `remotes`, then pulled.
+pub fn clone(
+    opts: &Options,
+    cwd: &Path,
+    src: &Path,
+    dir: &Path,
+    only: &[String],
+    save_key: bool,
+) -> Result<Summary> {
+    vault_paths(only)?;
+    let local = Vault::open(opts, cwd, true).ok();
+    let src = &resolve(local.as_ref(), src);
+    std::mem::drop(local); // it may be the source, which is locked
+    let (source, include) = match url(src) {
+        Some(_) if only.is_empty() => (src.to_path_buf(), vec![String::new()]),
+        Some(_) => (src.to_path_buf(), only.to_vec()),
+        None => {
+            let src = resolve_path(src)?;
+            let root = find_root(&src)?;
+            let sub = relative(&root, &src)?;
+            ensure!(
+                !resolve_path(dir)?.starts_with(&root),
+                "cannot clone a vault into itself"
+            );
+            ensure!(
+                only.is_empty() || sub.is_empty(),
+                "{} is inside the vault {}: with --only, give the vault's root",
+                src.display(),
+                root.display()
+            );
+            match only.is_empty() {
+                true => (root, vec![sub]),
+                false => (root, only.to_vec()),
+            }
+        }
+    };
     let empty = !dir.exists() || dir.read_dir()?.next().is_none();
     ensure!(empty, "{} exists and is not empty", dir.display());
-    create(dir, sub)?;
-    run(opts, dir, &root, Mode::Pull)
+    create(dir, include)?;
+    let location = source.to_str().context("the source is not UTF-8")?;
+    let added =
+        Vault::open(opts, dir, true).and_then(|mut v| add(opts, &mut v, location, None, save_key));
+    if let Err(e) = added {
+        let _ = fs::remove_dir_all(dir.join(".syncit"));
+        return Err(e);
+    }
+    run(opts, dir, &source, Mode::Pull)
 }
 
 pub fn sync(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
@@ -89,15 +201,80 @@ fn nested(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// A target names another vault: a URL, or a path.
+fn url(target: &Path) -> Option<&str> {
+    target.to_str().filter(|t| t.contains("://"))
+}
+
+/// A target after the local vault's `remotes`: a nickname there is replaced
+/// by its location.
+fn resolve(local: Option<&Vault>, target: &Path) -> PathBuf {
+    let location = target.to_str().and_then(|t| local?.config.remotes.get(t));
+    location.map_or_else(|| target.to_path_buf(), PathBuf::from)
+}
+
+/// Open the vault a target names, for a command run in `local`.
+fn open_target(opts: &Options, local: Option<&Vault>, target: &Path) -> Result<Vault> {
+    match url(target) {
+        #[cfg(feature = "remote")]
+        Some(url) => Vault::open_url(opts, url, local),
+        #[cfg(not(feature = "remote"))]
+        Some(_) => {
+            let _ = local;
+            Err(no_remote())
+        }
+        None => Vault::open(opts, target, false),
+    }
+}
+
 /// Open another vault for a run with `v`.
-fn other(opts: &Options, v: &mut Vault, path: &Path) -> Result<Vault> {
-    ensure!(
-        !nested(&find_root(path)?, &v.root),
-        "cannot sync a vault with itself or with a vault inside it"
-    );
-    let mut peer = Vault::open(opts, path, false)?;
+fn other(opts: &Options, v: &mut Vault, target: &Path) -> Result<Vault> {
+    let target = &resolve(Some(v), target);
+    if url(target).is_none() {
+        ensure!(
+            target.exists(),
+            "no vault at {}: not a folder, a URL or the name of a remote",
+            target.display()
+        );
+        ensure!(
+            !nested(&find_root(target)?, &v.root),
+            "cannot sync a vault with itself or with a vault inside it"
+        );
+    }
+    let mut peer = open_target(opts, Some(v), target)?;
     (v.side, peer.side) = ("->", "<-");
     Ok(peer)
+}
+
+/// After a run, one line for each vault that is remote: what was sent to
+/// it and received from it.
+fn report(opts: &Options, vaults: [&Vault; 2]) {
+    for v in vaults.into_iter().filter(|v| v.bare) {
+        let t = v.traffic.borrow();
+        let lines = [
+            ("send", "sent", "to", &t.sent_files, &t.sent_segments),
+            (
+                "receive",
+                "received",
+                "from",
+                &t.received_files,
+                &t.received_segments,
+            ),
+        ];
+        for (verb, done, to, files, segments) in lines {
+            if files.is_empty() && segments.is_empty() {
+                continue;
+            }
+            let verb = if opts.dry_run {
+                format!("would {verb}")
+            } else {
+                done.into()
+            };
+            let (f, s) = (files.len(), segments.len());
+            let message = format!("{verb} {f} files, {s} segments {to} {}", v.name);
+            print_stdout(&Message::Info { message }, opts.json);
+        }
+    }
 }
 
 /// A run with a peer (SPEC.md section 10). `a` is the local vault.
@@ -111,6 +288,7 @@ fn run(opts: &Options, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
     exchange(opts, &mut a, &mut b, mode, &mut sum)?;
     autocompact(opts, &a)?;
     autocompact(opts, &b)?;
+    report(opts, [&a, &b]);
     Ok(sum)
 }
 
@@ -177,7 +355,7 @@ fn exchange(
             opts,
             format!(
                 "{} {verb} {} files ({}); they were not copied",
-                b.root.display(),
+                b.name,
                 files.len(),
                 names.join(", ")
             ),
@@ -209,10 +387,10 @@ fn exchange(
     // Both retain before either materialises, so that a version is saved
     // before it is replaced.
     if to_b {
-        retain(opts, b, Some(a))?;
+        retain(opts, b, Some(&*a))?;
     }
     if to_a {
-        retain(opts, a, Some(b))?;
+        retain(opts, a, Some(&*b))?;
     }
     // A merge replaces two versions. It is made only if a vault receiving in
     // this run keeps history: its `retain` above then has them, so they can
@@ -280,18 +458,25 @@ fn record(opts: &Options, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary
 /// Take every segment the other vault has and this one lacks. A segment is
 /// validated before it is stored; one that fails is reported and left out.
 pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -> Result<()> {
-    let dir = v.dot().join("log");
-    for file in fs::read_dir(from.dot().join("log"))? {
-        let file = file?;
-        let name = file.file_name().to_string_lossy().into_owned();
-        if dir.join(&name).exists() {
+    let have = v.storage.segment_names()?;
+    for name in from.storage.segment_names()? {
+        if have.contains(&name) {
             continue;
         }
-        let read = fs::read(file.path()).map_err(anyhow::Error::from);
+        let read = from.storage.read_segment(&name);
         match read.and_then(|bytes| Ok((segment::decode(&name, &bytes)?, bytes))) {
             Ok((segment, bytes)) => {
                 if !opts.dry_run {
-                    write_atomic(&v.root, &dir.join(&name), &bytes)?;
+                    v.storage.write_segment(&name, &bytes)?;
+                }
+                if v.bare {
+                    v.traffic.borrow_mut().sent_segments.insert(name.clone());
+                }
+                if from.bare {
+                    from.traffic
+                        .borrow_mut()
+                        .received_segments
+                        .insert(name.clone());
                 }
                 for e in segment.entries {
                     v.log.add(e, &segment.nickname);
@@ -351,7 +536,7 @@ fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
             continue;
         }
         let conflict = Message::Conflict {
-            vault: v.root.display().to_string(),
+            vault: v.name.clone(),
             path: path.clone(),
             message,
             side: v.side,
@@ -385,8 +570,8 @@ fn versions(n: usize) -> String {
 /// Drop from `.syncit/blobs/` the versions older than the vault's
 /// `keep_history` keeps. The log stays whole: only content goes. Returns how
 /// many were dropped, or with `--dry-run` would be, and their bytes.
-pub fn compact(opts: &Options, cwd: &Path) -> Result<(usize, u64)> {
-    let v = Vault::open(opts, cwd, true)?;
+pub fn compact(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<(usize, u64)> {
+    let v = open_vault(opts, cwd, vault)?;
     announce(opts);
     let (n, bytes) = blobs::compact(opts, &v)?;
     let message = match n {
@@ -486,9 +671,9 @@ pub fn status(
     all: bool,
 ) -> Result<Vec<State>> {
     let opts = &Options {
-        json: opts.json,
         dry_run: true,
         no_remove: false,
+        ..opts.clone()
     };
     let mut v = Vault::open(opts, cwd, true)?;
     let mut scopes = prefixes(&v.root, cwd, paths)
@@ -598,14 +783,173 @@ pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
             "{} is in this vault: give a path in the vault to get it from",
             first.display()
         );
-        for prefix in prefixes(&source, cwd, paths)? {
-            v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
-            v.config.include.retain(|x| !prefix_matches(&prefix, x));
-            v.config.include.push(prefix);
-        }
-        v.config.save(&v.root)?;
+        include(&mut v, prefixes(&source, cwd, paths)?)?;
     }
     run(opts, cwd, &source, Mode::Pull)
+}
+
+/// Include `prefixes` in the vault, and save its config.
+fn include(v: &mut Vault, prefixes: Vec<String>) -> Result<()> {
+    for prefix in prefixes {
+        v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
+        v.config.include.retain(|x| !prefix_matches(&prefix, x));
+        v.config.include.push(prefix);
+    }
+    v.storage.save_config(&v.config)
+}
+
+/// `get --from`: add paths of the vault `from`, a target, each given from
+/// that vault's root. This is the form that reaches a remote vault.
+pub fn get_from(opts: &Options, cwd: &Path, paths: &[String], from: &Path) -> Result<Summary> {
+    ensure!(!paths.is_empty(), "no path given");
+    vault_paths(paths)?;
+    {
+        let mut v = Vault::open(opts, cwd, true)?;
+        let target = resolve(Some(&v), from);
+        if url(&target).is_none() {
+            ensure!(
+                !nested(&find_root(&target)?, &v.root),
+                "cannot get files from this vault or a vault inside it"
+            );
+        }
+        include(&mut v, paths.to_vec())?;
+    }
+    run(opts, cwd, from, Mode::Pull)
+}
+
+/// The vault a command acts on: the one `vault` names if given (`--vault`),
+/// otherwise the one here. A remote needs no local vault.
+fn open_vault(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<Vault> {
+    let Some(target) = vault else {
+        return Vault::open(opts, cwd, true);
+    };
+    let local = Vault::open(opts, cwd, true).ok();
+    let target = resolve(local.as_ref(), target);
+    match url(&target) {
+        Some(_) => open_target(opts, local.as_ref(), &target),
+        None => {
+            std::mem::drop(local); // it may be the target, which is locked
+            Vault::open(opts, &target, true)
+        }
+    }
+}
+
+/// List the remotes this vault remembers. Returns them, as printed.
+pub fn remotes(opts: &Options, cwd: &Path) -> Result<Vec<(String, String)>> {
+    let v = Vault::open(opts, cwd, true)?;
+    for (name, location) in &v.config.remotes {
+        let message = Message::Remote {
+            name: name.clone(),
+            location: location.clone(),
+        };
+        print_stdout(&message, opts.json);
+    }
+    Ok(v.config.remotes.into_iter().collect())
+}
+
+/// Remember the vault at `location`, a URL or a path, under `name` or its
+/// own nickname. Returns the name.
+pub fn remote_add(
+    opts: &Options,
+    cwd: &Path,
+    location: &str,
+    name: Option<String>,
+    save_key: bool,
+) -> Result<String> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    add(opts, &mut v, location, name, save_key)
+}
+
+fn add(
+    opts: &Options,
+    v: &mut Vault,
+    location: &str,
+    name: Option<String>,
+    save_key: bool,
+) -> Result<String> {
+    let (location, config, found) = if location.contains("://") {
+        let (config, found) = find_remote(opts, location)?;
+        (location.to_string(), config, Some(found))
+    } else {
+        let root = resolve_path(Path::new(location))?;
+        ensure!(
+            root.join(".syncit").is_dir(),
+            "{} is not a vault",
+            root.display()
+        );
+        ensure!(!nested(&root, &v.root), "a vault cannot be its own remote");
+        (root.display().to_string(), Config::load(&root)?, None)
+    };
+    let name = name.unwrap_or(config.nickname);
+    ensure!(
+        valid_nickname(&name) && !name.contains('/'),
+        "{name} cannot name a remote: pass --name <name>"
+    );
+    ensure!(
+        !v.config.remotes.contains_key(&name),
+        "{name} is already a remote here: pass --name <name>"
+    );
+    if let Some(found) = found {
+        save_found(opts, &location, found, save_key)?;
+    }
+    v.config.remotes.insert(name.clone(), location.clone());
+    v.storage.save_config(&v.config)?;
+    let message = format!("remote {name}: {location}");
+    print_stdout(&Message::Info { message }, opts.json);
+    Ok(name)
+}
+
+/// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
+/// other vaults on this machine may use them.
+pub fn remote_remove(opts: &Options, cwd: &Path, name: &str) -> Result<()> {
+    let mut v = Vault::open(opts, cwd, true)?;
+    let location = v.config.remotes.remove(name);
+    let location = location.with_context(|| format!("no remote named {name}"))?;
+    v.storage.save_config(&v.config)?;
+    let message = format!("removed remote {name}: {location}");
+    print_stdout(&Message::Info { message }, opts.json);
+    Ok(())
+}
+
+/// A remote's key, found or asked for, and where it came from.
+#[cfg(feature = "remote")]
+type Found = (crate::crypt::Key, crate::keys::Source);
+#[cfg(not(feature = "remote"))]
+type Found = ();
+
+/// The config of the remote at `url`, and its key: found (store.md,
+/// section 8), or else asked for on a terminal.
+#[cfg(feature = "remote")]
+fn find_remote(opts: &Options, url: &str) -> Result<(Config, Found)> {
+    use crate::keys::{self, Source};
+    use std::io::IsTerminal;
+    if let Some(phrase) = &opts.secret_key {
+        keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
+    }
+    let settings = crate::remote::credentials(opts, url)?;
+    let bucket = crate::remote::Bucket::new(url, settings)?;
+    let check = bucket.check()?;
+    let found = match keys::find(opts, url, &check) {
+        Ok(found) => found,
+        Err(e) if !std::io::stdin().is_terminal() => return Err(e),
+        Err(_) => (keys::prompt(url, &check)?, Source::New),
+    };
+    Ok((crate::remote::read_config(&bucket, &found.0)?, found))
+}
+
+#[cfg(not(feature = "remote"))]
+fn find_remote(_opts: &Options, _url: &str) -> Result<(Config, Found)> {
+    Err(no_remote())
+}
+
+#[cfg(feature = "remote")]
+fn save_found(opts: &Options, url: &str, found: Found, save: bool) -> Result<()> {
+    crate::keys::save(opts, url, &found.0, found.1, save)
+}
+
+#[cfg(not(feature = "remote"))]
+fn save_found(_: &Options, _: &str, _: Found, _: bool) -> Result<()> {
+    Ok(())
 }
 
 /// Move files to another vault: push to it, confirm each file arrived, then
@@ -632,7 +976,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
         ensure!(
             refused.is_empty(),
             "nothing moved: {} {verb} {}",
-            t.root.display(),
+            t.name,
             refused.join(", ")
         );
     }
@@ -641,7 +985,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     let arrived = |p: &&String| {
         t.dirstate.rows.get(*p).map(|row| &row.hash) == Some(&v.dirstate.rows[*p].hash)
     };
-    let target = t.root.display().to_string();
+    let target = t.name.clone();
     let missing: Vec<String> = present
         .iter()
         .filter(|p| !arrived(p))
@@ -660,6 +1004,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     );
 
     remove_here(opts, &mut v, prefixes, present, "moved", &mut sum)?;
+    report(opts, [&v, &t]);
     Ok(sum)
 }
 
@@ -688,12 +1033,11 @@ pub fn drop(
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
     let present: Vec<String> = v.dirstate.rows.keys().filter(under).cloned().collect();
     if !force {
-        let blobs = v.dot().join("blobs");
         let elsewhere = |hash: &String| {
-            blobs.join(hash).exists()
+            v.storage.has_blob(hash)
                 || check.as_ref().is_some_and(|c| {
                     c.dirstate.rows.values().any(|row| &row.hash == hash)
-                        || c.dot().join("blobs").join(hash).exists()
+                        || c.storage.has_blob(hash)
                 })
         };
         let sole: Vec<&str> = present
@@ -731,7 +1075,7 @@ fn remove_here(
         v.config.exclude.push(prefix);
     }
     if !opts.dry_run {
-        v.config.save(&v.root)?;
+        v.storage.save_config(&v.config)?;
     }
     // Rows go before files: a file with no row gets one again at the next
     // scan, but a row with no file would be recorded as a deletion.
@@ -1036,8 +1380,13 @@ pub enum Setting {
 
 /// Print this vault's settings, after changing one if asked. Returns the
 /// config as it now is.
-pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Config> {
-    let mut v = Vault::open(opts, cwd, true)?;
+pub fn config(
+    opts: &Options,
+    cwd: &Path,
+    vault: Option<&Path>,
+    change: Option<Setting>,
+) -> Result<Config> {
+    let mut v = open_vault(opts, cwd, vault)?;
     let changed = change.is_some();
     match change {
         Some(Setting::KeepHistory(depth)) => v.config.keep_history = depth,
@@ -1051,7 +1400,7 @@ pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Con
         }
         None => {}
     }
-    v.config.save(&v.root)?;
+    v.storage.save_config(&v.config)?;
     let depth = v.config.keep_history;
     let auto = v.config.autocompact;
     let settings = [
@@ -1066,7 +1415,8 @@ pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Con
         print_stdout(&Message::Setting { name, value }, opts.json);
     }
     // Say what a change is about to cost, at the moment it is made.
-    let beyond = droppable(&v)?.len();
+    let keep = v.log.keep(v.config.keep_history, |_| true);
+    let beyond = v.storage.drop_blobs_except(&keep, true)?.0;
     if changed && beyond > 0 {
         let by = match auto {
             true => "the next sync or snapshot drops",

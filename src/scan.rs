@@ -6,7 +6,7 @@ use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
 use crate::output::{Options, warn};
 use crate::segment;
-use crate::vault::{TMP_PREFIX, Vault, write_atomic};
+use crate::vault::{TMP_PREFIX, Vault};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
@@ -26,6 +26,9 @@ pub struct Scan {
 /// Scan the vault. A dry scan writes nothing: the vault value is brought up
 /// to date in memory only.
 pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
+    if v.bare {
+        return Ok(Scan::default()); // no working folder
+    }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let (mut files, mut odd) = (BTreeSet::new(), 0);
     walk(opts, v, &v.root, "", dry, &mut files, &mut odd)?;
@@ -158,13 +161,13 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     // sees the same difference and writes the same entries again.
     if !out.entries.is_empty() && !dry {
         let (name, bytes) = segment::encode(&v.config.nickname, &out.entries);
-        write_atomic(&v.root, &v.dot().join("log").join(name), &bytes)?;
+        v.storage.write_segment(&name, &bytes)?;
     }
     for e in &out.entries {
         v.log.add(e.clone(), &v.config.nickname);
     }
     if config != v.config && !dry {
-        config.save(&v.root)?;
+        v.storage.save_config(&config)?;
     }
     v.config = config;
     dirstate.scanned = now;

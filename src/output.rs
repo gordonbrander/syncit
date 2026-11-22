@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::fmt::{self, Display};
 
 /// Settings for the whole process, passed to everything.
+#[derive(Clone)]
 pub struct Options {
     /// Print JSON Lines instead of text.
     pub json: bool,
@@ -13,6 +14,20 @@ pub struct Options {
     pub dry_run: bool,
     /// Keep files the log says are deleted, and record them as re-created.
     pub no_remove: bool,
+    /// A remote vault's secret key, as its 24 words: `SYNCIT_SECRET_KEY`.
+    /// Read by `main`; the library never reads the environment for it.
+    pub secret_key: Option<String>,
+    /// The user's syncit folder, which holds `credentials.toml` and
+    /// `secrets.toml`. Found by `main`; tests leave it out.
+    pub config_dir: Option<std::path::PathBuf>,
+}
+
+/// The user's syncit folder: under `$XDG_CONFIG_HOME`, else `~/.config`.
+pub fn config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|h| h.join(".config")))
+        .map(|dir| dir.join("syncit"))
 }
 
 /// Something that happened to one file.
@@ -134,6 +149,11 @@ pub enum Message {
         name: &'static str,
         value: String,
     },
+    /// A vault this one remembers, in `remotes`.
+    Remote {
+        name: String,
+        location: String,
+    },
     /// The vaults that recorded the current version of a file.
     Blame {
         path: String,
@@ -217,6 +237,7 @@ impl Display for Message {
             }
             Message::State(h) => write!(f, "{}", h.row(0)),
             Message::Setting { name, value } => write!(f, "{name}: {value}"),
+            Message::Remote { name, location } => write!(f, "{name} {location}"),
             Message::Blame { path, nicknames } => write!(f, "{} {path}", nicknames.join(",")),
             Message::Info { message } => write!(f, "{message}"),
             Message::Warning { message } => write!(f, "warning: {message}"),

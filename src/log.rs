@@ -3,10 +3,9 @@
 use crate::entry::{Entry, Id};
 use crate::output::{Options, warn};
 use crate::segment;
-use anyhow::{Context, Result, bail};
+use crate::storage::Storage;
+use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::Path;
 
 #[derive(Default)]
 pub struct Log {
@@ -52,21 +51,19 @@ impl Log {
         self.entries.insert(id, entry);
     }
 
-    /// Read every segment in `dir`. A bad segment is an error when `strict`
-    /// (this vault's own log) and is ignored with a warning otherwise (a
-    /// peer's log, which is not trusted).
-    pub fn load(opts: &Options, dir: &Path, strict: bool) -> Result<Log> {
+    /// Read every segment in `storage`. A bad segment is an error when
+    /// `strict` (this vault's own log) and is ignored with a warning otherwise
+    /// (a peer's log, which is not trusted).
+    pub fn load(opts: &Options, storage: &dyn Storage, strict: bool) -> Result<Log> {
         let mut log = Log::default();
-        for file in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
-            let file = file?.path();
-            let name = file.file_name().unwrap_or_default().to_string_lossy();
-            let segment = fs::read(&file)
-                .map_err(anyhow::Error::from)
+        for name in storage.segment_names()? {
+            let segment = storage
+                .read_segment(&name)
                 .and_then(|bytes| segment::decode(&name, &bytes));
             match segment {
                 Ok(s) => s.entries.into_iter().for_each(|e| log.add(e, &s.nickname)),
-                Err(e) if strict => bail!("corrupt segment {}: {e:#}", file.display()),
-                Err(e) => warn(opts, format!("ignoring segment {}: {e:#}", file.display())),
+                Err(e) if strict => bail!("corrupt segment {name}: {e:#}"),
+                Err(e) => warn(opts, format!("ignoring segment {name}: {e:#}")),
             }
         }
         Ok(log)

@@ -4,8 +4,10 @@ use crate::config::{Config, prefix_matches};
 use crate::dirstate::Dirstate;
 use crate::log::Log;
 use crate::output::{Event, Message, Options, Summary, print_stdout};
+use crate::storage::{Dir, Storage};
 use anyhow::{Context, Result, anyhow, ensure};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +16,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const TMP_PREFIX: &str = ".syncit-tmp-";
 
 pub struct Vault {
+    /// The working folder; empty for a bare vault.
     pub root: PathBuf,
+    /// Where the vault is, for people: its folder or URL.
+    pub name: String,
+    /// Bare: no working folder. Its current versions are in its storage,
+    /// and its dirstate is derived from its log and the blobs it holds.
+    pub bare: bool,
+    /// Its config, log and blobs.
+    pub storage: Box<dyn Storage>,
+    /// Scratch space for files in transit.
+    pub tmp: PathBuf,
     /// In a run with a peer, `->` for our vault and `<-` for theirs.
     pub side: &'static str,
     pub config: Config,
@@ -23,7 +35,18 @@ pub struct Vault {
     pub ignore: Ignore,
     /// Hash to working files that may have it. A hint: every use is verified.
     pub hints: HashMap<String, Vec<PathBuf>>,
-    _lock: File,
+    /// What a run moved to and from this vault's storage.
+    pub traffic: RefCell<Traffic>,
+    _lock: Option<File>,
+}
+
+/// Blob hashes and segment names, sent to a vault or received from it.
+#[derive(Default)]
+pub struct Traffic {
+    pub sent_files: BTreeSet<String>,
+    pub sent_segments: BTreeSet<String>,
+    pub received_files: BTreeSet<String>,
+    pub received_segments: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -123,7 +146,8 @@ impl Vault {
             .open(dot.join("lock"))?;
         lock.try_lock()
             .map_err(|_| anyhow!("vault is in use: {}", root.display()))?;
-        let config = Config::load(&root)?;
+        let storage = Dir::new(&root);
+        let config = storage.load_config()?;
         ensure!(
             config.syncit == 1,
             "{} has format version {}, not 1",
@@ -134,14 +158,19 @@ impl Vault {
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
-            log: Log::load(opts, &dot.join("log"), local)?,
+            log: Log::load(opts, &storage, local)?,
+            name: root.display().to_string(),
+            bare: false,
+            traffic: RefCell::default(),
+            storage: Box::new(storage),
+            tmp: dot.join("tmp"),
             side: "",
             hints: HashMap::new(),
             root,
             config,
             dirstate,
             ignore,
-            _lock: lock,
+            _lock: Some(lock),
         };
         for (path, row) in &vault.dirstate.rows {
             vault
@@ -151,6 +180,67 @@ impl Vault {
                 .push(vault.root.join(path));
         }
         Ok(vault)
+    }
+
+    /// Open the remote vault at `url` for a command run in `local`, if
+    /// there is one: it finds the key there, and moves files through its
+    /// `.syncit/tmp`. A remote is bare and is not locked.
+    #[cfg(feature = "remote")]
+    pub fn open_url(opts: &Options, url: &str, local: Option<&Vault>) -> Result<Vault> {
+        use crate::remote::{Bucket, Remote, credentials};
+        let root = local.map(|v| v.root.as_path());
+        let bucket = Bucket::new(url, credentials(opts, url)?)?;
+        let check = bucket.check()?;
+        let (key, _) = crate::keys::find(opts, url, &check)?;
+        let storage = Remote::open(bucket, key, root.map(Dir::new))?;
+        let config = storage.load_config()?;
+        ensure!(
+            config.syncit == 1,
+            "{url} has format version {}, not 1",
+            config.syncit
+        );
+        let mut vault = Vault {
+            root: PathBuf::new(),
+            name: url.to_string(),
+            bare: true,
+            log: Log::load(opts, &storage, false)?,
+            storage: Box::new(storage),
+            tmp: local.map(|v| v.tmp.clone()).unwrap_or_default(),
+            side: "",
+            config,
+            dirstate: Dirstate::default(),
+            ignore: Ignore::default(),
+            hints: HashMap::new(),
+            traffic: RefCell::default(),
+            _lock: None,
+        };
+        vault.derive(|v, hash| v.storage.has_blob(hash));
+        Ok(vault)
+    }
+
+    /// A bare vault's dirstate (store.md, section 7): a row for each path it
+    /// takes whose winner is a live entry with a `stored` blob.
+    pub fn derive(&mut self, stored: impl Fn(&Vault, &str) -> bool) {
+        let mut rows = std::collections::BTreeMap::new();
+        for path in self.log.paths.keys().filter(|p| self.takes(p)) {
+            let crate::log::PathState::Resolved { winner, .. } = self.log.resolve(path) else {
+                continue;
+            };
+            let e = &self.log.entries[&winner];
+            if let Some(hash) = &e.hash
+                && stored(self, hash)
+            {
+                let row = crate::dirstate::Row {
+                    size: 0,
+                    mtime: e.mtime,
+                    exec: e.exec,
+                    hash: hash.clone(),
+                    base: vec![winner],
+                };
+                rows.insert(path.clone(), row);
+            }
+        }
+        self.dirstate.rows = rows;
     }
 
     pub fn dot(&self) -> PathBuf {
@@ -172,7 +262,7 @@ impl Vault {
     ) {
         let event = Event {
             kind,
-            vault: self.root.display().to_string(),
+            vault: self.name.clone(),
             path: path.to_string(),
             note: note.to_string(),
             side: self.side,

@@ -226,11 +226,57 @@ fn cli_smoke() {
     assert_eq!(code, 0);
     for command in [
         "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "cp", "drop",
-        "blame", "log", "restore", "config",
+        "blame", "log", "restore", "config", "remote",
     ] {
         assert!(
             help.lines().any(|l| l.trim_start().starts_with(command)),
             "{command} is missing from --help"
         );
+    }
+
+    // A remote vault, with the key in the environment.
+    #[cfg(feature = "remote")]
+    {
+        let key = zeroize::Zeroizing::new([5u8; 32]);
+        let phrase = syncit::keys::phrase(&key).to_string();
+        let keyed = |dir: &Path, args: &[&str]| {
+            let out = Command::new(env!("CARGO_BIN_EXE_syncit"))
+                .args(args)
+                .current_dir(dir)
+                .env("SYNCIT_SECRET_KEY", &phrase)
+                .output()
+                .unwrap();
+            let text = |b: Vec<u8>| String::from_utf8(b).unwrap();
+            (
+                out.status.code().unwrap(),
+                text(out.stdout),
+                text(out.stderr),
+            )
+        };
+        let r = tmp.path().join("r");
+        fs::create_dir(&r).unwrap();
+        let url = format!("file://{}", r.display());
+        let (code, out, err) = keyed(&a, &["init", &url]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out, format!("Vault initialized: {url}\nNickname: origin\n"));
+        assert!(!out.contains("Secret key"), "a given key is not printed");
+        assert_eq!(keyed(&a, &["remote"]).1, "");
+        let (code, out, err) = keyed(&a, &["remote", "add", &url]);
+        assert_eq!((code, out), (0, format!("remote origin: {url}\n")), "{err}");
+        assert_eq!(keyed(&a, &["remote"]).1, format!("origin {url}\n"));
+        let (code, out, err) = keyed(&a, &["sync", "origin"]);
+        assert_eq!(code, 2, "a's conflict is still open: {out}{err}");
+        assert!(
+            out.contains(&format!(" segments to {url}\n")) && out.contains("\nsent "),
+            "{out}"
+        );
+        let (code, out, _) = keyed(&a, &["status", "--vs", "origin", "d"]);
+        assert_eq!((code, out.as_str()), (0, ""));
+        let (code, _, err) = keyed(&a, &["remote", "remove", "origin"]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(keyed(&a, &["remote"]).1, "");
+        let (code, _, err) = keyed(&a, &["sync", "origin"]);
+        assert!(code == 1 && err.contains("no vault at origin"), "{err}");
+        assert!(!err.contains(&phrase));
     }
 }

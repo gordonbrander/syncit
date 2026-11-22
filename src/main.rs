@@ -17,13 +17,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Make a folder a vault
+    /// Make a folder a vault, or make a remote vault at a URL
     Init {
+        /// A folder, or a URL such as s3://bucket/prefix
         #[arg(default_value = ".")]
-        dir: PathBuf,
+        dir: String,
+        /// A remote vault's nickname [default: origin]
+        #[arg(long)]
+        nickname: Option<String>,
+        /// Save a new remote's key in ~/.config/syncit/secrets.toml if there is no keychain
+        #[arg(long)]
+        save_key: bool,
     },
     /// Create a vault from another vault, or from a sub-folder of one
-    Clone { src: PathBuf, dir: PathBuf },
+    Clone {
+        /// A vault's folder or a folder in one, or a URL
+        src: PathBuf,
+        dir: PathBuf,
+        /// Include only this path, from the vault's root; may be repeated
+        #[arg(long, value_name = "PATH")]
+        only: Vec<String>,
+        /// Save a remote's key in ~/.config/syncit/secrets.toml if there is no keychain
+        #[arg(long)]
+        save_key: bool,
+    },
     /// Sync both ways with another vault
     Sync {
         vault: PathBuf,
@@ -60,6 +77,10 @@ enum Command {
     Get {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        /// The vault to get them from: a path, URL or remote name. The paths
+        /// are then from its root
+        #[arg(long, value_name = "VAULT")]
+        from: Option<PathBuf>,
     },
     /// Move files to another vault: send them, check they arrived, remove them here
     Move {
@@ -140,12 +161,39 @@ With --vs there are two marks and two words: ours first, theirs second.")]
         /// Show what would happen; change nothing
         #[arg(long)]
         dry_run: bool,
+        /// Compact this vault instead: a path, URL or remote name
+        #[arg(long, value_name = "VAULT")]
+        vault: Option<PathBuf>,
     },
     /// Show this vault's settings, or change one
     Config {
+        /// Act on this vault instead: a path, URL or remote name
+        #[arg(long, value_name = "VAULT")]
+        vault: Option<PathBuf>,
         #[command(subcommand)]
         setting: Option<SettingArg>,
     },
+    /// List the vaults this one remembers by name, or add or remove one
+    Remote {
+        #[command(subcommand)]
+        action: Option<RemoteArg>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteArg {
+    /// Remember a vault by name: a URL, or a vault's folder
+    Add {
+        location: String,
+        /// The name to use [default: the vault's own nickname]
+        #[arg(long)]
+        name: Option<String>,
+        /// Save a remote's key in ~/.config/syncit/secrets.toml if there is no keychain
+        #[arg(long)]
+        save_key: bool,
+    },
+    /// Forget a remote; nothing in it is touched
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -190,7 +238,7 @@ fn main() {
         | Command::Pull { dry_run, .. }
         | Command::Move { dry_run, .. }
         | Command::Cp { dry_run, .. }
-        | Command::Compact { dry_run }
+        | Command::Compact { dry_run, .. }
         | Command::Drop { dry_run, .. } => dry_run,
         _ => false,
     };
@@ -204,11 +252,30 @@ fn main() {
         json: cli.json,
         dry_run,
         no_remove,
+        secret_key: std::env::var("SYNCIT_SECRET_KEY").ok(),
+        config_dir: syncit::output::config_dir(),
     };
     // Commands that run a sync return a summary, printed last.
     let result = match cli.command {
-        Command::Init { dir } => commands::init(opts, &dir).map(|_| None),
-        Command::Clone { src, dir } => commands::clone(opts, &src, &dir).map(Some),
+        Command::Init {
+            dir,
+            nickname,
+            save_key,
+        } if dir.contains("://") => {
+            commands::init_remote(opts, &dir, nickname, save_key).map(|_| None)
+        }
+        Command::Init {
+            nickname: Some(_), ..
+        } => Err(anyhow::anyhow!(
+            "--nickname is for a remote vault; see `syncit config nickname`"
+        )),
+        Command::Init { dir, .. } => commands::init(opts, Path::new(&dir)).map(|_| None),
+        Command::Clone {
+            src,
+            dir,
+            only,
+            save_key,
+        } => commands::clone(opts, cwd, &src, &dir, &only, save_key).map(Some),
         Command::Sync { vault, .. } => commands::sync(opts, cwd, &vault).map(Some),
         Command::Push { vault, .. } => commands::push(opts, cwd, &vault).map(Some),
         Command::Pull { vault, .. } => commands::pull(opts, cwd, &vault).map(Some),
@@ -216,7 +283,18 @@ fn main() {
         Command::Status { paths, vs, all } => {
             commands::status(opts, cwd, &paths, vs.as_deref(), all).map(|_| None)
         }
-        Command::Get { paths } => commands::get(opts, cwd, &paths).map(Some),
+        Command::Get {
+            paths,
+            from: Some(from),
+        } => {
+            let paths: Option<Vec<String>> =
+                paths.iter().map(|p| p.to_str().map(String::from)).collect();
+            match paths {
+                Some(paths) => commands::get_from(opts, cwd, &paths, &from).map(Some),
+                None => Err(anyhow::anyhow!("a path is not UTF-8")),
+            }
+        }
+        Command::Get { paths, from: None } => commands::get(opts, cwd, &paths).map(Some),
         Command::Move { paths, vault, .. } => {
             commands::move_to(opts, cwd, &paths, &vault).map(Some)
         }
@@ -234,14 +312,28 @@ fn main() {
             hash,
             in_place,
         } => commands::restore(opts, cwd, &path, &hash, in_place).map(|_| None),
-        Command::Compact { .. } => commands::compact(opts, cwd).map(|_| None),
-        Command::Config { setting } => {
+        Command::Compact { vault, .. } => {
+            commands::compact(opts, cwd, vault.as_deref()).map(|_| None)
+        }
+        Command::Remote { action: None } => commands::remotes(opts, cwd).map(|_| None),
+        Command::Remote {
+            action:
+                Some(RemoteArg::Add {
+                    location,
+                    name,
+                    save_key,
+                }),
+        } => commands::remote_add(opts, cwd, &location, name, save_key).map(|_| None),
+        Command::Remote {
+            action: Some(RemoteArg::Remove { name }),
+        } => commands::remote_remove(opts, cwd, &name).map(|_| None),
+        Command::Config { vault, setting } => {
             let change = setting.map(|setting| match setting {
                 SettingArg::KeepHistory { value } => Setting::KeepHistory(value.0),
                 SettingArg::Autocompact { value } => Setting::Autocompact(value == "on"),
                 SettingArg::Nickname { value } => Setting::Nickname(value),
             });
-            commands::config(opts, cwd, change).map(|_| None)
+            commands::config(opts, cwd, vault.as_deref(), change).map(|_| None)
         }
     };
     match result {

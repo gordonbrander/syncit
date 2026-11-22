@@ -3,6 +3,7 @@
 use crate::vault::write_atomic;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -21,6 +22,9 @@ pub struct Config {
     /// A label for this vault, written into every segment it records. Not
     /// unique and not an identity: `blame` shows it, and nothing else reads it.
     pub nickname: String,
+    /// This vault's address book: nickname to location, a URL or the
+    /// absolute path of a vault. Nothing else reads it.
+    pub remotes: BTreeMap<String, String>,
 }
 
 /// A vault's first nickname: its folder's name, made a valid nickname.
@@ -60,6 +64,7 @@ impl Config {
             keep_history: Some(1),
             autocompact: true,
             nickname,
+            remotes: BTreeMap::new(),
         }
     }
 

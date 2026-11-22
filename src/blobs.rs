@@ -32,7 +32,7 @@ pub fn hash_file(file: &Path) -> io::Result<String> {
 
 /// Copy `src` to `dest` while hashing. On a wrong hash or an unreadable
 /// source, `dest` is removed and the answer is false.
-fn copy_verified(src: &Path, dest: &Path, hash: &str) -> io::Result<bool> {
+pub(crate) fn copy_verified(src: &Path, dest: &Path, hash: &str) -> io::Result<bool> {
     let Ok(mut input) = File::open(src) else {
         return Ok(false);
     };
@@ -55,34 +55,56 @@ fn copy_verified(src: &Path, dest: &Path, hash: &str) -> io::Result<bool> {
     Ok(false)
 }
 
+/// The vaults a run can take content from, in order: this one, then the peer.
+fn vaults<'a>(v: &'a Vault, peer: Option<&'a Vault>) -> impl Iterator<Item = &'a Vault> {
+    [Some(v), peer].into_iter().flatten()
+}
+
+fn hints<'a>(v: &'a Vault, hash: &str) -> impl Iterator<Item = &'a PathBuf> {
+    v.hints.get(hash).into_iter().flatten()
+}
+
+/// Note a blob taken from a bare peer's storage, for the report of a run.
+fn received(peer: Option<&Vault>, vault: &Vault, hash: &str) {
+    if peer.is_some_and(|p| std::ptr::eq(p, vault)) && vault.bare {
+        let mut traffic = vault.traffic.borrow_mut();
+        traffic.received_files.insert(hash.to_string());
+    }
+}
+
 /// Copy the blob to `dest` from the first source that yields the right
-/// bytes: this vault's files, its stored blobs, the peer's files, the peer's
-/// stored blobs. False means no source has it, which is not an error.
+/// bytes: this vault's files, its storage, the peer's files, the peer's
+/// storage. False means no source has it, which is not an error.
 pub fn fetch(v: &Vault, peer: Option<&Vault>, hash: &str, dest: &Path) -> io::Result<bool> {
-    for src in sources(v, peer, hash) {
-        if copy_verified(&src, dest, hash)? {
+    for vault in vaults(v, peer) {
+        for src in hints(vault, hash) {
+            if copy_verified(src, dest, hash)? {
+                return Ok(true);
+            }
+        }
+        if vault.storage.get_blob(hash, dest)? {
+            received(peer, vault, hash);
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn sources(v: &Vault, peer: Option<&Vault>, hash: &str) -> Vec<PathBuf> {
-    let mut sources: Vec<PathBuf> = vec![];
-    for vault in [Some(v), peer].into_iter().flatten() {
-        sources.extend(vault.hints.get(hash).into_iter().flatten().cloned());
-        sources.push(vault.dot().join("blobs").join(hash));
-    }
-    sources
-}
-
 /// The blob's bytes, from the first source that yields them and is no larger
 /// than `max`. Nothing is written, so a dry run reads as a real one does.
 pub fn read(v: &Vault, peer: Option<&Vault>, hash: &str, max: u64) -> Option<Vec<u8>> {
-    sources(v, peer, hash).into_iter().find_map(|src| {
-        let small = src.metadata().is_ok_and(|m| m.is_file() && m.len() <= max);
-        let bytes = small.then(|| fs::read(&src).ok()).flatten()?;
-        (sha256(&bytes) == hash).then_some(bytes)
+    vaults(v, peer).find_map(|vault| {
+        let file = hints(vault, hash).find_map(|src| {
+            let small = src.metadata().is_ok_and(|m| m.is_file() && m.len() <= max);
+            let bytes = small.then(|| fs::read(src).ok()).flatten()?;
+            (sha256(&bytes) == hash).then_some(bytes)
+        });
+        let stored = || {
+            let bytes = vault.storage.read_blob(hash, max)?;
+            received(peer, vault, hash);
+            Some(bytes)
+        };
+        file.or_else(stored)
     })
 }
 
@@ -90,60 +112,58 @@ pub fn read(v: &Vault, peer: Option<&Vault>, hash: &str, max: u64) -> Option<Vec
 // ponytail: checks that a source exists, not its bytes; a corrupt source
 // reads as available here and as pending in the real run. Hash it if that matters.
 pub fn available(v: &Vault, peer: Option<&Vault>, hash: &str) -> bool {
-    sources(v, peer, hash).iter().any(|src| src.is_file())
+    vaults(v, peer).any(|vault| {
+        let stored = || {
+            let has = vault.storage.has_blob(hash);
+            if has {
+                received(peer, vault, hash);
+            }
+            has
+        };
+        hints(vault, hash).any(|src| src.is_file()) || stored()
+    })
 }
 
-/// Collect into `.syncit/blobs/` every version this vault keeps
+/// Put into the vault's storage every version this vault keeps
 /// (`Log::keep`) that a source can supply, for the paths it takes: a partial
 /// vault does not gather the content of files it has chosen not to have. A
-/// vault that keeps no history collects nothing, and so does a dry run.
-pub fn retain(opts: &Options, v: &Vault, peer: Option<&Vault>) -> Result<()> {
-    if v.config.keep_history == Some(0) || opts.dry_run {
-        return Ok(());
-    }
-    let blobs = v.dot().join("blobs");
-    fs::create_dir_all(&blobs)?;
-    fs::create_dir_all(v.dot().join("tmp"))?;
-    for hash in &v.log.keep(v.config.keep_history, |path| v.takes(path)) {
-        if blobs.join(hash).exists() {
-            continue;
+/// vault with a working folder that keeps no history collects nothing, and
+/// a dry run stores nothing. A bare vault's dirstate is derived afresh.
+pub fn retain(opts: &Options, v: &mut Vault, peer: Option<&Vault>) -> Result<()> {
+    let keep = v.log.keep(v.config.keep_history, |path| v.takes(path));
+    let missing = keep.iter().filter(|hash| !v.storage.has_blob(hash));
+    if opts.dry_run && v.bare {
+        let sending = missing.filter(|hash| available(v, peer, hash));
+        let sending: Vec<String> = sending.cloned().collect();
+        v.traffic.borrow_mut().sent_files.extend(sending);
+    } else if !opts.dry_run && (v.bare || v.config.keep_history != Some(0)) {
+        fs::create_dir_all(&v.tmp)?;
+        let missing: Vec<&String> = missing.collect();
+        for hash in missing {
+            let tmp = v.tmp.join(unique());
+            if fetch(v, peer, hash, &tmp)? {
+                v.storage.put_blob(hash, &tmp)?;
+                if v.bare {
+                    v.traffic.borrow_mut().sent_files.insert(hash.clone());
+                }
+            }
         }
-        let tmp = v.dot().join("tmp").join(unique());
-        if fetch(v, peer, hash, &tmp)? {
-            fs::rename(&tmp, blobs.join(hash))?;
+    }
+    if v.bare {
+        match opts.dry_run {
+            true => v.derive(|v, hash| v.storage.has_blob(hash) || available(v, peer, hash)),
+            false => v.derive(|v, hash| v.storage.has_blob(hash)),
         }
     }
     Ok(())
 }
 
-/// The stored blobs this vault's `keep_history` no longer covers, with their
-/// sizes. Every path counts, taken or not, so the content of a current
+/// Compaction: remove the stored blobs this vault's `keep_history` no longer
+/// covers. Every path counts, taken or not, so the content of a current
 /// version is never among them: a file removed with `drop` may have its only
-/// copy here.
-pub fn droppable(v: &Vault) -> Result<Vec<(PathBuf, u64)>> {
-    let keep = v.log.keep(v.config.keep_history, |_| true);
-    let mut found = vec![];
-    let Ok(dir) = fs::read_dir(v.dot().join("blobs")) else {
-        return Ok(found);
-    };
-    for file in dir {
-        let file = file?;
-        if !keep.contains(file.file_name().to_string_lossy().as_ref()) {
-            found.push((file.path(), file.metadata()?.len()));
-        }
-    }
-    Ok(found)
-}
-
-/// Compaction: remove the droppable blobs. The log is not touched. Returns
-/// how many were removed and their bytes; a dry run removes nothing and
-/// returns the same.
+/// copy here. The log is not touched. Returns how many were removed and
+/// their bytes; a dry run removes nothing and returns the same.
 pub fn compact(opts: &Options, v: &Vault) -> Result<(usize, u64)> {
-    let found = droppable(v)?;
-    if !opts.dry_run {
-        for (file, _) in &found {
-            fs::remove_file(file)?;
-        }
-    }
-    Ok((found.len(), found.iter().map(|(_, size)| size).sum()))
+    let keep = v.log.keep(v.config.keep_history, |_| true);
+    v.storage.drop_blobs_except(&keep, opts.dry_run)
 }
