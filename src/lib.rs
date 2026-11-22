@@ -3,6 +3,8 @@
 pub mod blobs;
 pub mod commands;
 pub mod config;
+#[cfg(feature = "remote")]
+pub mod crypt;
 pub mod dirstate;
 pub mod entry;
 pub mod log;
