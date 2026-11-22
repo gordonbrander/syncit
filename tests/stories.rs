@@ -20,6 +20,7 @@ use syncit::entry::sha256;
 use syncit::log::{Log, PathState};
 use syncit::materialise::{copy_name, materialise};
 use syncit::scan::scan;
+use syncit::storage::Dir;
 use syncit::vault::Vault;
 use tempfile::TempDir;
 
@@ -89,7 +90,7 @@ fn paths(list: &[&str]) -> Vec<PathBuf> {
 }
 
 fn log(dir: &Path) -> Log {
-    Log::load(O, &dir.join(".syncit/log"), true).unwrap()
+    Log::load(O, &Dir::new(dir), true).unwrap()
 }
 
 fn names(dir: &Path) -> BTreeSet<String> {

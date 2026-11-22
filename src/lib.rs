@@ -10,4 +10,5 @@ pub mod materialise;
 pub mod output;
 pub mod scan;
 pub mod segment;
+pub mod storage;
 pub mod vault;

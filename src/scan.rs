@@ -6,7 +6,7 @@ use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
 use crate::output::{Options, warn};
 use crate::segment;
-use crate::vault::{TMP_PREFIX, Vault, write_atomic};
+use crate::vault::{TMP_PREFIX, Vault};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
@@ -158,13 +158,13 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     // sees the same difference and writes the same entries again.
     if !out.entries.is_empty() && !dry {
         let (name, bytes) = segment::encode(&v.config.nickname, &out.entries);
-        write_atomic(&v.root, &v.dot().join("log").join(name), &bytes)?;
+        v.storage.write_segment(&name, &bytes)?;
     }
     for e in &out.entries {
         v.log.add(e.clone(), &v.config.nickname);
     }
     if config != v.config && !dry {
-        config.save(&v.root)?;
+        v.storage.save_config(&config)?;
     }
     v.config = config;
     dirstate.scanned = now;

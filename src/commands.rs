@@ -1,7 +1,7 @@
 //! One function per command. Each prints as it goes; a command that runs a
 //! sync returns a `Summary` for `main` to print last.
 
-use crate::blobs::{self, available, droppable, hash_file, retain};
+use crate::blobs::{self, available, hash_file, retain};
 use crate::config::{Config, default_nickname, prefix_matches};
 use crate::dirstate::is_exec;
 use crate::entry::valid_path;
@@ -12,7 +12,7 @@ use crate::output::{
 };
 use crate::scan::{deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
-use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique, write_atomic};
+use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
 use anyhow::{Context, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -177,7 +177,7 @@ fn exchange(
             opts,
             format!(
                 "{} {verb} {} files ({}); they were not copied",
-                b.root.display(),
+                b.name,
                 files.len(),
                 names.join(", ")
             ),
@@ -280,18 +280,16 @@ fn record(opts: &Options, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary
 /// Take every segment the other vault has and this one lacks. A segment is
 /// validated before it is stored; one that fails is reported and left out.
 pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -> Result<()> {
-    let dir = v.dot().join("log");
-    for file in fs::read_dir(from.dot().join("log"))? {
-        let file = file?;
-        let name = file.file_name().to_string_lossy().into_owned();
-        if dir.join(&name).exists() {
+    let have = v.storage.segment_names()?;
+    for name in from.storage.segment_names()? {
+        if have.contains(&name) {
             continue;
         }
-        let read = fs::read(file.path()).map_err(anyhow::Error::from);
+        let read = from.storage.read_segment(&name);
         match read.and_then(|bytes| Ok((segment::decode(&name, &bytes)?, bytes))) {
             Ok((segment, bytes)) => {
                 if !opts.dry_run {
-                    write_atomic(&v.root, &dir.join(&name), &bytes)?;
+                    v.storage.write_segment(&name, &bytes)?;
                 }
                 for e in segment.entries {
                     v.log.add(e, &segment.nickname);
@@ -351,7 +349,7 @@ fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
             continue;
         }
         let conflict = Message::Conflict {
-            vault: v.root.display().to_string(),
+            vault: v.name.clone(),
             path: path.clone(),
             message,
             side: v.side,
@@ -603,7 +601,7 @@ pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
             v.config.include.retain(|x| !prefix_matches(&prefix, x));
             v.config.include.push(prefix);
         }
-        v.config.save(&v.root)?;
+        v.storage.save_config(&v.config)?;
     }
     run(opts, cwd, &source, Mode::Pull)
 }
@@ -632,7 +630,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
         ensure!(
             refused.is_empty(),
             "nothing moved: {} {verb} {}",
-            t.root.display(),
+            t.name,
             refused.join(", ")
         );
     }
@@ -641,7 +639,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     let arrived = |p: &&String| {
         t.dirstate.rows.get(*p).map(|row| &row.hash) == Some(&v.dirstate.rows[*p].hash)
     };
-    let target = t.root.display().to_string();
+    let target = t.name.clone();
     let missing: Vec<String> = present
         .iter()
         .filter(|p| !arrived(p))
@@ -688,12 +686,11 @@ pub fn drop(
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
     let present: Vec<String> = v.dirstate.rows.keys().filter(under).cloned().collect();
     if !force {
-        let blobs = v.dot().join("blobs");
         let elsewhere = |hash: &String| {
-            blobs.join(hash).exists()
+            v.storage.has_blob(hash)
                 || check.as_ref().is_some_and(|c| {
                     c.dirstate.rows.values().any(|row| &row.hash == hash)
-                        || c.dot().join("blobs").join(hash).exists()
+                        || c.storage.has_blob(hash)
                 })
         };
         let sole: Vec<&str> = present
@@ -731,7 +728,7 @@ fn remove_here(
         v.config.exclude.push(prefix);
     }
     if !opts.dry_run {
-        v.config.save(&v.root)?;
+        v.storage.save_config(&v.config)?;
     }
     // Rows go before files: a file with no row gets one again at the next
     // scan, but a row with no file would be recorded as a deletion.
@@ -1051,7 +1048,7 @@ pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Con
         }
         None => {}
     }
-    v.config.save(&v.root)?;
+    v.storage.save_config(&v.config)?;
     let depth = v.config.keep_history;
     let auto = v.config.autocompact;
     let settings = [
@@ -1066,7 +1063,8 @@ pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Con
         print_stdout(&Message::Setting { name, value }, opts.json);
     }
     // Say what a change is about to cost, at the moment it is made.
-    let beyond = droppable(&v)?.len();
+    let keep = v.log.keep(v.config.keep_history, |_| true);
+    let beyond = v.storage.drop_blobs_except(&keep, true)?.0;
     if changed && beyond > 0 {
         let by = match auto {
             true => "the next sync or snapshot drops",

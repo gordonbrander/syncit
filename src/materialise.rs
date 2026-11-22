@@ -6,7 +6,7 @@ use crate::entry::{Entry, Id, sha256};
 use crate::log::{Loser, PathState};
 use crate::output::{Options, Summary};
 use crate::segment;
-use crate::vault::{TMP_PREFIX, Vault, unique, write_atomic};
+use crate::vault::{TMP_PREFIX, Vault, unique};
 use anyhow::{Context, Result, bail, ensure};
 use std::fs::{self, File};
 use std::io;
@@ -156,7 +156,7 @@ fn one(
             // content that is nowhere. Stopped in between, the next scan
             // records the file as an ordinary edit.
             let (name, bytes) = segment::encode(&v.config.nickname, std::slice::from_ref(&entry));
-            write_atomic(&v.root, &v.dot().join("log").join(name), &bytes)?;
+            v.storage.write_segment(&name, &bytes)?;
             placed
         };
         v.dirstate.deleted.remove(p);

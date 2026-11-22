@@ -4,6 +4,7 @@ use crate::config::{Config, prefix_matches};
 use crate::dirstate::Dirstate;
 use crate::log::Log;
 use crate::output::{Event, Message, Options, Summary, print_stdout};
+use crate::storage::{Dir, Storage};
 use anyhow::{Context, Result, anyhow, ensure};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -14,7 +15,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const TMP_PREFIX: &str = ".syncit-tmp-";
 
 pub struct Vault {
+    /// The working folder.
     pub root: PathBuf,
+    /// Where the vault is, for people: its folder.
+    pub name: String,
+    /// Its config, log and blobs.
+    pub storage: Box<dyn Storage>,
+    /// Scratch space for files in transit.
+    pub tmp: PathBuf,
     /// In a run with a peer, `->` for our vault and `<-` for theirs.
     pub side: &'static str,
     pub config: Config,
@@ -123,7 +131,8 @@ impl Vault {
             .open(dot.join("lock"))?;
         lock.try_lock()
             .map_err(|_| anyhow!("vault is in use: {}", root.display()))?;
-        let config = Config::load(&root)?;
+        let storage = Dir::new(&root);
+        let config = storage.load_config()?;
         ensure!(
             config.syncit == 1,
             "{} has format version {}, not 1",
@@ -134,7 +143,10 @@ impl Vault {
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
-            log: Log::load(opts, &dot.join("log"), local)?,
+            log: Log::load(opts, &storage, local)?,
+            name: root.display().to_string(),
+            storage: Box::new(storage),
+            tmp: dot.join("tmp"),
             side: "",
             hints: HashMap::new(),
             root,
@@ -172,7 +184,7 @@ impl Vault {
     ) {
         let event = Event {
             kind,
-            vault: self.root.display().to_string(),
+            vault: self.name.clone(),
             path: path.to_string(),
             note: note.to_string(),
             side: self.side,
