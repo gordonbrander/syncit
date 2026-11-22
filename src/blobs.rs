@@ -64,6 +64,14 @@ fn hints<'a>(v: &'a Vault, hash: &str) -> impl Iterator<Item = &'a PathBuf> {
     v.hints.get(hash).into_iter().flatten()
 }
 
+/// Note a blob taken from a bare peer's storage, for the report of a run.
+fn received(peer: Option<&Vault>, vault: &Vault, hash: &str) {
+    if peer.is_some_and(|p| std::ptr::eq(p, vault)) && vault.bare {
+        let mut traffic = vault.traffic.borrow_mut();
+        traffic.received_files.insert(hash.to_string());
+    }
+}
+
 /// Copy the blob to `dest` from the first source that yields the right
 /// bytes: this vault's files, its storage, the peer's files, the peer's
 /// storage. False means no source has it, which is not an error.
@@ -75,6 +83,7 @@ pub fn fetch(v: &Vault, peer: Option<&Vault>, hash: &str, dest: &Path) -> io::Re
             }
         }
         if vault.storage.get_blob(hash, dest)? {
+            received(peer, vault, hash);
             return Ok(true);
         }
     }
@@ -90,7 +99,12 @@ pub fn read(v: &Vault, peer: Option<&Vault>, hash: &str, max: u64) -> Option<Vec
             let bytes = small.then(|| fs::read(src).ok()).flatten()?;
             (sha256(&bytes) == hash).then_some(bytes)
         });
-        file.or_else(|| vault.storage.read_blob(hash, max))
+        let stored = || {
+            let bytes = vault.storage.read_blob(hash, max)?;
+            received(peer, vault, hash);
+            Some(bytes)
+        };
+        file.or_else(stored)
     })
 }
 
@@ -98,26 +112,47 @@ pub fn read(v: &Vault, peer: Option<&Vault>, hash: &str, max: u64) -> Option<Vec
 // ponytail: checks that a source exists, not its bytes; a corrupt source
 // reads as available here and as pending in the real run. Hash it if that matters.
 pub fn available(v: &Vault, peer: Option<&Vault>, hash: &str) -> bool {
-    vaults(v, peer)
-        .any(|vault| hints(vault, hash).any(|src| src.is_file()) || vault.storage.has_blob(hash))
+    vaults(v, peer).any(|vault| {
+        let stored = || {
+            let has = vault.storage.has_blob(hash);
+            if has {
+                received(peer, vault, hash);
+            }
+            has
+        };
+        hints(vault, hash).any(|src| src.is_file()) || stored()
+    })
 }
 
 /// Put into the vault's storage every version this vault keeps
 /// (`Log::keep`) that a source can supply, for the paths it takes: a partial
 /// vault does not gather the content of files it has chosen not to have. A
-/// vault that keeps no history collects nothing, and so does a dry run.
-pub fn retain(opts: &Options, v: &Vault, peer: Option<&Vault>) -> Result<()> {
-    if v.config.keep_history == Some(0) || opts.dry_run {
-        return Ok(());
-    }
-    fs::create_dir_all(&v.tmp)?;
-    for hash in &v.log.keep(v.config.keep_history, |path| v.takes(path)) {
-        if v.storage.has_blob(hash) {
-            continue;
+/// vault with a working folder that keeps no history collects nothing, and
+/// a dry run stores nothing. A bare vault's dirstate is derived afresh.
+pub fn retain(opts: &Options, v: &mut Vault, peer: Option<&Vault>) -> Result<()> {
+    let keep = v.log.keep(v.config.keep_history, |path| v.takes(path));
+    let missing = keep.iter().filter(|hash| !v.storage.has_blob(hash));
+    if opts.dry_run && v.bare {
+        let sending = missing.filter(|hash| available(v, peer, hash));
+        let sending: Vec<String> = sending.cloned().collect();
+        v.traffic.borrow_mut().sent_files.extend(sending);
+    } else if !opts.dry_run && (v.bare || v.config.keep_history != Some(0)) {
+        fs::create_dir_all(&v.tmp)?;
+        let missing: Vec<&String> = missing.collect();
+        for hash in missing {
+            let tmp = v.tmp.join(unique());
+            if fetch(v, peer, hash, &tmp)? {
+                v.storage.put_blob(hash, &tmp)?;
+                if v.bare {
+                    v.traffic.borrow_mut().sent_files.insert(hash.clone());
+                }
+            }
         }
-        let tmp = v.tmp.join(unique());
-        if fetch(v, peer, hash, &tmp)? {
-            v.storage.put_blob(hash, &tmp)?;
+    }
+    if v.bare {
+        match opts.dry_run {
+            true => v.derive(|v, hash| v.storage.has_blob(hash) || available(v, peer, hash)),
+            false => v.derive(|v, hash| v.storage.has_blob(hash)),
         }
     }
     Ok(())

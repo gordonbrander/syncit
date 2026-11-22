@@ -160,15 +160,67 @@ fn nested(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// A target names another vault: a URL, or a path.
+fn url(target: &Path) -> Option<&str> {
+    target.to_str().filter(|t| t.contains("://"))
+}
+
+/// Open the vault a target names, for a command run in `local`.
+fn open_target(opts: &Options, local: Option<&Vault>, target: &Path) -> Result<Vault> {
+    match url(target) {
+        #[cfg(feature = "remote")]
+        Some(url) => Vault::open_url(opts, url, local),
+        #[cfg(not(feature = "remote"))]
+        Some(_) => {
+            let _ = local;
+            Err(no_remote())
+        }
+        None => Vault::open(opts, target, false),
+    }
+}
+
 /// Open another vault for a run with `v`.
-fn other(opts: &Options, v: &mut Vault, path: &Path) -> Result<Vault> {
-    ensure!(
-        !nested(&find_root(path)?, &v.root),
-        "cannot sync a vault with itself or with a vault inside it"
-    );
-    let mut peer = Vault::open(opts, path, false)?;
+fn other(opts: &Options, v: &mut Vault, target: &Path) -> Result<Vault> {
+    if url(target).is_none() {
+        ensure!(
+            !nested(&find_root(target)?, &v.root),
+            "cannot sync a vault with itself or with a vault inside it"
+        );
+    }
+    let mut peer = open_target(opts, Some(v), target)?;
     (v.side, peer.side) = ("->", "<-");
     Ok(peer)
+}
+
+/// After a run, one line for each vault that is remote: what was sent to
+/// it and received from it.
+fn report(opts: &Options, vaults: [&Vault; 2]) {
+    for v in vaults.into_iter().filter(|v| v.bare) {
+        let t = v.traffic.borrow();
+        let lines = [
+            ("send", "sent", "to", &t.sent_files, &t.sent_segments),
+            (
+                "receive",
+                "received",
+                "from",
+                &t.received_files,
+                &t.received_segments,
+            ),
+        ];
+        for (verb, done, to, files, segments) in lines {
+            if files.is_empty() && segments.is_empty() {
+                continue;
+            }
+            let verb = if opts.dry_run {
+                format!("would {verb}")
+            } else {
+                done.into()
+            };
+            let (f, s) = (files.len(), segments.len());
+            let message = format!("{verb} {f} files, {s} segments {to} {}", v.name);
+            print_stdout(&Message::Info { message }, opts.json);
+        }
+    }
 }
 
 /// A run with a peer (SPEC.md section 10). `a` is the local vault.
@@ -182,6 +234,7 @@ fn run(opts: &Options, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
     exchange(opts, &mut a, &mut b, mode, &mut sum)?;
     autocompact(opts, &a)?;
     autocompact(opts, &b)?;
+    report(opts, [&a, &b]);
     Ok(sum)
 }
 
@@ -280,10 +333,10 @@ fn exchange(
     // Both retain before either materialises, so that a version is saved
     // before it is replaced.
     if to_b {
-        retain(opts, b, Some(a))?;
+        retain(opts, b, Some(&*a))?;
     }
     if to_a {
-        retain(opts, a, Some(b))?;
+        retain(opts, a, Some(&*b))?;
     }
     // A merge replaces two versions. It is made only if a vault receiving in
     // this run keeps history: its `retain` above then has them, so they can
@@ -361,6 +414,15 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
             Ok((segment, bytes)) => {
                 if !opts.dry_run {
                     v.storage.write_segment(&name, &bytes)?;
+                }
+                if v.bare {
+                    v.traffic.borrow_mut().sent_segments.insert(name.clone());
+                }
+                if from.bare {
+                    from.traffic
+                        .borrow_mut()
+                        .received_segments
+                        .insert(name.clone());
                 }
                 for e in segment.entries {
                     v.log.add(e, &segment.nickname);
@@ -730,6 +792,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
     );
 
     remove_here(opts, &mut v, prefixes, present, "moved", &mut sum)?;
+    report(opts, [&v, &t]);
     Ok(sum)
 }
 

@@ -26,6 +26,9 @@ pub struct Scan {
 /// Scan the vault. A dry scan writes nothing: the vault value is brought up
 /// to date in memory only.
 pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
+    if v.bare {
+        return Ok(Scan::default()); // no working folder
+    }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let (mut files, mut odd) = (BTreeSet::new(), 0);
     walk(opts, v, &v.root, "", dry, &mut files, &mut odd)?;

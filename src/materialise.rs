@@ -88,6 +88,9 @@ pub fn materialise(
     kept: bool,
     sum: &mut Summary,
 ) -> Result<()> {
+    if v.bare {
+        return Ok(()); // no working folder
+    }
     let paths: Vec<String> = v.log.paths.keys().cloned().collect();
     for path in paths {
         // A path that fails a safety check or hits a filesystem error is

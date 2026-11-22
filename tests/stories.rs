@@ -2058,4 +2058,293 @@ mod remote {
         let err = Bucket::new(&url(&s)).unwrap().check().unwrap_err();
         assert!(err.to_string().contains("format version 2"), "{err}");
     }
+
+    /// The phrase every remote in these tests is made with.
+    fn phrase() -> String {
+        keys::phrase(&zeroize::Zeroizing::new([7u8; 32])).to_string()
+    }
+
+    /// Options with the test phrase.
+    fn o() -> Options {
+        opts(Some(&phrase()))
+    }
+
+    /// A remote vault in the folder `name` of `tmp`: the folder, and the URL
+    /// as a target.
+    fn remote(tmp: &TempDir, name: &str) -> (PathBuf, PathBuf) {
+        let dir = place(tmp, name);
+        cmd::init_remote(&o(), tmp.path(), &url(&dir), None, false).unwrap();
+        (dir.clone(), PathBuf::from(url(&dir)))
+    }
+
+    fn storage(target: &Path) -> Remote {
+        let target = target.to_str().unwrap();
+        let key = keys::parse_phrase(&phrase()).unwrap();
+        Remote::open(Bucket::new(target).unwrap(), key, None).unwrap()
+    }
+
+    fn configure_remote(target: &Path, change: impl FnOnce(&mut Config)) {
+        let r = storage(target);
+        let mut config = r.load_config().unwrap();
+        change(&mut config);
+        r.save_config(&config).unwrap();
+    }
+
+    /// Every file under `dir`, recursively: path to bytes.
+    fn listing(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        all(dir, &mut out);
+        out
+    }
+
+    fn objects(dir: &Path, kind: &str) -> BTreeSet<String> {
+        names(&dir.join(kind))
+    }
+
+    #[test]
+    fn story_c2_sync_through_remote() {
+        let o = &o();
+        let (tmp, a) = vault(&[("notes.txt", "from a"), ("d/shared.txt", "base")]);
+        let (_r, origin) = remote(&tmp, "r");
+        // A vault with no history supplies its current files.
+        no_history(&[&a]);
+        assert_eq!(cmd::push(o, &a, &origin).unwrap().exit_code(), 0);
+
+        let c = tmp.path().join("c");
+        fs::create_dir(&c).unwrap();
+        put(&c, "music/song.mp3", "la", 0);
+        cmd::init(o, &c).unwrap();
+        // a and c never sync with each other.
+        assert_eq!(cmd::sync(o, &c, &origin).unwrap().exit_code(), 0);
+        assert!(is(&c, "notes.txt", "from a") && is(&c, "d/shared.txt", "base"));
+        assert_eq!(cmd::pull(o, &a, &origin).unwrap().exit_code(), 0);
+        assert!(is(&a, "music/song.mp3", "la"));
+        assert_eq!(tree(&a), tree(&c));
+
+        // A conflict, either order: both edit, both sync through the remote.
+        put(&a, "d/shared.txt", "edit in a", 5);
+        put(&c, "d/shared.txt", "edit in c", 6);
+        put(&a, "new-a.txt", "na", 5);
+        put(&c, "new-c.txt", "nc", 5);
+        assert_eq!(cmd::sync(o, &c, &origin).unwrap().exit_code(), 0);
+        assert_eq!(cmd::sync(o, &a, &origin).unwrap().conflicts, 1);
+        assert_eq!(cmd::sync(o, &c, &origin).unwrap().conflicts, 1);
+        assert_eq!(tree(&a), tree(&c));
+        assert!(is(&a, "d/shared.txt", "edit in c"));
+        assert!(is(&a, &copy_of("d/shared.txt", "edit in a"), "edit in a"));
+        assert!(is(&c, "new-a.txt", "na") && is(&a, "new-c.txt", "nc"));
+        // A deletion travels too.
+        fs::remove_file(a.join("notes.txt")).unwrap();
+        cmd::sync(o, &a, &origin).unwrap();
+        cmd::sync(o, &c, &origin).unwrap();
+        assert!(!c.join("notes.txt").exists());
+        assert_eq!(tree(&a), tree(&c));
+    }
+
+    #[test]
+    fn remote_is_opaque() {
+        let o = &o();
+        let (tmp, a) = vault(&[("notes/plan.txt", "a known line of a file\n")]);
+        configure(&a, |c| c.nickname = "deskvault".into());
+        cmd::snapshot(o, &a).unwrap();
+        put(
+            &a,
+            "notes/plan.txt",
+            "a known line of a file\nand another\n",
+            1,
+        );
+        let (r, origin) = remote(&tmp, "r");
+        configure_remote(&origin, |c| c.nickname = "originvault".into());
+        cmd::push(o, &a, &origin).unwrap();
+        let mut hashes: BTreeSet<String> = log(&a).entries.keys().cloned().collect();
+        hashes.extend(log(&a).entries.values().filter_map(|e| e.hash.clone()));
+        hashes.extend(names(&a.join(".syncit/log")));
+        assert!(hashes.len() > 4, "{hashes:?}");
+        let secrets = [
+            "a known line",
+            "notes/plan.txt",
+            "plan.txt",
+            "deskvault",
+            "originvault",
+        ];
+        let found = listing(&r);
+        assert!(found.len() > 5, "{:?}", found.keys());
+        for (path, bytes) in &found {
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                !hashes.contains(name.as_ref()),
+                "{} is a plaintext hash",
+                path.display()
+            );
+            for text in secrets
+                .iter()
+                .copied()
+                .chain(hashes.iter().map(String::as_str))
+            {
+                let text = text.as_bytes();
+                assert!(
+                    !bytes.windows(text.len()).any(|w| w == text),
+                    "{} holds {}",
+                    path.display(),
+                    String::from_utf8_lossy(text)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remote_hostile() {
+        let o = &o();
+        let (tmp, a) = vault(&[("good.txt", "good"), ("cut.bin", &"x".repeat(100_000))]);
+        let (r, origin) = remote(&tmp, "r");
+        cmd::push(o, &a, &origin).unwrap();
+        let key = keys::parse_phrase(&phrase()).unwrap();
+        let logs: Vec<String> = objects(&r, "log").into_iter().collect();
+        // A garbage object, and a valid one copied to another name.
+        fs::write(r.join("log").join("ab".repeat(32)), b"garbage").unwrap();
+        fs::copy(
+            r.join("log").join(&logs[0]),
+            r.join("log").join("cd".repeat(32)),
+        )
+        .unwrap();
+        fs::write(r.join("log/not-a-name"), b"ignored").unwrap();
+        // A truncated blob.
+        let cut = syncit::crypt::name(&key, "blobs", &sha256("x".repeat(100_000).as_bytes()));
+        let blob = r.join("blobs").join(&cut);
+        let bytes = fs::read(&blob).unwrap();
+        fs::write(&blob, &bytes[..bytes.len() - 10]).unwrap();
+
+        let c = tmp.path().join("c");
+        fs::create_dir(&c).unwrap();
+        cmd::init(o, &c).unwrap();
+        let sum = cmd::pull(o, &c, &origin).unwrap();
+        assert_eq!(sum.rejected, 2, "{sum:?}");
+        assert!(sum.has("pending", "cut.bin"), "{sum:?}");
+        assert!(is(&c, "good.txt", "good") && !c.join("cut.bin").exists());
+        assert_eq!(sum.exit_code(), 2);
+        // A garbage config is an error, not a panic.
+        fs::write(r.join("config"), b"garbage").unwrap();
+        assert!(cmd::pull(o, &c, &origin).is_err());
+    }
+
+    #[test]
+    fn move_to_remote() {
+        let o = &o();
+        let (tmp, a) = vault(&[
+            ("keep.txt", "k"),
+            ("big/one.bin", "1"),
+            ("big/two.bin", "2"),
+        ]);
+        let (_r, origin) = remote(&tmp, "r");
+        let (_s, narrow) = remote(&tmp, "s");
+        configure_remote(&narrow, |c| c.include = vec!["keep.txt".into()]);
+        let refused = cmd::move_to(o, &a, &paths(&["big"]), &narrow).unwrap_err();
+        assert!(refused.to_string().contains("excludes"), "{refused}");
+        assert!(is(&a, "big/one.bin", "1"));
+
+        let done = cmd::move_to(o, &a, &paths(&["big"]), &origin).unwrap();
+        assert!(done.has("moved", "big/one.bin") && done.has("moved", "big/two.bin"));
+        assert!(!a.join("big").exists() && is(&a, "keep.txt", "k"));
+        // The remote has their content: a new vault gets them from it.
+        let c = tmp.path().join("c");
+        fs::create_dir(&c).unwrap();
+        cmd::init(o, &c).unwrap();
+        assert_eq!(cmd::pull(o, &c, &origin).unwrap().exit_code(), 0);
+        assert!(is(&c, "big/one.bin", "1") && is(&c, "big/two.bin", "2"));
+        // And a sync does not bring them back here.
+        cmd::sync(o, &a, &origin).unwrap();
+        assert!(!a.join("big").exists());
+    }
+
+    #[test]
+    fn partial_remote() {
+        let o = &o();
+        let (tmp, a) = vault(&[
+            ("docs/a.txt", "a"),
+            ("docs/b.txt", "b"),
+            ("music/m.mp3", "m"),
+        ]);
+        let (r, origin) = remote(&tmp, "r");
+        configure_remote(&origin, |c| c.include = vec!["docs".into()]);
+        cmd::push(o, &a, &origin).unwrap();
+        assert_eq!(objects(&r, "blobs").len(), 2, "only the folder it includes");
+        let va = Vault::open(o, &a, true).unwrap();
+        let vr = Vault::open_url(o, origin.to_str().unwrap(), Some(&va)).unwrap();
+        assert_eq!(cmd::excluded(&va, &vr), ["music/m.mp3"]);
+        assert!(vr.dirstate.rows.contains_key("docs/a.txt"));
+        // A vault that pulls gets only what the remote has.
+        let c = tmp.path().join("c");
+        fs::create_dir(&c).unwrap();
+        cmd::init(o, &c).unwrap();
+        let sum = cmd::pull(o, &c, &origin).unwrap();
+        assert!(
+            is(&c, "docs/a.txt", "a") && !c.join("music").exists(),
+            "{sum:?}"
+        );
+    }
+
+    #[test]
+    fn dry_run_remote() {
+        let o = &o();
+        let dry = &Options {
+            dry_run: true,
+            ..o.clone()
+        };
+        let (tmp, a) = vault(&[("notes.txt", "base"), ("d/both.txt", "base")]);
+        let (r, origin) = remote(&tmp, "r");
+        cmd::push(o, &a, &origin).unwrap();
+        let c = tmp.path().join("c");
+        fs::create_dir(&c).unwrap();
+        cmd::init(o, &c).unwrap();
+        cmd::pull(o, &c, &origin).unwrap();
+        put(&a, "notes.txt", "edited in a", 1);
+        put(&a, "new.txt", "new", 1);
+        put(&c, "d/both.txt", "from c", 2);
+        cmd::sync(o, &c, &origin).unwrap();
+        put(&a, "d/both.txt", "from a", 1);
+
+        let before = (listing(&r), listing(&a));
+        let planned = cmd::sync(dry, &a, &origin).unwrap();
+        assert!(
+            before == (listing(&r), listing(&a)),
+            "a dry run wrote something"
+        );
+        let done = cmd::sync(o, &a, &origin).unwrap();
+        assert!(before != (listing(&r), listing(&a)));
+        assert!(
+            done.conflicts == 1 && done.has("updated", "d/both.txt"),
+            "{done:?}"
+        );
+        assert_eq!(planned, done);
+    }
+
+    #[test]
+    fn status_vs_remote() {
+        let o = &o();
+        let (tmp, a) = vault(&[("same.txt", "s"), ("edit.txt", "e"), ("gone.txt", "g")]);
+        let (_r, origin) = remote(&tmp, "r");
+        let f = tmp.path().join("f");
+        fs::create_dir(&f).unwrap();
+        cmd::init(o, &f).unwrap();
+        configure(&f, |c| c.keep_history = None);
+        cmd::push(o, &a, &origin).unwrap();
+        cmd::push(o, &a, &f).unwrap();
+        put(&a, "edit.txt", "edited", 1);
+        put(&a, "new.txt", "n", 1);
+        fs::remove_file(a.join("gone.txt")).unwrap();
+        for all in [false, true] {
+            let vs_folder = cmd::status(o, &a, &[], Some(&f), all).unwrap();
+            let vs_remote = cmd::status(o, &a, &[], Some(&origin), all).unwrap();
+            assert_eq!(vs_folder, vs_remote);
+            assert!(!vs_remote.is_empty());
+        }
+        // After a sync, the remote is current too.
+        cmd::sync(o, &a, &origin).unwrap();
+        let lines = cmd::status(o, &a, &[], Some(&origin), true).unwrap();
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.ours == "current" && l.theirs == Some("current"))
+        );
+    }
 }

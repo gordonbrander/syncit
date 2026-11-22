@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::fmt::{self, Display};
 
 /// Settings for the whole process, passed to everything.
+#[derive(Clone)]
 pub struct Options {
     /// Print JSON Lines instead of text.
     pub json: bool,
