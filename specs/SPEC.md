@@ -537,7 +537,7 @@ Nothing else changes: materialise finds a file as the winner at those paths.
 
 ## 11. Commands
 
-The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. Remote vaults widen it to a *target*: a path, a URL or a nickname (`store.md`, section 9). That section also specifies `init <url>`, `remote`, `clone <url>`, `get --from`, and `--vault` on `config` and `compact`. Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
+The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. Remote vaults widen it to a *target*: a path, a URL or a nickname (`store.md`, section 9). That section also specifies `init <url>`, `remote`, `clone <url>`, `clone --only`, `get --from`, and `--vault` on `config` and `compact`. Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
 
 | Command | Steps |
 |---|---|
@@ -941,6 +941,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 |---|---|
 | Store | a vault that is bare and remote, not a second kind of thing (`store.md`): one mechanism for keeping history (`R16`) and for syncing through a third place (`R24`). On any object storage the `object_store` crate reaches, and always encrypted (`R28`) |
 | Origin | none. No vault is special and there is no default peer: a command that involves another vault names it, by path, URL or nickname. A vault may remember others in `remotes`, an address book of nickname to location. A folder that moves breaks only its own entry |
+| A partial vault from a store | `clone <vault> <dir> --only <path>`, repeatable, with paths from the vault's root. A URL cannot carry a sub-folder as a path does, so the flag names it. The form that infers the sub-folder from a path stays (`store.md`, section 9) |
 | Reaching a store | with the ordinary commands and a target. No `store` setting and no upload after every run: a command does what its name says, and backing up on a schedule is `push` in cron |
 | Object-store client | the `object_store` crate, driven from a private single-thread async runtime. No external tools. OpenDAL was ruled out because it needs a newer Rust than 1.89 |
 | Store encryption | always on. XChaCha20-Poly1305 in 64 KiB chunks. An object's name is a keyed function of its content's hash, so the provider learns neither the content nor whether a known file is stored |
@@ -965,10 +966,6 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Tie-break timestamp | file mtime |
 | Empty directories | not tracked; directories emptied by a deletion are removed |
 | Cross-path parents | a read rule, not a segment rejection (`CRDT.md` was corrected to match) |
-
-### Still open, to settle before remote vaults are built
-
-- **A partial vault from a remote.** `clone <url>` takes the whole vault, and `get --from` can only add to a vault's filter. Nothing yet makes a new vault that includes one folder of a remote, as `clone` of a sub-folder does for a path (`store.md`, section 1, "Out of scope").
 
 ### Still open, not for version 1
 

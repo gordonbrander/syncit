@@ -30,7 +30,7 @@ Every difference in behaviour must follow from one of the two properties:
 
 Everything else is the same as for any vault: a `config` with `nickname`, `include`, `exclude`, `keep_history` and `autocompact`; a log; blobs; validation of every segment (`CRDT.md`, "Validation") and blob received. The log format does not change.
 
-**Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from the environment). Parallel transfers. A bare vault on a plain local path. Cloning a sub-folder of a remote in one step: `clone <url>` takes the whole vault. For part of one, make a vault with an empty filter and `get <paths> --from <url>`; how that vault is made (a flag on `init`, or `clone` of a sub-path) is left open.
+**Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from the environment). Parallel transfers. A bare vault on a plain local path.
 
 ## 2. Dependencies
 
@@ -75,7 +75,7 @@ These versions and feature names come from documentation read on 2026-11-22. Non
 | `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.storage` |
 | `src/config.rs` | `remotes` |
 | `src/output.rs` | `Options.secret_key` |
-| `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--vault` on `config` and `compact` |
+| `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--only` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
 
 ## 4. The storage trait
 
@@ -264,7 +264,12 @@ read this vault from another computer, and they are not shown again.
 
 A URL with no `format` fails with `no vault at <url>: run syncit init <url>`.
 
-**`syncit clone <url> <dir>`.** Create the vault in `<dir>` as `clone` does, `remote add <url>` in it, then `pull` from it. A clone from a path is unchanged, and now also records the source in `remotes` under its nickname if that name is free.
+**`syncit clone <vault> <dir> [--only <path>]…`.** `<vault>` is a path or a URL. Two forms, told apart by the flag, as for `get`:
+
+- Without `--only`: unchanged for a path. The vault is found by walking up from it, and the new vault includes the sub-folder the path names, or everything if the path is the vault's root. A URL is always a whole vault, so the new vault includes everything.
+- With `--only`, which may be given more than once: `<vault>` is a URL or the root of a vault, and the new vault includes exactly the paths given, each from that vault's root, written with `/` and validated with `entry::valid_path`. A path below a vault's root together with `--only` is an error that says to give the root. This is how part of a remote vault is cloned: `syncit clone s3://bucket/archive ~/Archive --only photos/2024 --only music`.
+
+Either way: create the vault in `<dir>`, record the source in `remotes` under its nickname if that name is free (for a URL this is `remote add`, which finds or asks for the key), then `pull` from it. `get --from` adds more later.
 
 **`syncit get`.** Two forms, told apart by the flag:
 
@@ -311,6 +316,7 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `remote_is_opaque` | no object in the remote's directory contains a known line of a file, a path, a nickname or a plaintext hash, and no object name is a plaintext hash |
 | `remote_hostile` | a garbage object, a valid object copied to another name, and a truncated blob are rejected or left pending; the rest of the run completes |
 | `remote_by_nickname` | `sync origin`, `sync <url>` and `sync ./origin` (a folder) each reach the right vault |
+| `clone_only` | `clone <url> <dir> --only a --only b/c` gives a vault that includes those two paths and has only their files; the same against a folder vault's root; a later `get --from` adds a third; a path below a vault's root with `--only` is refused and nothing is created |
 | `get_from_remote` | a partial vault runs `get music --from origin`; the folder arrives and stays included; nothing else is downloaded. `--from` with a folder vault's path gives the same result as the inferred form |
 | `move_to_remote` | files are removed here only when the remote has their content; a remote that excludes them refuses |
 | `partial_remote` | a remote whose `include` is one folder takes only that folder's blobs, and `push` warns about the rest as it does for a folder |
@@ -329,7 +335,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_env_file`.
 4. **`Remote` and `init <url>`.** The object-store implementation of `Storage`, `format`, the encrypted `config`. Test: `init_remote`.
 5. **Bare vaults in a run.** `Vault.bare`, the derived dirstate, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
-6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `get --from`, `--vault`. Tests: `remote_add`, `remote_by_nickname`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
+6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`. Tests: `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
 7. **A real bucket.** Run `cloud_remote` against MinIO or a real bucket and fix what differs from `file://`.
 8. **Documents.** `SPEC.md`, `PRD.md` and `CRDT.md` already describe this design as not built. When it is built: in `SPEC.md`, remove the "Not built" notes in sections 8, 10 and 14, tick milestone 9, drop the "not built yet" entry in section 17 and record there anything built differently; in `PRD.md`, remove "Stores are not built yet". Add a README section: remotes, the phrase and its warning, credentials by environment variable, the macOS keychain prompt after reinstalling, the multipart lifecycle rule.
 
@@ -343,7 +349,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 - **Milestone 1 changes no behaviour.** If an existing test has to change to make it pass, the refactor is wrong.
 - **The formats in sections 5 and 6 are the contract.** Crate APIs may differ from what section 2 expects; adapt the code and record it in `SPEC.md` section 17. If a crate cannot give the construction as written (for example, no STREAM with XChaCha20-Poly1305), stop and report; do not substitute another scheme.
 - **If the default TLS provider will not build in CI**, use the crate's `ring` variant of the same features, and record it.
-- **Do not build what section 1 lists as out of scope.** In particular, do not invent a way to make a partial vault from a remote; that decision is open.
+- **Do not build what section 1 lists as out of scope.**
 - **Never print, log or put in an error the phrase or the key**, outside the one `init` message. Tests assert on output; none may contain a real key in a failure message.
 - **No test may touch the real keychain or the network** (section 12).
 
