@@ -55,13 +55,22 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 ```
 
-These versions and feature names come from documentation read on 2026-11-22. None of it was compiled. Check each API against docs.rs before relying on it, and record any difference in `SPEC.md` section 17. Known points to check:
+These were tried on 2026-11-22 in a throwaway crate, on macOS with Rust 1.96: the list above resolved and built, and small programs ran the stream cipher of section 6, a phrase round trip, the mock keychain, and a `file://` store with a multipart upload. What that established:
 
-- `object_store` is async only. Drive it from a private `tokio::runtime::Builder::new_current_thread().enable_all()` runtime with `block_on`. Since 0.13 the convenience methods (`get`, `put`, `put_multipart`, `head`, `delete`) are on `ObjectStoreExt`.
-- `object_store::parse_url_opts` builds a backend from a URL but does not read the environment. Pass it every environment variable whose name starts with `AWS_`, `GOOGLE_` or `AZURE_`, name lowercased.
-- `object_store` does not read `~/.aws/credentials`.
-- The STREAM construction is in the `aead-stream` crate, not in `aead`.
-- `hkdf` 0.13 needs `sha2` 0.11, which the crate already uses.
+- **Stream cipher.** `aead_stream::{EncryptorBE32, DecryptorBE32}` over `chacha20poly1305::XChaCha20Poly1305`, built with `new(key.into(), (&nonce).into())` from a `[u8; 32]` key and a `[u8; 19]` nonce, with `encrypt_next` / `encrypt_last` and `decrypt_next` / `decrypt_last` on `&[u8]`. A wrong key, a changed byte, a cut at a chunk boundary and a short nonce all return errors.
+- **Key derivation.** `Hkdf::<Sha256>::from_prk(&key)` then `expand(info, &mut out)`, with `sha2` 0.11.
+- **Random bytes.** `getrandom::fill(&mut buf)`.
+- **Phrase.** `Mnemonic::from_entropy(&key)`, `to_string()` (24 words), `Mnemonic::parse_in(Language::English, s)`, `to_entropy()`. A misspelt word is `Error::UnknownWord(index)`, counted from 0; a wrong word from the list is `Error::InvalidChecksum`.
+- **Keychain.** `keyring_core::set_default_store(store)`, with `keyring_core::mock::Store::new()?` in tests and `apple_native_keyring_store::keychain::Store::new()?` on macOS. `Entry::new(service, user)?`, `get_password()`, `set_password()`. A missing item is `Error::NoEntry`. Two entries with the same service and user see the same item.
+- **Object store.** `object_store::parse_url_opts(&url, options)` returns the backend and the path inside it. Option names are matched without regard to case and unknown ones are ignored, so the environment can be passed as it is. `get`, `put`, `head`, `delete` and `put_multipart` come from `ObjectStoreExt`; `list` is on `ObjectStore`. `WriteMultipart::new_with_chunk_size`, `wait_for_capacity`, `write` and `finish` upload in parts, on `file://` too. A current-thread tokio runtime with `block_on` drives all of it.
+- **`file://` is rooted at `/`.** The backend for a `file://` URL is the whole filesystem and the returned path is the directory. A listing of a directory that does not exist is empty, not an error, and a `put` creates it. So the rule that syncit never creates a directory needs its own check that the directory exists, before anything is written.
+- **Listed names are full paths.** Each `location` in a listing starts with the store's path; strip it.
+- **Rust version.** No package in the resolved tree declares a minimum above 1.89. It was not built with 1.89 itself.
+- **Size.** The tree is about 290 packages, against a handful today, and the TLS provider compiles C. The first build takes minutes.
+
+Not tried: the Linux keychain crate (it resolved, but was not compiled); any cloud backend against a real service; `rpassword`. `object_store` does not read `~/.aws/credentials`.
+
+If an API differs from this when building, adapt the code and record it in `SPEC.md` section 17.
 
 ## 3. Modules
 
@@ -129,7 +138,7 @@ The remote implementation needs a scratch directory for plaintext in transit. It
 - `config` is the same JSON as `.syncit/config`, and is the one object that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
 - `format` is canonical JSON, keys in alphabetical order. `syncit` other than 1 is refused. `check` lets a wrong key be told from a damaged store.
 - A prefix with objects but no `format` is not a vault and is refused, untouched.
-- syncit never creates a bucket or a directory. A `file://` directory that does not exist is an error.
+- syncit never creates a bucket or a directory. A `file://` directory that does not exist is an error, and syncit must check for it itself (section 2).
 
 **URLs.**
 
@@ -164,7 +173,7 @@ Everything is derived from `K` with HKDF-SHA256 `expand` (`Hkdf::from_prk(K)`), 
 - **One way.** A name cannot be turned back into a hash. This is why the trait has no "list blob hashes".
 - The object key is derived from the object's name, not from the plaintext hash, because a vault downloading a segment it has never seen knows only the name.
 
-Body of every encrypted object: a 19-byte random nonce, then XChaCha20-Poly1305 in the STREAM construction (`aead-stream`, `EncryptorBE32` and `DecryptorBE32`), plaintext in 64 KiB chunks, the last sealed with `encrypt_last`. The nonce is random so that a mistake elsewhere can never reuse a key and nonce with different content.
+Body of every encrypted object: a 19-byte random nonce, then XChaCha20-Poly1305 in the STREAM construction (`aead-stream`, `EncryptorBE32` and `DecryptorBE32`), plaintext in 64 KiB chunks, the last sealed with `encrypt_last`. Every chunk but the last is exactly 64 KiB. The last holds what remains: 1 byte to 64 KiB, or nothing only when the plaintext is empty, so there is always one last chunk and never an empty one after a full one. An object of `n` plaintext bytes is `19 + n + 16 × max(1, ⌈n / 65536⌉)` bytes long. The nonce is random so that a mistake elsewhere can never reuse a key and nonce with different content.
 
 Decryption fails, without panicking, on a wrong key, a changed byte, a truncated object or a short nonce. Plaintext is written to a scratch file and moved into place only after the whole object has decrypted and its hash has been checked.
 
@@ -304,7 +313,7 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | Test | Checks |
 |---|---|
 | (existing suite) | passes unchanged after the storage refactor |
-| `crypt_round_trip` | empty, 1 byte, 64 KiB, 64 KiB + 1 and 1 MiB decrypt to the input |
+| `crypt_round_trip` | empty, 1 byte, 64 KiB − 1, 64 KiB, 64 KiB + 1, 128 KiB and 1 MiB decrypt to the input, and each object has the length section 6 gives |
 | `crypt_rejects` | wrong key, wrong name, wrong kind, a changed byte, truncation at a chunk boundary, a short nonce: each is an error and none panics |
 | `names_are_keyed` | names differ between keys and between kinds, are stable for one key, and are never the plaintext hash |
 | `phrase_round_trip` | 32 bytes to 24 words and back; a misspelt word is named by position; a swapped word is a checksum error |
@@ -347,7 +356,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 - **Milestone 7 needs a bucket.** If `SYNCIT_TEST_REMOTE_URL` is not set and no local S3-compatible server can be started, write `cloud_remote` so that it skips, leave milestone 7 open, and say so in the final report. Do not mark it done on the strength of `file://`.
 - **One commit for each milestone**, on the current branch, with the tool working after each.
 - **Milestone 1 changes no behaviour.** If an existing test has to change to make it pass, the refactor is wrong.
-- **The formats in sections 5 and 6 are the contract.** Crate APIs may differ from what section 2 expects; adapt the code and record it in `SPEC.md` section 17. If a crate cannot give the construction as written (for example, no STREAM with XChaCha20-Poly1305), stop and report; do not substitute another scheme.
+- **The formats in sections 5 and 6 are the contract.** Section 2 says which crate APIs were tried. If one differs, adapt the code and record it in `SPEC.md` section 17. Do not change a format to suit a crate; if it cannot be met, stop and report.
 - **If the default TLS provider will not build in CI**, use the crate's `ring` variant of the same features, and record it.
 - **Do not build what section 1 lists as out of scope.**
 - **Never print, log or put in an error the phrase or the key**, outside the one `init` message. Tests assert on output; none may contain a real key in a failure message.
