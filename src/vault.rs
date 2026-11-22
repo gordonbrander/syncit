@@ -189,7 +189,7 @@ impl Vault {
     pub fn open_url(opts: &Options, url: &str, local: Option<&Vault>) -> Result<Vault> {
         use crate::remote::{Bucket, Remote, credentials};
         let root = local.map(|v| v.root.as_path());
-        let bucket = Bucket::new(url, credentials(opts, root))?;
+        let bucket = Bucket::new(url, credentials(opts, root, url)?)?;
         let check = bucket.check()?;
         let (key, _) = crate::keys::find(opts, url, &check, root)?;
         let storage = Remote::open(bucket, key, root.map(Dir::new))?;

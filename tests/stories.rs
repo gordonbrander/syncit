@@ -74,7 +74,12 @@ fn vault(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
 fn pair(files: &[(&str, &str)]) -> (TempDir, PathBuf, PathBuf) {
     let (tmp, a) = vault(files);
     let b = tmp.path().join("b");
-    assert_eq!(cmd::clone(O, &a, &b, &[], false).unwrap().exit_code(), 0);
+    assert_eq!(
+        cmd::clone(O, Path::new("/"), &a, &b, &[], false)
+            .unwrap()
+            .exit_code(),
+        0
+    );
     (tmp, a, b)
 }
 
@@ -213,7 +218,7 @@ fn story_a4_clone_subfolder() {
         ("other/y.txt", "y"),
     ]);
     let b = tmp.path().join("b");
-    cmd::clone(O, &a.join("foo/bar"), &b, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("foo/bar"), &b, &[], false).unwrap();
     assert_eq!(tree(&b).keys().collect::<Vec<_>>(), ["foo/bar/x.txt"]);
     put(&b, "foo/bar/x.txt", "x2", 1);
     put(&b, "foo/bar/new.txt", "n", 1);
@@ -232,7 +237,7 @@ fn story_a5_get_and_new_folder() {
         ("other/y.txt", "y"),
     ]);
     let b = tmp.path().join("b");
-    cmd::clone(O, &a.join("foo/bar"), &b, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("foo/bar"), &b, &[], false).unwrap();
     cmd::move_to(O, &b, &paths(&["foo/bar/big"]), &a).unwrap();
     // A second folder.
     cmd::get(O, &b, &[a.join("other")]).unwrap();
@@ -405,7 +410,7 @@ fn merge_falls_back() {
 fn story_c1_three_vaults() {
     let (tmp, a, b) = pair(&[("f.txt", "v1")]);
     let c = tmp.path().join("c");
-    cmd::clone(O, &b, &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &b, &c, &[], false).unwrap();
     // A change relays through b between two vaults that never meet.
     put(&a, "f.txt", "from a", 1);
     put(&c, "new.txt", "from c", 2);
@@ -608,7 +613,7 @@ fn story_d3_snapshot() {
     assert_eq!(names(&a.join(".syncit/log")).len(), 2);
     // A later sync delivers both.
     let b = tmp.path().join("b");
-    cmd::clone(O, &a, &b, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a, &b, &[], false).unwrap();
     assert_eq!(log(&b).entries, entries);
     assert!(is(&b, "f.txt", "v2"));
 }
@@ -779,7 +784,7 @@ fn recreate_against_unseen_recreation() {
     // re-creations conflict and both are kept.
     let (tmp, a, b) = pair(&[("f.txt", "v1"), ("sub/s.txt", "s")]);
     let c = tmp.path().join("c");
-    cmd::clone(O, &a.join("sub"), &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("sub"), &c, &[], false).unwrap();
     fs::remove_file(b.join("f.txt")).unwrap();
     cmd::sync(O, &b, &a).unwrap();
     put(&a, "f.txt", "other", 1);
@@ -918,7 +923,7 @@ fn restore_version() {
     refused(restore(&a, "f.txt", "v1", false), "is taken");
     // c has only k.txt: f.txt is not on disk there.
     let c = a.parent().unwrap().join("c");
-    cmd::clone(O, &a.join("k.txt"), &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("k.txt"), &c, &[], false).unwrap();
     refused(restore(&c, "f.txt", "v1", true), "not on disk");
     assert!(!c.join("f.txt").exists());
 }
@@ -944,7 +949,7 @@ fn same_edit_no_conflict() {
 fn new_file_at_existing_path() {
     let (tmp, a) = vault(&[("sub/s.txt", "s"), ("f.txt", "F"), ("g.txt", "G")]);
     let b = tmp.path().join("b");
-    cmd::clone(O, &a.join("sub"), &b, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("sub"), &b, &[], false).unwrap();
     assert!(!b.join("f.txt").exists());
     // Equal content is adopted silently.
     put(&b, "f.txt", "F", 5);
@@ -1096,7 +1101,7 @@ fn restored_backup() {
     cmd::snapshot(O, &a).unwrap();
     let (backup, b) = (tmp.path().join("backup"), tmp.path().join("b"));
     copy_dir(&a, &backup);
-    cmd::clone(O, &a, &b, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a, &b, &[], false).unwrap();
     put(&a, "f.txt", "v2", 1);
     cmd::sync(O, &a, &b).unwrap();
     put(&a, "f.txt", "v3", 2);
@@ -1124,7 +1129,7 @@ fn restored_backup() {
 fn pending_then_edit() {
     let (tmp, a, b) = pair(&[("f.txt", "v1"), ("sub/s.txt", "s")]);
     let c = tmp.path().join("c");
-    cmd::clone(O, &a.join("sub"), &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("sub"), &c, &[], false).unwrap();
     // c carries the news of v2 but not its content.
     put(&a, "f.txt", "v2", 1);
     cmd::sync(O, &c, &a).unwrap();
@@ -1387,7 +1392,7 @@ fn corrupt_blob_source() {
     // Same size and mtime: a's scan does not see the change.
     put(&a, "f.txt", "evil", 0);
     let b = tmp.path().join("b");
-    let report = cmd::clone(O, &a, &b, &[], false).unwrap();
+    let report = cmd::clone(O, Path::new("/"), &a, &b, &[], false).unwrap();
     assert_eq!(report.recorded, 0);
     assert_eq!((report.pending, report.exit_code()), (1, 2));
     assert_eq!(tree(&b).keys().collect::<Vec<_>>(), ["ok.txt"]);
@@ -1420,7 +1425,7 @@ fn move_refuses() {
     };
     // The target excludes the path: nothing is sent, nothing removed.
     let c = tmp.path().join("c");
-    cmd::clone(O, &a.join("d"), &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("d"), &c, &[], false).unwrap();
     put(&b, "f.txt", "edit", 1);
     let error = err(&b, &["d", "f.txt"], &c);
     assert!(
@@ -1643,9 +1648,9 @@ fn nested_vault_is_ordinary_files() {
     // Vaults that share files do not sync with each other.
     assert!(cmd::sync(O, &a, &a.join("inner")).is_err());
     assert!(cmd::pull(O, &a.join("inner"), &a).is_err());
-    assert!(cmd::clone(O, &a, &a.join("copy"), &[], false).is_err());
+    assert!(cmd::clone(O, Path::new("/"), &a, &a.join("copy"), &[], false).is_err());
     assert!(!a.join("copy").exists());
-    assert!(cmd::clone(O, &a, &tmp.path().join("c"), &[], false).is_ok());
+    assert!(cmd::clone(O, Path::new("/"), &a, &tmp.path().join("c"), &[], false).is_ok());
 }
 
 #[test]
@@ -1675,7 +1680,7 @@ fn version_mismatch() {
 fn push_counts_excluded() {
     let (tmp, a) = vault(&[("d/g.txt", "g"), ("music/m.mp3", "m"), ("f.txt", "f")]);
     let c = tmp.path().join("c");
-    cmd::clone(O, &a.join("d"), &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("d"), &c, &[], false).unwrap();
     fs::write(c.join(".syncitignore"), "d/tmp\n.syncitignore\n").unwrap();
     put(&a, "d/tmp/t.txt", "t", 1);
     cmd::snapshot(O, &a).unwrap();
@@ -1700,7 +1705,7 @@ fn status_states() {
         ("music/n.mp3", "n"),
     ]);
     let c = tmp.path().join("c");
-    cmd::clone(O, &a.join("d"), &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("d"), &c, &[], false).unwrap();
     let line = |path: &str, files, ours, theirs| State {
         path: path.into(),
         files,
@@ -1871,7 +1876,7 @@ fn dry_run_matches_real_run() {
     no_history(&[&b]);
     put(&a, "big/two.bin", "2", 1);
     let c = tmp.path().join("c");
-    cmd::clone(O, &a.join("keep.txt"), &c, &[], false).unwrap();
+    cmd::clone(O, Path::new("/"), &a.join("keep.txt"), &c, &[], false).unwrap();
     let listing = || {
         let mut out = BTreeMap::new();
         all(tmp.path(), &mut out);
@@ -2115,7 +2120,7 @@ mod remote {
     }
 
     /// Run against `SYNCIT_TEST_REMOTE_URL`, in a new prefix under it, with
-    /// credentials from the user's `credentials.env` and the environment.
+    /// credentials from the user's `credentials.json` and the environment.
     /// Skipped when it is not set.
     #[test]
     fn cloud_remote() {
@@ -2179,7 +2184,12 @@ mod remote {
         assert_eq!(tree(&a), tree(&c));
         // A third machine clones the URL and has everything.
         let m = tmp.path().join("m");
-        assert_eq!(cmd::clone(o, origin, &m, &[], false).unwrap().conflicts, 1);
+        assert_eq!(
+            cmd::clone(o, Path::new("/"), origin, &m, &[], false)
+                .unwrap()
+                .conflicts,
+            1
+        );
         assert_eq!(tree(&m), tree(&a));
     }
 
@@ -2407,7 +2417,9 @@ mod remote {
         // A third machine clones the URL and has everything.
         let m = tmp.path().join("m");
         assert_eq!(
-            cmd::clone(o, &origin, &m, &[], false).unwrap().exit_code(),
+            cmd::clone(o, Path::new("/"), &origin, &m, &[], false)
+                .unwrap()
+                .exit_code(),
             0
         );
         assert_eq!(tree(&m), tree(&a));
@@ -2505,6 +2517,28 @@ mod remote {
         assert!(is(&folder, "f.txt", "f") && is(&folder, "g.txt", "g"));
         // A nickname is looked up only in the vault's own remotes.
         assert!(cmd::sync(o, &a, Path::new("nowhere")).is_err());
+        // clone, run in the vault, resolves a nickname: the remote's, and
+        // one for a folder vault.
+        cmd::remote_add(
+            o,
+            &a,
+            folder.to_str().unwrap(),
+            Some("backup".into()),
+            false,
+        )
+        .unwrap();
+        for (name, location) in [("origin", &origin), ("backup", &folder)] {
+            let c = tmp.path().join(format!("clone-{name}"));
+            cmd::clone(o, &a, Path::new(name), &c, &[], false).unwrap();
+            assert!(is(&c, "f.txt", "f") && is(&c, "g.txt", "g"));
+            let remotes = Config::load(&c).unwrap().remotes;
+            // A folder is recorded by its canonical path; a URL as it is.
+            let want = location.canonicalize().unwrap_or(location.to_path_buf());
+            assert!(
+                remotes.values().any(|l| Path::new(l) == want),
+                "{remotes:?}"
+            );
+        }
     }
 
     #[test]
@@ -2523,7 +2557,9 @@ mod remote {
         for (from, dir) in [(origin.clone(), "x"), (src.clone(), "y")] {
             let x = tmp.path().join(dir);
             assert_eq!(
-                cmd::clone(o, &from, &x, &only, false).unwrap().exit_code(),
+                cmd::clone(o, Path::new("/"), &from, &x, &only, false)
+                    .unwrap()
+                    .exit_code(),
                 0
             );
             assert_eq!(Config::load(&x).unwrap().include, only);
@@ -2536,10 +2572,20 @@ mod remote {
         assert!(is(&x, "e.txt", "e") && !x.join("b/d").exists());
         // A path below a vault's root with --only is refused; nothing is made.
         let z = tmp.path().join("z");
-        let err = cmd::clone(o, &src.join("b"), &z, &only, false).unwrap_err();
+        let err = cmd::clone(o, Path::new("/"), &src.join("b"), &z, &only, false).unwrap_err();
         assert!(err.to_string().contains("root"), "{err}");
         assert!(!z.exists());
-        assert!(cmd::clone(o, &origin, &z, &["../up".to_string()], false).is_err());
+        assert!(
+            cmd::clone(
+                o,
+                Path::new("/"),
+                &origin,
+                &z,
+                &["../up".to_string()],
+                false
+            )
+            .is_err()
+        );
         assert!(!z.exists());
     }
 
@@ -2555,7 +2601,7 @@ mod remote {
         let (_r, origin) = remote(&tmp, "r");
         cmd::push(o, &a, &origin).unwrap();
         let p = tmp.path().join("p");
-        cmd::clone(o, &origin, &p, &["docs".to_string()], false).unwrap();
+        cmd::clone(o, Path::new("/"), &origin, &p, &["docs".to_string()], false).unwrap();
         let blobs_before = names(&p.join(".syncit/blobs"));
         assert_eq!(blobs_before.len(), 1);
         cmd::get_from(o, &p, &["music".to_string()], Path::new("origin")).unwrap();
@@ -2567,8 +2613,8 @@ mod remote {
 
         // --from with a folder vault's path is the inferred form.
         let (q1, q2) = (tmp.path().join("q1"), tmp.path().join("q2"));
-        cmd::clone(o, &a.join("docs"), &q1, &[], false).unwrap();
-        cmd::clone(o, &a.join("docs"), &q2, &[], false).unwrap();
+        cmd::clone(o, Path::new("/"), &a.join("docs"), &q1, &[], false).unwrap();
+        cmd::clone(o, Path::new("/"), &a.join("docs"), &q2, &[], false).unwrap();
         cmd::get(o, &q1, &[a.join("music")]).unwrap();
         cmd::get_from(o, &q2, &["music".to_string()], &a).unwrap();
         assert_eq!(tree(&q1), tree(&q2));
@@ -2608,7 +2654,7 @@ mod remote {
         let outside = cmd::config(o, tmp.path(), Some(Path::new(&url)), None).unwrap();
         assert_eq!(outside.keep_history, Some(1));
         let m = tmp.path().join("m");
-        cmd::clone(o, Path::new(&url), &m, &[], false).unwrap();
+        cmd::clone(o, Path::new("/"), Path::new(&url), &m, &[], false).unwrap();
         assert!(is(&m, "f.txt", "v3"));
     }
 }

@@ -275,7 +275,7 @@ fn main() {
             dir,
             only,
             save_key,
-        } => commands::clone(opts, &src, &dir, &only, save_key).map(Some),
+        } => commands::clone(opts, cwd, &src, &dir, &only, save_key).map(Some),
         Command::Sync { vault, .. } => commands::sync(opts, cwd, &vault).map(Some),
         Command::Push { vault, .. } => commands::push(opts, cwd, &vault).map(Some),
         Command::Pull { vault, .. } => commands::pull(opts, cwd, &vault).map(Some),

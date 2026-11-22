@@ -83,7 +83,7 @@ pub fn init_remote(
         "a nickname is 1 to 64 bytes, with no spaces or control characters"
     );
     let local = find_root(cwd).ok();
-    let bucket = Bucket::new(url, credentials(opts, local.as_deref()))?;
+    let bucket = Bucket::new(url, credentials(opts, local.as_deref(), url)?)?;
     ensure!(bucket.is_empty()?, "{url} is not empty");
     let (key, generated) = match &opts.secret_key {
         Some(phrase) => (
@@ -139,18 +139,23 @@ fn vault_paths(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Make `dir` a vault with the files of the vault `src`: a URL, or a path in
-/// a vault. Without `only`, it includes the sub-folder the path names, or
-/// everything. With it, `src` is a URL or a vault's root, and it includes
-/// exactly those paths. The source is remembered in `remotes`, then pulled.
+/// Make `dir` a vault with the files of the vault `src`: a URL, a path in a
+/// vault, or a nickname in the vault at `cwd`. Without `only`, it includes
+/// the sub-folder the path names, or everything. With it, `src` is a URL or
+/// a vault's root, and it includes exactly those paths. The source is
+/// remembered in `remotes`, then pulled.
 pub fn clone(
     opts: &Options,
+    cwd: &Path,
     src: &Path,
     dir: &Path,
     only: &[String],
     save_key: bool,
 ) -> Result<Summary> {
     vault_paths(only)?;
+    let local = Vault::open(opts, cwd, true).ok();
+    let src = &resolve(local.as_ref(), src);
+    std::mem::drop(local); // it may be the source, which is locked
     let (source, include) = match url(src) {
         Some(_) if only.is_empty() => (src.to_path_buf(), vec![String::new()]),
         Some(_) => (src.to_path_buf(), only.to_vec()),
@@ -933,7 +938,7 @@ fn find_remote(opts: &Options, root: &Path, url: &str) -> Result<(Config, Found)
     if let Some(phrase) = &opts.secret_key {
         keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
     }
-    let settings = crate::remote::credentials(opts, Some(root));
+    let settings = crate::remote::credentials(opts, Some(root), url)?;
     let bucket = crate::remote::Bucket::new(url, settings)?;
     let check = bucket.check()?;
     let found = match keys::find(opts, url, &check, Some(root)) {

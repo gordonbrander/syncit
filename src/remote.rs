@@ -43,30 +43,55 @@ fn not_found(e: &object_store::Error) -> bool {
     matches!(e, object_store::Error::NotFound { .. })
 }
 
-/// The `KEY=value` lines of an env file, in order; none if it is missing.
-/// `#` comments, blank lines, `export ` and one pair of quotes are dropped.
-pub fn env_file(path: &Path) -> Vec<(String, String)> {
-    let text = fs::read_to_string(path).unwrap_or_default();
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.strip_prefix("export ").unwrap_or(l).split_once('='))
-        .map(|(k, v)| {
-            let v = v.trim();
-            let unquoted = ['"', '\'']
-                .iter()
-                .find_map(|q| v.strip_prefix(*q)?.strip_suffix(*q));
-            (k.trim().to_string(), unquoted.unwrap_or(v).to_string())
-        })
-        .collect()
+/// Settings for each URL prefix.
+type Sections = BTreeMap<String, BTreeMap<String, String>>;
+
+/// A `credentials.json`.
+#[derive(Serialize, Deserialize)]
+struct Credentials {
+    remotes: Sections,
 }
 
-/// Settings for a bucket from the user's `credentials.env`, then from that
-/// of the vault at `local`; a later one wins.
-pub fn credentials(opts: &Options, local: Option<&Path>) -> Vec<(String, String)> {
-    let user = opts.credentials.as_deref().map(env_file);
-    let vault = local.map(|root| env_file(&root.join(".syncit/credentials.env")));
-    user.into_iter().chain(vault).flatten().collect()
+/// The `remotes` of a `credentials.json`; a missing file has none.
+fn sections(path: &Path) -> Result<Sections> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<Credentials>(&text)
+            .map(|c| c.remotes)
+            .with_context(|| format!("corrupt credentials {}", path.display())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Sections::new()),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// Whether the section `prefix` applies to `url`: "" applies to all, and a
+/// prefix otherwise ends where the URL does or at a `/`.
+fn matches(prefix: &str, url: &str) -> bool {
+    let p = prefix.trim_end_matches('/');
+    p.is_empty()
+        || url
+            .strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Settings for the bucket at `url`: the sections of the user's
+/// `credentials.json` that match it, then those of the vault at `local`,
+/// each from the shortest prefix to the longest. A later one wins.
+pub fn credentials(
+    opts: &Options,
+    local: Option<&Path>,
+    url: &str,
+) -> Result<Vec<(String, String)>> {
+    let vault = local.map(|root| root.join(".syncit/credentials.json"));
+    let mut settings = vec![];
+    for path in opts.credentials.iter().chain(&vault) {
+        let mut found: Vec<_> = sections(path)?
+            .into_iter()
+            .filter(|(p, _)| matches(p, url))
+            .collect();
+        found.sort_by_key(|(p, _)| p.trim_end_matches('/').len());
+        settings.extend(found.into_iter().flat_map(|(_, s)| s));
+    }
+    Ok(settings)
 }
 
 impl Bucket {
@@ -498,40 +523,72 @@ mod tests {
             .collect()
     }
 
+    fn opts(user: &Path) -> Options {
+        Options {
+            json: false,
+            dry_run: false,
+            no_remove: false,
+            secret_key: None,
+            credentials: Some(user.to_path_buf()),
+        }
+    }
+
+    /// Each section sets `S` to its own name, so the order shows.
+    fn write(path: &Path, prefixes: &[&str]) {
+        let map: Sections = prefixes
+            .iter()
+            .map(|p| (p.to_string(), [("S".to_string(), p.to_string())].into()))
+            .collect();
+        let file = Credentials { remotes: map };
+        fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
+    }
+
     #[test]
-    fn env_file_format() {
+    fn credentials_match() {
         let tmp = TempDir::new().unwrap();
-        let file = tmp.path().join("credentials.env");
-        let text = "# R2\n\nexport AWS_ACCESS_KEY_ID=\"abc\"\nAWS_SECRET_ACCESS_KEY = 'x=y'\nAWS_DEFAULT_REGION=auto\nnot a setting\n  # indented comment\n";
-        fs::write(&file, text).unwrap();
+        let user = tmp.path().join("credentials.json");
+        write(&user, &["s3://b/x/", "s3://b2", "", "s3://b"]);
+        let o = opts(&user);
+        let got = credentials(&o, None, "s3://b/x/y").unwrap();
         assert_eq!(
-            env_file(&file),
-            pairs(&[
-                ("AWS_ACCESS_KEY_ID", "abc"),
-                ("AWS_SECRET_ACCESS_KEY", "x=y"),
-                ("AWS_DEFAULT_REGION", "auto"),
-            ])
+            got,
+            pairs(&[("S", ""), ("S", "s3://b"), ("S", "s3://b/x/")])
         );
-        assert!(env_file(&tmp.path().join("missing")).is_empty());
+        let got = credentials(&o, None, "s3://b").unwrap();
+        assert_eq!(got, pairs(&[("S", ""), ("S", "s3://b")]));
+        let got = credentials(&o, None, "s3://other").unwrap();
+        assert_eq!(got, pairs(&[("S", "")]));
     }
 
     #[test]
     fn credentials_order() {
         let tmp = TempDir::new().unwrap();
-        let user = tmp.path().join("user.env");
-        fs::write(&user, "A=user\nB=user\n").unwrap();
+        let user = tmp.path().join("credentials.json");
+        write(&user, &["s3://b"]);
         let vault = tmp.path().join("vault");
         fs::create_dir_all(vault.join(".syncit")).unwrap();
-        fs::write(vault.join(".syncit/credentials.env"), "B=vault\n").unwrap();
-        let opts = Options {
-            json: false,
-            dry_run: false,
-            no_remove: false,
-            secret_key: None,
-            credentials: Some(user),
-        };
-        let both = pairs(&[("A", "user"), ("B", "user"), ("B", "vault")]);
-        assert_eq!(credentials(&opts, Some(&vault)), both);
-        assert_eq!(credentials(&opts, None), both[..2]);
+        write(&vault.join(".syncit/credentials.json"), &[""]);
+        let o = opts(&user);
+        let both = pairs(&[("S", "s3://b"), ("S", "")]);
+        assert_eq!(credentials(&o, Some(&vault), "s3://b/v").unwrap(), both);
+        assert_eq!(credentials(&o, None, "s3://b/v").unwrap(), both[..1]);
+    }
+
+    #[test]
+    fn credentials_errors() {
+        let tmp = TempDir::new().unwrap();
+        let user = tmp.path().join("credentials.json");
+        let o = opts(&user);
+        assert!(
+            credentials(&o, Some(tmp.path()), "s3://b")
+                .unwrap()
+                .is_empty()
+        );
+        // No `remotes`, and a setting that is not a string.
+        for text in ["{}", "{\"remotes\": {\"s3://b\": {\"A\": 1}}}"] {
+            fs::write(&user, text).unwrap();
+            let err = credentials(&o, None, "s3://b").unwrap_err().to_string();
+            assert_eq!(err, format!("corrupt credentials {}", user.display()));
+        }
     }
 }

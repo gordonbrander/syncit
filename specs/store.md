@@ -30,7 +30,7 @@ Every difference in behaviour must follow from one of the two properties:
 
 Everything else is the same as for any vault: a `config` with `nickname`, `include`, `exclude`, `keep_history` and `autocompact`; a log; blobs; validation of every segment (`CRDT.md`, "Validation") and blob received. The log format does not change.
 
-**Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from `credentials.env` and the environment, section 5). Parallel transfers. A bare vault on a plain local path.
+**Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from `credentials.json` and the environment, section 5). Parallel transfers. A bare vault on a plain local path.
 
 ## 2. Dependencies
 
@@ -172,12 +172,23 @@ The remote implementation needs a scratch directory for plaintext in transit. It
 **URLs.**
 
 - Any URL `object_store::parse_url_opts` accepts: `file:///abs/dir`, `s3://bucket/prefix`, `gs://…`, `az://…`, and R2 `https://` URLs.
-- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They are read, in this order, with a later one winning (`remote::credentials`, then the environment):
-  1. The user's `credentials.env`: `$XDG_CONFIG_HOME/syncit/credentials.env`, else `~/.config/syncit/credentials.env`. `main` finds the path with `output::user_credentials` and puts it in `Options.credentials`, so tests never read the real one, except `cloud_remote`, which needs it.
-  2. `.syncit/credentials.env` in the local vault, if the command runs in one.
-  3. The environment.
+- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They come from `credentials.json` files, which map URL prefixes to settings:
 
-  A `credentials.env` holds `KEY=value` lines; `#` comments, blank lines, a leading `export ` and one pair of quotes around the value are allowed, and other lines are skipped. The user writes it; syncit never does, and never reads a phrase from it (phrases are in `secrets.env`, section 8). The settings are passed to `parse_url_opts` and never set in the process environment.
+  ```json
+  {
+    "remotes": {
+      "": { "AWS_DEFAULT_REGION": "auto" },
+      "s3://bucket": { "AWS_ACCESS_KEY_ID": "…", "AWS_SECRET_ACCESS_KEY": "…" }
+    }
+  }
+  ```
+
+  A prefix, less any trailing `/`, applies to a URL equal to it or that goes on after a `/` (`s3://bucket` applies to `s3://bucket/notes`, not to `s3://bucket2`); `""` applies to every URL. They are read in this order, with a later one winning (`remote::credentials`, then the environment):
+  1. The user's file: `$XDG_CONFIG_HOME/syncit/credentials.json`, else `~/.config/syncit/credentials.json`. `main` finds the path with `output::user_credentials` and puts it in `Options.credentials`, so tests never read the real one, except `cloud_remote`, which needs it.
+  2. `.syncit/credentials.json` in the local vault, if the command runs in one.
+  3. The environment, which so overrides every section.
+
+  Within a file, the sections that apply are taken from the shortest prefix to the longest. A missing file has no settings; one that is not this shape is an error, `corrupt credentials <path>`. The user writes these files; syncit never does, and never reads a phrase from them (phrases are in `secrets.env`, section 8). The settings are passed to `parse_url_opts` and never set in the process environment.
 
 **Listing and transfers.**
 
@@ -307,7 +318,7 @@ read this vault from another computer, and they are not shown again.
 
 A URL with no `format` fails with `no vault at <url>: run syncit init <url>`.
 
-**`syncit clone <vault> <dir> [--only <path>]…`.** `<vault>` is a path or a URL. Two forms, told apart by the flag, as for `get`:
+**`syncit clone <vault> <dir> [--only <path>]…`.** `<vault>` is a target: a nickname in the vault the command runs in, a URL or a path. Two forms, told apart by the flag, as for `get`:
 
 - Without `--only`: unchanged for a path. The vault is found by walking up from it, and the new vault includes the sub-folder the path names, or everything if the path is the vault's root. A URL is always a whole vault, so the new vault includes everything.
 - With `--only`, which may be given more than once: `<vault>` is a URL or the root of a vault, and the new vault includes exactly the paths given, each from that vault's root, written with `/` and validated with `entry::valid_path`. A path below a vault's root together with `--only` is an error that says to give the root. This is how part of a remote vault is cloned: `syncit clone s3://bucket/archive ~/Archive --only photos/2024 --only music`.
@@ -353,14 +364,15 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `phrase_round_trip` | 32 bytes to 24 words and back; a misspelt word is named by position; a swapped word is a checksum error |
 | `key_lookup_order` | `Options`, mock keychain, `secrets.env`: the first whose check matches is used; one that does not match is passed over; none gives the documented error |
 | `secrets_env_file` | mode 0600; two remotes give two entries; `remote remove` deletes only its own |
-| `env_file_format` | `export`, both kinds of quote, `=` in a value, comments and blank lines; a line with no `=` is skipped; a missing file gives nothing |
-| `credentials_order` | the user's `credentials.env` comes before the vault's, so the vault's wins; without a vault, only the user's |
+| `credentials_match` | a prefix applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; `""` applies to all; the sections that apply come from the shortest prefix to the longest |
+| `credentials_order` | the user's file comes before the vault's, so the vault's wins; without a vault, only the user's |
+| `credentials_errors` | missing files give no settings; a file with no `remotes`, or a setting that is not a string, is `corrupt credentials <path>` |
 | `init_remote` | writes `format` and `config`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses `format` version 2 |
 | `remote_add` | records the target's nickname and location for a URL and for a path; a taken name needs `--name`; a wrong phrase is refused and `config` is unchanged; `remote remove` forgets it |
 | `story_c2_sync_through_remote` | two vaults that never sync with each other converge through one remote, in either order, including a conflict; a vault with no history supplies its current files; a third machine `clone`s the URL and has everything |
 | `remote_is_opaque` | no object in the remote's directory contains a known line of a file, a path, a nickname or a plaintext hash, and no object name is a plaintext hash |
 | `remote_hostile` | a garbage object, a valid object copied to another name, and a truncated blob are rejected or left pending; the rest of the run completes |
-| `remote_by_nickname` | `sync origin`, `sync <url>` and `sync ./origin` (a folder) each reach the right vault |
+| `remote_by_nickname` | `sync origin`, `sync <url>` and `sync ./origin` (a folder) each reach the right vault; `clone`, run in the vault, resolves the nickname of a remote and of a folder vault |
 | `clone_only` | `clone <url> <dir> --only a --only b/c` gives a vault that includes those two paths and has only their files; the same against a folder vault's root; a later `get --from` adds a third; a path below a vault's root with `--only` is refused and nothing is created |
 | `get_from_remote` | a partial vault runs `get music --from origin`; the folder arrives and stays included; nothing else is downloaded. `--from` with a folder vault's path gives the same result as the inferred form |
 | `move_to_remote` | files are removed here only when the remote has their content; a remote that excludes them refuses |
@@ -368,7 +380,7 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `remote_history_depth` | with `config --vault origin keep-history 1` and `compact --vault origin`, older blobs are dropped, the log is whole, and current versions remain |
 | `status_vs_remote` | `status --vs origin` reports the same states as against an equivalent folder vault |
 | `dry_run_remote` | a dry `sync` leaves the remote and the vault byte-identical and reports what the real run then does |
-| `cloud_remote` | `story_c2_sync_through_remote` against the URL in `SYNCIT_TEST_REMOTE_URL`, with the user's `credentials.env`; skipped when it is not set |
+| `cloud_remote` | `story_c2_sync_through_remote` against the URL in `SYNCIT_TEST_REMOTE_URL`, with the user's `credentials.json`; skipped when it is not set |
 | `no_remote_feature` | compiled only without `remote`: a URL target and `init <url>` fail with the message of section 2 and change nothing; `remote add` of a folder vault and `sync` by its nickname work |
 | `cli_smoke` additions | `init <url>`, `remote`, `remote add`, `remote remove`, `sync origin`, with `SYNCIT_SECRET_KEY` set |
 
