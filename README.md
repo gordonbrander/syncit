@@ -532,4 +532,4 @@ A `<vault>` is the path of any folder in the other vault.
 
 ## How it works
 
-For the design and the reasoning behind it, see [PRD.md](PRD.md). The format of the sync log is in [CRDT.md](CRDT.md), and the implementation specification is [SPEC.md](SPEC.md).
+For the design and the reasoning behind it, see [PRD.md](specs/PRD.md). The format of the sync log is in [CRDT.md](specs/CRDT.md), and the implementation specification is [SPEC.md](specs/SPEC.md). Stores on object storage are designed in [store.md](specs/store.md) and not built yet.

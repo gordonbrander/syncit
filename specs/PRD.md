@@ -63,8 +63,9 @@ Folders `a`, `b` and `c` are vaults. In the A stories, `a` is an archive on a ba
 **Should**
 
 - **R15** A vault keeps the content of old versions in a local blob store, as many versions back as it is set to: none, a number, or all. Older content is dropped, by the vault itself or on command; the log is kept whole. (D.2)
-- **R16** A vault can send what it has to a content-addressed store, a folder or a bucket, keeping it locally while the store is unreachable. (D.2, D.3)
+- **R16** A vault can send what it has to a content-addressed store on a folder or a bucket, and take it back, with the ordinary sync commands. (D.2, D.3)
 - **R24** A store holds the log as well as blobs, so vaults that never see each other can sync through it. `R16` and `R24` are one mechanism. (C.1, C.2)
+- **R28** What a store holds is encrypted where it is kept: whoever runs the storage learns neither the contents of files nor their names. (C.2)
 - **R17** Record a snapshot of the current state without syncing. (D.3)
 - **R26** List the recorded versions of a file, and bring one back: as a copy beside the file, or in place of it. (D.2)
 - **R27** Show what a vault has, lacks and excludes of everything the log knows, alone or against another vault, without changing anything. (A.3, A.4, A.5)
@@ -84,19 +85,19 @@ syncit is a single command-line binary written in Rust.
 
 ### Vault
 
-A vault is a folder containing a `.syncit/` directory. There is no other kind of participant: every vault is a peer, and none is special. Paths are relative to the vault root and are the same in every vault, so `foo/bar/x.txt` in one vault is `foo/bar/x.txt` in all of them.
+A vault is a folder containing a `.syncit/` directory. There is no other kind of participant: every vault is a peer, and none is special. A store (see "Stores") is a vault without the folder: the same log, blobs and config, kept on object storage. Paths are relative to the vault root and are the same in every vault, so `foo/bar/x.txt` in one vault is `foo/bar/x.txt` in all of them.
 
 ```
 b/
   .syncit/
-    config     # format version, include and exclude prefixes, store, keep_history, autocompact
+    config     # format version, include and exclude prefixes, keep_history, autocompact, nickname, remotes
     log/       # immutable log segments, named by their hash
     dirstate      # local: path -> (size, mtime, hash, base), and deletions seen
     blobs/     # optional: content-addressed file copies
   foo/bar/x.txt   # ordinary files
 ```
 
-`config` and `dirstate` are local and never replicated. `log/` is replicated. `blobs/` is a store that other vaults may read from.
+`config` and `dirstate` are local and never replicated. `log/` is replicated. `blobs/` is a blob source that other vaults may read from.
 
 ### Format version and hashing
 
@@ -165,7 +166,7 @@ Two conflicting versions of a text file (`.md`, `.markdown`, `.txt`) are merged 
 The merged text replaces the file, and is recorded as one more entry whose parents are both versions. They stay in the log, and either can be restored wherever its content is kept. The run reports the file as updated, with the note `merged`, and there is no conflict to report.
 
 - It is opportunistic. Where any condition above fails, the conflict is handled with copies as before.
-- A merge never loses a version. It is made only in a run where a vault that receives keeps history: in a `sync` either vault, in a `push` or `pull` the one that receives. That vault retains both versions before either is replaced, so they can always be restored from it. Two vaults that keep no history never merge. A store will count as history does.
+- A merge never loses a version. It is made only in a run where a vault that receives keeps history: in a `sync` either vault, in a `push` or `pull` the one that receives. That vault retains both versions before either is replaced, so they can always be restored from it. Two vaults that keep no history never merge. A store counts as any vault does, by its own `keep_history`.
 - Overlapping edits are never written with conflict markers. That file would sync as if it were the resolution.
 - Every vault computes the same merge from the same three versions, and records the identical entry.
 - Other formats are left alone: a line merge of structured text can be clean and still broken.
@@ -221,39 +222,45 @@ A blob is a file's content, addressed by its hash. A blob source is anything tha
 
 - a vault's working folder, located through its dirstate
 - a vault's `.syncit/blobs/`
-- a store
+- a store's blobs, downloaded and decrypted
 
 Any source may have any subset. Fetched bytes are hashed before use. If no reachable source has a blob, the path is reported as pending and retried on the next run. A missing blob for a superseded version means only that the version cannot be restored.
 
-Two independent settings in `config` decide what a vault retains:
+Two settings in `config` decide what a vault retains:
 
 | Setting | Values | Effect |
 |---|---|---|
 | `keep_history` | 0 / n / all | How many versions back from the current one are retained in `.syncit/blobs/`, for the files the vault includes; blobs offered by peers for versions it keeps and lacks are collected. 0 retains nothing. A new vault has 1. |
 | `autocompact` | on / off | When on, each run drops the blobs `keep_history` no longer covers. When off, `syncit compact` does. Either way the log is kept whole. |
-| `store` | unset / store location | When set, blobs are uploaded to the store. While the store is unreachable they wait in `.syncit/blobs/`. |
 
-With `keep_history` 0 and no store, the vault stores no blobs and its log records hashes only. With both, blobs are uploaded and also kept locally. Local history is never required to be complete: a vault has the blobs it has. Both are set with `syncit config`.
+With `keep_history` 0 the vault stores no blobs and its log records hashes only. Local history is never required to be complete: a vault has the blobs it has. Both are set with `syncit config`. Sending content to a store is not a setting: it is a `push` or a `sync` with the store.
 
 ### Stores
 
-Stores are not in the first build, which keeps history locally or not at all. They are specified here and in `SPEC.md` (milestones 9 and 10), and arrive whole: the `store` setting and syncing through a store together.
+Stores are not built yet. They are specified in `store.md`.
 
-A store is a log and a set of blobs with no working folder: the part of a vault that replicates, kept somewhere every vault can reach. It can be a folder, such as a shared or external drive, or an S3 bucket.
+A store is a vault with no working folder, kept on object storage: a bucket, or a folder on a shared or external drive. It has what every vault has, a log, blobs and a config with a nickname and a filter, and it syncs by the same commands. Two things set it apart, and every difference in how it behaves follows from one of them:
 
-- A vault's `store` setting sends its history there: blobs and log segments, after every run and snapshot.
-- `sync`, `push` and `pull` accept a store in place of a vault. Two vaults that each sync with the same store converge, without ever reaching each other.
-- A store needs no lock and no server. Everything in it is immutable and named by its hash, so writers cannot disagree, and everything read from it is verified.
-- A store keeps what it is given. It is never pruned.
+- **It is bare.** With no folder, the content of its current versions is kept as blobs, nothing is scanned, and it never records a change of its own.
+- **It is remote.** What it holds is encrypted, since the storage is someone else's. Each object is named by a keyed hash of its content, so the storage provider learns neither what a file says nor which files are there.
 
-Keeping history and syncing through a third place are deliberately one feature. A store holding blobs without the log would be readable only by the vault that filled it; adding the log makes the same store a backup anyone can restore from and a rendezvous anyone can sync through.
+What follows from that:
+
+- `sync`, `push`, `pull`, `move`, `get` and `clone` take a store where they take a vault. Two vaults that each sync with the same store converge, without ever reaching each other.
+- A vault can remember a store, or another vault, under its nickname: `syncit sync origin`. This is an address book in `config` and nothing more. No vault is special and there is no default peer.
+- Nothing is sent to a store unless a command says so. There is no upload after every run.
+- A store needs no lock and no server. Its segments and blobs are immutable and named by hash, so writers cannot disagree, and everything read from it is verified.
+- A store keeps every version by default. `keep_history` applies to it as to any vault, and can be set lower.
+- A store has one secret key, written as 24 words. It is kept in the operating system's keychain where there is one; otherwise the user supplies it in an environment variable, or chooses to save it in a file in the vault. It is shown once, when the store is made, and it is the only way to read the store from another computer.
+
+Keeping history and syncing through a third place are deliberately one feature. A store holding blobs without the log would be readable only by the vault that filled it; adding the log makes the same store a backup anyone with the key can restore from and a rendezvous they can sync through.
 
 ### A sync run
 
 Both vaults do each step, acting on their own folder:
 
 1. Scan, and write a segment of new entries.
-2. Stash or upload blobs for the new entries, per `keep_history` and `store`.
+2. Stash blobs for the new entries, per `keep_history`.
 3. Exchange log segments.
 4. Compute current state from the merged log.
 5. Fetch the blobs needed for included paths.
@@ -265,29 +272,33 @@ Scanning always precedes merging, so entries are written from what the vault had
 
 In a push or pull, both vaults still scan, but only the receiving vault takes segments and materialises.
 
+A store does the same steps. With no working folder it has nothing to scan or materialise, and step 5 is where it takes in content.
+
 ### Copied and restored vaults
 
 A vault has no identity. Two copies of one folder, or a vault restored from a backup, are ordinary vaults. If both are edited, their entries share a parent and neither replaces the other, so they conflict in the usual way.
 
-A vault does have a nickname: a label, by default its folder's name, written into each segment it records so that `syncit blame` can say which vault recorded a version. It is not an identity. It need not be unique, a copied vault duplicates it, nothing verifies it, and no rule of the log reads it.
+A vault does have a nickname: a label, by default its folder's name, written into each segment it records so that `syncit blame` can say which vault recorded a version. It is also the name another vault remembers it by. It is not an identity. It need not be unique, a copied vault duplicates it, nothing verifies it, and no rule of the log reads it.
 
 ### Commands
 
 | Command | Does |
 |---|---|
 | `syncit init [dir]` | Make a folder a vault. |
-| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another. The vault root is found by walking up from the given path. Records the sub-path as included, and nothing about the source. |
-| `syncit sync <vault or store>` | Sync both ways with another vault, or with a store. |
-| `syncit push <vault or store>` / `syncit pull <vault or store>` | Sync one way. |
+| `syncit init <url>` | Make a store at a URL, and show its secret key. |
+| `syncit remote [add <location> \| remove <name>]` | List, remember or forget other vaults and stores by nickname. |
+| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another, or from a store's URL. For a path, the vault root is found by walking up from it, and the sub-path is recorded as included. The source is remembered under its nickname. |
+| `syncit sync <target>` | Sync both ways with another vault or a store, named by path, URL or nickname. |
+| `syncit push <target>` / `syncit pull <target>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status [path]... [--vs <vault>]` | Show each file that needs something: unrecorded changes, files behind or missing, open conflicts. `--all` lists every file, with those current, excluded and ignored; `--vs` shows another vault's state beside this one's. Writes nothing. |
-| `syncit get <path in another vault>...` / `syncit move <path>... <vault>` / `syncit drop <path>...` | Change what this vault has. |
+| `syncit get <path in another vault>...` / `syncit get <path>... --from <target>` / `syncit move <path>... <target>` / `syncit drop <path>...` | Change what this vault has. |
 | `syncit cp <path>... <folder in a vault>` | Copy files into a vault from anywhere; the source need not be a vault. Adds and replaces, deletes nothing, records nothing. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
 | `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
-| `syncit compact` | Drop the stored versions `keep_history` no longer covers. |
-| `syncit config` | Show or change `keep_history`, `autocompact`, `nickname` and `store`. |
+| `syncit compact` | Drop the stored versions `keep_history` no longer covers. `--vault <target>` compacts another vault or a store. |
+| `syncit config` | Show or change `keep_history`, `autocompact` and `nickname`. `--vault <target>` does so for another vault or a store. |
 
 `sync`, `push`, `pull`, `move`, `drop` and `cp` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
 
@@ -295,7 +306,7 @@ A vault does have a nickname: a label, by default its folder's name, written int
 
 Every command prints as it works: results on stdout, one line per file, and warnings and errors on stderr. `--json` makes every line a JSON object, for scripts.
 
-A vault records no other vault. Every command that involves a second vault names it, so there is no default peer and no hierarchy, and nothing breaks when a folder moves.
+No vault is special. Every command that involves a second vault names it, by path, URL or nickname, so there is no default peer and no hierarchy. A vault may remember others by nickname; if a folder moves, only that one entry stops working.
 
 ### How the stories are met
 
@@ -307,9 +318,9 @@ A vault records no other vault. Every command that involves a second vault names
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become included |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |
-| C.2 | R16, R24 | a store holds the log and blobs; both vaults sync with it |
-| D.1 | R13 | `keep_history` 0, `store` unset |
-| D.2 | R15, R16, R26 | `keep_history` above 0, or `store` set; `log` and `restore`; `compact` |
+| C.2 | R16, R24, R28 | a store holds the log and blobs, encrypted; both vaults sync with it |
+| D.1 | R13 | `keep_history` 0 |
+| D.2 | R15, R16, R26 | `keep_history` above 0, or a `push` to a store; `log` and `restore`; `compact` |
 | D.3 | R17 | `snapshot` |
 | E.1 | R10, R11, R14, R18, R25 | immutable segments, atomic writes, hash checks, `status`, format version |
 
@@ -328,6 +339,11 @@ The design keeps three things separate that sync tools usually fuse: what happen
 - **Writing an entry to resolve each conflict.** Unnecessary, since every vault computes the same winner from the log. It would also close a conflict before anyone had looked at it. The one exception is a clean merge of text ("Merging text"): there nothing is chosen over anything else, since every changed line of both versions is in the result, so there is nothing left for a person to decide.
 - **Version vectors instead of parent hashes.** A counter per vault per path tolerates an incomplete log and compacts easily. It requires every vault to have a unique identity, and fails silently when that breaks: a vault copied or restored from backup reuses a counter, and a later entry from its twin then replaces a new edit it never saw. Parent hashes name exactly what an entry replaced, so identity is not needed.
 - **BLAKE3 instead of SHA-256.** BLAKE3 is faster on a first scan of a large archive and is the hash used by `iroh-blobs`, so blob ids would work unchanged if iroh were later used as a transport. SHA-256 was chosen for now because its tooling is on every machine and it is hardware-accelerated on current CPUs. The format version keeps the switch possible.
+- **A store as a second kind of thing.** A store with its own layout, its own run procedure and a `store` setting was specified first. Every command then needed a second code path, and each difference was a place for the two to drift apart. Making a store a vault with no working folder leaves one procedure, as git does with a bare repository.
+- **Uploading to a store after every run.** It made every local command reach the network and need the key, and needed rules for what to do when either was missing. A command now does what its name says; backing up on a schedule is `push` in cron.
+- **Shelling out to `rclone` or `aws`.** It would make a second program part of every install and of every bug report. The backends come from a library instead.
+- **An unencrypted store.** A second format, and one more thing to get wrong when choosing where files go. A store is always encrypted.
+- **Naming a store's objects by the plain hash of their content.** Anyone who can list the storage could test whether a known file is in it. The name is a keyed hash, so it is still decided by the content but says nothing without the key.
 - **Requiring blobs to be stored before an entry is published.** This would force every vault to keep or upload history. Treating a missing blob as "not yet" or "not kept" lets retention be optional.
 
 ## Prior art
@@ -344,7 +360,7 @@ The design keeps three things separate that sync tools usually fuse: what happen
 
 - **File metadata.** The executable bit is recorded, and a change to it alone is a new version, as in Git. Whether symlinks or extended attributes ever are is open.
 - **Case-insensitive filesystems.** How two paths differing only in case are handled on macOS and Windows.
-- **Vaults that are not mounted paths.** The proposal assumes a vault is reachable as a directory. Stores cover syncing through a bucket. Syncing two vaults directly over SSH or iroh is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
+- **Vaults that are not mounted paths.** The proposal assumes a vault is reachable as a directory. Stores cover syncing through a bucket (`store.md`). Syncing two vaults directly over SSH or iroh is undecided. Signed segments, sketched in `CRDT.md`, belong to the same design.
 - **Ignore list.** Settled for version 1: `.syncitignore` at the vault root, an ordinary file that syncs with the rest. Wildcards and per-folder lists are open.
 - **Mass-delete guard.** Whether R23 is on by default, and at what threshold.
 - **Tie-break timestamp.** File mtime reflects when the edit happened but can be set arbitrarily; scan time cannot be forged but reflects when the tool ran.
