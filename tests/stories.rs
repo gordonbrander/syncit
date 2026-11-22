@@ -1762,3 +1762,72 @@ fn dry_run_matches_real_run() {
     assert!(done.has("dropped", "keep.txt") && !b.join("keep.txt").exists());
     assert_eq!(planned, done);
 }
+
+#[test]
+fn cp_from_plain_folder() {
+    let dry = &Options {
+        json: false,
+        dry_run: true,
+        no_remove: false,
+    };
+    let files = [
+        ("same.txt", "s"),
+        ("old.txt", "v1"),
+        ("keep.txt", "k"),
+        (".syncitignore", "secret.txt\n"),
+    ];
+    let (tmp, a) = vault(&files);
+    // A folder that is not a vault, though it has a `.syncit` of its own.
+    let plain = tmp.path().join("plain");
+    put(&plain, "same.txt", "s", 5);
+    put(&plain, "old.txt", "v2", 5);
+    put(&plain, "d/new.txt", "n", 5);
+    put(&plain, "secret.txt", "x", 5);
+    put(&plain, ".syncit/config", "not a config", 5);
+    put(&plain, "run.sh", "#!", 5);
+    chmod(&plain, "run.sh", 0o555);
+    std::os::unix::fs::symlink("old.txt", plain.join("link")).unwrap();
+
+    let listing = || {
+        let mut out = BTreeMap::new();
+        all(&a, &mut out);
+        out
+    };
+    let before = listing();
+    let here = paths(&["."]);
+    let planned = cmd::cp(dry, &plain, &here, &a).unwrap();
+    assert!(before == listing(), "a dry run wrote something");
+    let done = cmd::cp(O, &plain, &here, &a).unwrap();
+    assert_eq!(planned, done);
+    // The vault's unrecorded files were recorded before any was replaced.
+    assert_eq!((done.recorded, done.added, done.updated), (4, 2, 1));
+    assert!(done.has("added", "d/new.txt") && done.has("added", "run.sh"));
+    assert!(done.has("updated", "old.txt"));
+    let recorded = |e: &syncit::entry::Entry| e.hash == Some(sha256(b"v1"));
+    assert!(log(&a).entries.values().any(recorded));
+    assert!(is(&a, "old.txt", "v2") && is(&a, "d/new.txt", "n") && is(&a, "keep.txt", "k"));
+    assert_eq!(exec(&a, "run.sh"), Some(true));
+    // Not copied: what the vault ignores, a link, and the source's `.syncit`.
+    assert!(!a.join("secret.txt").exists() && !a.join("link").exists());
+    Config::load(&a).unwrap();
+    assert!(names(&a).iter().all(|n| !n.starts_with(".syncit-tmp-")));
+    // The copies are unrecorded edits, as if made by hand.
+    let found = status(&a);
+    assert!(has(&found, "modified", "old.txt") && has(&found, "new", "d/new.txt"));
+    assert!(!has(&found, "modified", "same.txt"));
+    // Again, there is nothing to copy.
+    let again = cmd::cp(O, &plain, &here, &a).unwrap();
+    assert_eq!((again.added, again.updated), (0, 0));
+
+    // A named source lands under its name, in a folder that need not exist.
+    let named = paths(&["plain/d", "plain/old.txt"]);
+    let done = cmd::cp(O, tmp.path(), &named, &a.join("in/here")).unwrap();
+    assert!(done.has("added", "in/here/d/new.txt") && done.has("added", "in/here/old.txt"));
+    assert!(is(&a, "in/here/d/new.txt", "n"));
+    // A missing source is an error, and nothing is copied.
+    let both = paths(&["plain/run.sh", "plain/nowhere"]);
+    assert!(cmd::cp(O, tmp.path(), &both, &a.join("x")).is_err());
+    assert!(!a.join("x").exists());
+    // The destination must be in a vault.
+    assert!(cmd::cp(O, &a, &paths(&["keep.txt"]), &plain.join("d")).is_err());
+}

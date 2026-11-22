@@ -317,7 +317,7 @@ fn write_copy(
 }
 
 /// Segments come from other vaults and must not write outside this one.
-fn no_symlinked_parent(v: &Vault, p: &str) -> Result<()> {
+pub fn no_symlinked_parent(v: &Vault, p: &str) -> Result<()> {
     let mut dir = v.root.join(p);
     while dir.pop() && dir != v.root {
         if dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {

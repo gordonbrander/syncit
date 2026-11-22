@@ -3,20 +3,22 @@
 
 use crate::blobs::{available, hash_file, retain};
 use crate::config::{Config, default_nickname, prefix_matches};
+use crate::dirstate::is_exec;
 use crate::entry::valid_path;
 use crate::log::PathState;
-use crate::materialise::{copy_name, materialise, prune, write_now};
+use crate::materialise::{copy_name, materialise, no_symlinked_parent, prune, write_now};
 use crate::output::{
     Event, Message, Options, State, Summary, Version, print_states, print_stdout, warn,
 };
 use crate::scan::{deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
-use crate::vault::{Vault, find_root, relative, resolve_path, write_atomic};
+use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique, write_atomic};
 use anyhow::{Context, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -708,6 +710,118 @@ fn remove_here(
             prune(&v.root, &file);
         }
         v.event(opts, sum, kind, &path, "");
+    }
+    Ok(())
+}
+
+/// Copy files from anywhere into the vault that has the folder `dest`. Each
+/// source lands in `dest` under its own name, a folder with all its files; a
+/// source with no name of its own (`.`) lands as its contents. A file the
+/// vault lacks is added, one that differs is replaced, and nothing is
+/// deleted. The copies are not recorded: they are edits for the next scan.
+pub fn cp(opts: &Options, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Result<Summary> {
+    let dest = resolve_path(&cwd.join(dest))?;
+    let mut v = Vault::open(opts, &dest, true)?;
+    let into = relative(&v.root, &dest)?;
+    let mut sum = Summary::default();
+    announce(opts);
+    // What is about to be replaced is recorded first, as `restore` does.
+    record(opts, &mut v, None, &mut sum)?;
+
+    let (mut files, mut odd, mut ignored) = (vec![], 0, 0);
+    for src in sources {
+        let name = match src.file_name() {
+            Some(name) => name.to_str().context("a source name is not UTF-8")?,
+            None => "",
+        };
+        collect(&cwd.join(src), under(&into, name), &mut files, &mut odd)?;
+    }
+    for (src, path) in files {
+        if v.skips(&path) {
+            ignored += 1;
+            continue;
+        }
+        let cannot = || format!("cannot read {}", src.display());
+        let ours = (
+            hash_file(&src).with_context(cannot)?,
+            is_exec(&src.metadata().with_context(cannot)?),
+        );
+        let file = v.root.join(&path);
+        let theirs = file
+            .symlink_metadata()
+            .ok()
+            .map(|meta| (hash_file(&file).unwrap_or_default(), is_exec(&meta)));
+        let kind = match theirs {
+            None => "added",
+            Some(theirs) if theirs == ours => continue,
+            Some(_) => "updated",
+        };
+        if !opts.dry_run {
+            no_symlinked_parent(&v, &path)?;
+            let dir = file.parent().context("no parent folder")?;
+            fs::create_dir_all(dir)?;
+            // By way of a scratch file, which a scan removes if this stops.
+            let tmp = dir.join(format!("{TMP_PREFIX}{}", unique()));
+            fs::copy(&src, &tmp).with_context(cannot)?;
+            // A copy is an edit made now, whatever mtime the copy carried.
+            File::open(&tmp)?.set_modified(SystemTime::now())?;
+            fs::rename(&tmp, &file).with_context(|| format!("cannot write {}", file.display()))?;
+        }
+        v.event(opts, &mut sum, kind, &path, "");
+    }
+    if odd > 0 {
+        warn(
+            opts,
+            format!("skipped {odd} symbolic links or special files"),
+        );
+    }
+    if ignored > 0 {
+        let root = v.root.display();
+        warn(
+            opts,
+            format!("{root} ignores {ignored} files; they were not copied"),
+        );
+    }
+    Ok(sum)
+}
+
+/// `name` under the vault folder `dir`; either may be empty.
+fn under(dir: &str, name: &str) -> String {
+    match (dir.is_empty(), name.is_empty()) {
+        (false, false) => format!("{dir}/{name}"),
+        _ => format!("{dir}{name}"),
+    }
+}
+
+/// The regular files at or under `src`, each with the vault path it is
+/// copied to, `to` being that of `src` itself. A `.syncit` folder is left
+/// out: a vault's own records are not files to copy.
+fn collect(
+    src: &Path,
+    to: String,
+    files: &mut Vec<(PathBuf, String)>,
+    odd: &mut usize,
+) -> Result<()> {
+    let cannot = || format!("cannot read {}", src.display());
+    let meta = src.symlink_metadata().with_context(cannot)?;
+    if meta.is_file() {
+        files.push((src.to_path_buf(), to));
+    } else if !meta.is_dir() {
+        *odd += 1;
+    } else {
+        let mut items = fs::read_dir(src)
+            .with_context(cannot)?
+            .collect::<Result<Vec<_>, _>>()?;
+        items.sort_by_key(|item| item.file_name());
+        for item in items {
+            let name = item.file_name();
+            let name = name
+                .to_str()
+                .with_context(|| format!("a name in {} is not UTF-8", src.display()))?;
+            if !name.eq_ignore_ascii_case(".syncit") {
+                collect(&item.path(), under(&to, name), files, odd)?;
+            }
+        }
     }
     Ok(())
 }

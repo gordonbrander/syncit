@@ -200,10 +200,25 @@ fn cli_smoke() {
         "{help}"
     );
 
+    // cp, from a folder that is not a vault.
+    let plain = tmp.path().join("plain");
+    fs::create_dir(&plain).unwrap();
+    fs::write(plain.join("n.txt"), "n").unwrap();
+    let (code, out) = run(&plain, &["cp", "--dry-run", ".", "../a/d"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with("dry run: nothing is changed\nA d/n.txt\n"),
+        "{out}"
+    );
+    assert!(!a.join("d/n.txt").exists());
+    assert_eq!(run(&plain, &["cp", "n.txt", "../a/d"]).0, 0);
+    assert_eq!(fs::read_to_string(a.join("d/n.txt")).unwrap(), "n");
+    assert_eq!(run(&plain, &["cp", "n.txt"]).0, 1, "no destination");
+
     let (code, help) = run(&a, &["--help"]);
     assert_eq!(code, 0);
     for command in [
-        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "drop",
+        "init", "clone", "sync", "push", "pull", "snapshot", "status", "get", "move", "cp", "drop",
         "blame", "log", "restore", "config",
     ] {
         assert!(

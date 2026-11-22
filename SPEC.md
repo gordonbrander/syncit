@@ -490,7 +490,7 @@ Scanning precedes exchange, so entries are written from what each vault had befo
 
 ### Dry run
 
-`sync`, `push`, `pull`, `move` and `drop` take `--dry-run`. It is the same procedure with every write to either vault left out; the vault values in memory are updated as usual, so each step sees what the real run would see and prints the same lines. `Options.dry_run` carries the flag.
+`sync`, `push`, `pull`, `move`, `drop` and `cp` take `--dry-run`. It is the same procedure with every write to either vault left out; the vault values in memory are updated as usual, so each step sees what the real run would see and prints the same lines. `Options.dry_run` carries the flag.
 
 - Scan: dry mode (section 7).
 - Exchange: a segment is validated and its entries added to the receiver's log in memory, not stored. What the other vault's dry scan recorded exists only in its memory, so the receiver also takes every entry of the other vault's in-memory log.
@@ -553,6 +553,7 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
 | `syncit drop [--check <vault>] [--force] [--dry-run] <path>...` | See below. (`R7`) |
+| `syncit cp [--dry-run] <path>... <dest>` | See below. |
 | `syncit blame [path]...` | See below. |
 | `syncit log [path]...` | See below. (`R26`) |
 | `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
@@ -594,6 +595,17 @@ A failure in steps 2, 3 or 5 is exit code 1.
 4. Steps 6 to 8 of `move`. Each removed file is reported as `dropped`.
 
 Nothing is sent to the checked vault; scanning it may write a segment there, as any scan may. `move` is the command for "put it there, then remove it here"; `drop` is for files another vault already has, or that are not wanted at all.
+
+### cp
+
+`syncit cp [--dry-run] <path>... <dest>`, argument order as in `cp -R`. It copies files into a vault from anywhere: the sources are relative to the current directory, which need not be in a vault, and need not be in one themselves. `<dest>` is a folder in the target vault, found by walking up from it; it need not exist. This is the one command whose vault is not the one at the current directory. No second vault is opened, even if the sources are in one.
+
+1. Open and lock the vault above `<dest>`. Scan it and `retain()`, as `restore --in-place` does, so that an unrecorded edit is recorded before its file is replaced.
+2. Collect the regular files at or under each source, without following symbolic links. A source lands in `<dest>` under its last name, a folder with its files below that; a source with no last name (`.`, `..`) lands as its contents. Symbolic links and special files are counted and left out. A folder named `.syncit` is left out. A source that cannot be read fails the command here, before anything is written.
+3. For each file, in order: if the vault would not scan its target path (`skips`), count it and go on. Compare its hash and executable bit with the file at the target path. The same: nothing. No file there: `added`. Otherwise: `updated`. The file is copied to a scratch file beside the target (prefix `.syncit-tmp-`), given the current time as its mtime, and renamed onto the target. The write is refused if a parent folder in the vault is a symbolic link.
+4. Warn once with the number of links and special files, and once with the number of ignored files.
+
+Nothing is deleted, no entry is written for the copies and the dirstate is not touched: they are unrecorded edits, and the next scan records them as it would files put there by hand, including adding to `include` in a partial vault. The mtime is the time of the copy because the copy is the edit; it also keeps the unchanged test from passing a file that came with its source's mtime. Events carry no arrow. With `--dry-run` step 1 is a dry scan and step 3 writes nothing; the lines and the summary are the real run's.
 
 ### blame
 
@@ -847,6 +859,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `copy_deleted_stays_deleted` | deleting a conflict copy and syncing does not bring it back |
 | `move_refuses` | `move` refuses, removing nothing, when the target excludes a path (and then sends nothing), when the target has a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
 | `drop_refuses_sole_copy` | `drop` refuses without `--check` when the vault keeps no history; an unrecorded edit under the path is recorded as an entry, and then blocks the drop against the checked vault until it is pushed; a file the checked vault has lost since its last scan blocks it too; with two paths given, nothing is dropped; nothing reads as deleted afterwards; a path with no files is excluded; local history counts as another copy; a vault cannot check itself; `--force` overrides |
+| `cp_from_plain_folder` | `cp` from a folder that is not a vault adds what the vault lacks, replaces what differs and leaves the rest; the vault is scanned first; ignored files, links and the source's `.syncit` are not copied; a read-only executable arrives executable; the copies show in `status` as unrecorded; `.` copies contents and a named source lands under its name in a folder that need not exist; a missing source copies nothing; a dry run writes nothing and returns the real run's `Summary` |
 | `config_command` | `config` prints the settings, turns local history on and off, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | `store_layout` | a store has `format`, `log/` and `blobs/`; an empty directory is initialised on first write; a non-empty directory without `format`, and one with version 2, are refused and left untouched |
