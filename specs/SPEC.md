@@ -103,7 +103,7 @@ Out:
 - One Cargo package named `syncit`, with a library (`src/lib.rs`) and a binary (`src/main.rs`). Integration tests call the library.
 - Rust edition 2024. Minimum Rust version 1.89, for `std::fs::File::try_lock`.
 - Dependencies: `clap` (with `derive`), `serde` (with `derive`), `serde_json`, `sha2`, `anyhow`, and `diffy` for the three-way merge of text (section 9).
-- Remote vaults need more: an object-store client, a cipher, a mnemonic encoder and a keychain. They are listed in `store.md`, section 2.
+- Remote vaults need more: an object-store client, a cipher, a mnemonic encoder and a keychain. They are listed in `store.md`, section 2, and are optional: two Cargo features, `remote` and `keychain`, both on by default. A build with neither has only the dependencies above.
 - Dev dependency: `tempfile`.
 - From the standard library, not from crates: directory walking (`fs::read_dir`), hex encoding, setting file times (`File::set_modified`), file locking, atomic rename.
 
@@ -943,6 +943,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Origin | none. No vault is special and there is no default peer: a command that involves another vault names it, by path, URL or nickname. A vault may remember others in `remotes`, an address book of nickname to location. A folder that moves breaks only its own entry |
 | A partial vault from a store | `clone <vault> <dir> --only <path>`, repeatable, with paths from the vault's root. A URL cannot carry a sub-folder as a path does, so the flag names it. The form that infers the sub-folder from a path stays (`store.md`, section 9) |
 | Reaching a store | with the ordinary commands and a target. No `store` setting and no upload after every run: a command does what its name says, and backing up on a schedule is `push` in cron |
+| Size of the build | everything remote vaults add is behind two Cargo features, `remote` and `keychain`, on by default. Without them the build is as small as before. No feature for each cloud: they share their dependencies |
 | Object-store client | the `object_store` crate, driven from a private single-thread async runtime. No external tools. OpenDAL was ruled out because it needs a newer Rust than 1.89 |
 | Store encryption | always on. XChaCha20-Poly1305 in 64 KiB chunks. An object's name is a keyed function of its content's hash, so the provider learns neither the content nor whether a known file is stored |
 | Store keys | one 32-byte key for each remote vault, written as a 24-word BIP39 phrase and shown once, at creation. Kept in the OS keychain when there is one; otherwise given in `SYNCIT_SECRET_KEY` or, if the user chooses, saved in `.syncit/secrets.env` |

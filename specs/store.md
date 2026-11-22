@@ -35,25 +35,54 @@ Everything else is the same as for any vault: a `config` with `nickname`, `inclu
 ## 2. Dependencies
 
 ```toml
-object_store = { version = "0.14", features = ["aws", "gcp", "azure"] }
-tokio = { version = "1", features = ["rt"] }
-futures = "0.3"
-url = "2"
-chacha20poly1305 = "0.11"
-aead-stream = { version = "0.6", features = ["alloc"] }
-hkdf = "0.13"
-getrandom = "0.4"
-zeroize = "1"
-bip39 = { version = "3", features = ["zeroize"] }
-rpassword = "7"
-keyring-core = "1"
+[features]
+default = ["remote", "keychain"]
+remote = [
+    "dep:object_store", "dep:tokio", "dep:futures", "dep:url",
+    "dep:chacha20poly1305", "dep:aead-stream", "dep:hkdf", "dep:getrandom",
+    "dep:zeroize", "dep:bip39", "dep:rpassword",
+]
+keychain = [
+    "remote", "dep:keyring-core",
+    "dep:apple-native-keyring-store", "dep:zbus-secret-service-keyring-store",
+]
+
+[dependencies]
+object_store = { version = "0.14", features = ["aws", "gcp", "azure"], optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+futures = { version = "0.3", optional = true }
+url = { version = "2", optional = true }
+chacha20poly1305 = { version = "0.11", optional = true }
+aead-stream = { version = "0.6", features = ["alloc"], optional = true }
+hkdf = { version = "0.13", optional = true }
+getrandom = { version = "0.4", optional = true }
+zeroize = { version = "1", optional = true }
+bip39 = { version = "3", features = ["zeroize"], optional = true }
+rpassword = { version = "7", optional = true }
+keyring-core = { version = "1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1", features = ["keychain"] }
+apple-native-keyring-store = { version = "1", features = ["keychain"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"], optional = true }
 ```
+
+These are added to the dependencies the crate has today. Everything this document adds is optional, behind two Cargo features that are both on by default:
+
+| Feature | Adds | Without it |
+|---|---|---|
+| `remote` | remote vaults: `remote.rs`, `crypt.rs`, `keys.rs`, `init <url>`, URL targets | the build has today's dependencies. A URL target, or a nickname that names one, fails with `this build has no remote support: install with the remote feature` |
+| `keychain` | the OS keychain as a place for the key. Needs `remote` | the keychain is left out of the search of section 8, and a key is saved only in `secrets.env`. `SYNCIT_SECRET_KEY` and `secrets.env` work as specified |
+
+Rules for the features:
+
+- `cargo install` gives the whole tool. `--no-default-features` gives the small one, and `--no-default-features --features remote` a build for a machine with no keychain.
+- The `Storage` trait, `Dir`, `config.remotes`, the `remote` commands and targets that are paths or nicknames of paths are **not** behind a feature. The config format is the same in every build, so a vault made by one build opens in another.
+- The gates are few and at the edges: the `Remote` implementation and the two modules beside it, the place a URL target is opened, `init <url>`, and the keychain entry in the key search. No `#[cfg]` inside the run, the log or the blob code.
+- There is no feature for each cloud. S3, GCS and Azure share nearly all their dependencies.
+
+Measured on 2026-11-22, as packages in the whole tree for a Linux build: 38 today; 130 with `remote` limited to `file://`; 189 with the keychain; 231 with S3, and the same with GCS and Azure. S3 brings the only part that compiles C, the TLS provider.
 
 These were tried on 2026-11-22 in a throwaway crate, on macOS with Rust 1.96: the list above resolved and built, and small programs ran the stream cipher of section 6, a phrase round trip, the mock keychain, and a `file://` store with a multipart upload. What that established:
 
@@ -212,7 +241,7 @@ A remote vault created by `init` has `keep_history: null` (all) and `autocompact
 
 If none matches: `no key for <url>: set SYNCIT_SECRET_KEY, or run syncit remote add <url>`. Only `remote add` and `clone` ever prompt.
 
-**Keychain.** Set the platform store as `keyring_core`'s default once per process. `NoEntry` means "not here". Any other error means the keychain cannot be used on this machine now (a headless Linux box, macOS over SSH): go on to the next candidate, do not fail.
+**Keychain.** Only in a build with the `keychain` feature (section 2); without it this candidate does not exist. Set the platform store as `keyring_core`'s default once per process. `NoEntry` means "not here". Any other error means the keychain cannot be used on this machine now (a headless Linux box, macOS over SSH): go on to the next candidate, do not fail.
 
 **`.syncit/secrets.env`.** Local, like `config`; `.syncit` is never synced. Mode 0600, written with `write_atomic`. One entry for each remote:
 
@@ -224,7 +253,7 @@ SYNCIT_SECRET_KEY="abandon ability … zoo"
 **Saving a phrase**, after `init <url>`, `remote add` or `clone` has a key that matched:
 
 - It came from `Options.secret_key`: save nothing.
-- The keychain is usable: save it there. Already there: nothing to do.
+- The keychain is usable (and the build has it): save it there. Already there: nothing to do.
 - Otherwise, if the command runs in a vault: with `--save-key`, write it to `secrets.env`; on a terminal, ask `Save the key to .syncit/secrets.env? [y/N]`; with neither, do not save, and say that `SYNCIT_SECRET_KEY` must be set for every command that uses this remote.
 - Otherwise (no keychain and no local vault): do not save, and say the same.
 
@@ -308,7 +337,7 @@ The rest is `get` as it is: include the prefixes, then pull.
 
 ## 12. Tests
 
-No test uses the real keychain or the network. Tests pass a phrase in `Options.secret_key`, which keeps the keychain out of it; the one keychain test installs `keyring_core::mock`. Remote vaults in tests are `file://` URLs of temporary directories. Reuse the helpers in `tests/stories.rs`.
+No test uses the real keychain or the network. Tests pass a phrase in `Options.secret_key`, which keeps the keychain out of it; the one keychain test installs `keyring_core::mock`. Tests of remote vaults are compiled only with `remote`, and the keychain part of `key_lookup_order` only with `keychain`. Remote vaults in tests are `file://` URLs of temporary directories. Reuse the helpers in `tests/stories.rs`.
 
 | Test | Checks |
 |---|---|
@@ -333,18 +362,19 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `status_vs_remote` | `status --vs origin` reports the same states as against an equivalent folder vault |
 | `dry_run_remote` | a dry `sync` leaves the remote and the vault byte-identical and reports what the real run then does |
 | `cloud_remote` | `story_c2_sync_through_remote` against the URL in `SYNCIT_TEST_REMOTE_URL`; skipped when it is not set |
+| `no_remote_feature` | compiled only without `remote`: a URL target and `init <url>` fail with the message of section 2 and change nothing; `remote add` of a folder vault and `sync` by its nickname work |
 | `cli_smoke` additions | `init <url>`, `remote`, `remote add`, `remote remove`, `sync origin`, with `SYNCIT_SECRET_KEY` set |
 
 ## 13. Milestones
 
-Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` passing. Do them in order; each is a commit that leaves the tool working.
+Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` passing, in each of the three builds of section 14 once the features exist. Do them in order; each is a commit that leaves the tool working.
 
-1. **The storage seam.** The `Storage` trait and `Dir`; `Vault.storage`; every access to log, blobs and config through it. No behaviour changes. Test: the existing suite, unchanged.
-2. **`crypt`.** Tests: `crypt_round_trip`, `crypt_rejects`, `names_are_keyed`.
+1. **The storage seam.** The `Storage` trait and `Dir`; `Vault.storage`; every access to log, blobs and config through it. No behaviour changes and no new dependency. Test: the existing suite, unchanged.
+2. **`crypt`.** The `remote` and `keychain` features of section 2 are declared here, with the first optional dependencies, and CI gains its second and third jobs (section 14). Tests: `crypt_round_trip`, `crypt_rejects`, `names_are_keyed`.
 3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_env_file`.
 4. **`Remote` and `init <url>`.** The object-store implementation of `Storage`, `format`, the encrypted `config`. Test: `init_remote`.
 5. **Bare vaults in a run.** `Vault.bare`, the derived dirstate, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
-6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`. Tests: `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
+6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
 7. **A real bucket.** Run `cloud_remote` against MinIO or a real bucket and fix what differs from `file://`.
 8. **Documents.** `SPEC.md`, `PRD.md` and `CRDT.md` already describe this design as not built. When it is built: in `SPEC.md`, remove the "Not built" notes in sections 8, 10 and 14, tick milestone 9, drop the "not built yet" entry in section 17 and record there anything built differently; in `PRD.md`, remove "Stores are not built yet". Add a README section: remotes, the phrase and its warning, credentials by environment variable, the macOS keychain prompt after reinstalling, the multipart lifecycle rule.
 
@@ -352,7 +382,8 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 
 `SPEC.md`, "Working rules for the implementer", applies. In addition:
 
-- **Done** means milestones 1 to 6 and 8 are complete: every test in section 12 except `cloud_remote` exists and passes, with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean, and CI (`.github/workflows/ci.yml`) green on Linux.
+- **Done** means milestones 1 to 6 and 8 are complete: every test in section 12 except `cloud_remote` exists and passes, with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean, and CI (`.github/workflows/ci.yml`) green on Linux in all three builds.
+- **Three builds are kept working.** CI runs clippy and the tests three times: with the default features, with `--no-default-features`, and with `--no-default-features --features remote`. A build that is not tested stops compiling. Run all three locally before each commit from milestone 2 on.
 - **Milestone 7 needs a bucket.** If `SYNCIT_TEST_REMOTE_URL` is not set and no local S3-compatible server can be started, write `cloud_remote` so that it skips, leave milestone 7 open, and say so in the final report. Do not mark it done on the strength of `file://`.
 - **One commit for each milestone**, on the current branch, with the tool working after each.
 - **Milestone 1 changes no behaviour.** If an existing test has to change to make it pass, the refactor is wrong.
