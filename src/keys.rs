@@ -379,7 +379,7 @@ mod tests {
             )
         );
         remove_secret(root, "s3://bucket/one").unwrap();
-        let left: Vec<String> = secrets(root).iter().map(|p| p.to_string()).collect();
-        assert_eq!(left, [two.to_string()]);
+        let left = secrets(root);
+        assert!(left.len() == 1 && *left[0] == *two);
     }
 }
