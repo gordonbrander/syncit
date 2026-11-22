@@ -135,6 +135,12 @@ With --vs there are two marks and two words: ours first, theirs second.")]
         #[arg(long)]
         in_place: bool,
     },
+    /// Drop old versions' content that keep-history no longer covers
+    Compact {
+        /// Show what would happen; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show this vault's settings, or change one
     Config {
         #[command(subcommand)]
@@ -144,13 +150,32 @@ With --vs there are two marks and two words: ours first, theirs second.")]
 
 #[derive(Subcommand)]
 enum SettingArg {
-    /// Keep old versions inside this vault: on or off
-    LocalHistory {
+    /// How many versions back to keep the content of: a number, or all
+    KeepHistory {
+        #[arg(value_parser = depth, value_name = "N|all")]
+        value: Depth,
+    },
+    /// Drop versions older than that at the end of every run: on or off
+    Autocompact {
         #[arg(value_parser = ["on", "off"])]
         value: String,
     },
     /// The name this vault's changes are recorded under
     Nickname { value: String },
+}
+
+/// A value of `keep-history`: `None` is all.
+#[derive(Clone)]
+struct Depth(Option<u32>);
+
+fn depth(s: &str) -> Result<Depth, String> {
+    match s {
+        "all" => Ok(Depth(None)),
+        _ => s
+            .parse()
+            .map(|n| Depth(Some(n)))
+            .map_err(|_| "a number, or all".to_string()),
+    }
 }
 
 fn main() {
@@ -165,6 +190,7 @@ fn main() {
         | Command::Pull { dry_run, .. }
         | Command::Move { dry_run, .. }
         | Command::Cp { dry_run, .. }
+        | Command::Compact { dry_run }
         | Command::Drop { dry_run, .. } => dry_run,
         _ => false,
     };
@@ -208,9 +234,11 @@ fn main() {
             hash,
             in_place,
         } => commands::restore(opts, cwd, &path, &hash, in_place).map(|_| None),
+        Command::Compact { .. } => commands::compact(opts, cwd).map(|_| None),
         Command::Config { setting } => {
             let change = setting.map(|setting| match setting {
-                SettingArg::LocalHistory { value } => Setting::LocalHistory(value == "on"),
+                SettingArg::KeepHistory { value } => Setting::KeepHistory(value.0),
+                SettingArg::Autocompact { value } => Setting::Autocompact(value == "on"),
                 SettingArg::Nickname { value } => Setting::Nickname(value),
             });
             commands::config(opts, cwd, change).map(|_| None)

@@ -81,7 +81,7 @@ Version 1 is done when all of these hold:
 1. Every milestone box in section 15 is ticked.
 2. `cargo test` passes, and every test named in section 14 exists.
 3. `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` pass.
-4. `cargo run -- --help` lists the eleven commands of section 11.
+4. `cargo run -- --help` lists the commands of section 11.
 
 ## 2. Scope of version 1
 
@@ -91,7 +91,7 @@ Out:
 
 - The Coulds: `R21` (limit a run to a path), `R22` (copy-on-write stashing), `R23` (mass-delete guard). `syncit sync` therefore takes no `[path]` argument in version 1.
 - Everything under "Non-goals" in `PRD.md`.
-- Signed segments, the heads file, and compaction (`CRDT.md`, "Planned extension", "Lookups", "Compaction").
+- Signed segments, the heads file, and compaction of the log (`CRDT.md`, "Planned extension", "Lookups", "Compaction"). Compaction keeps the whole log and drops only old blobs. Blobs are compacted (section 8); the log never is.
 - Peers reached over a network (SSH, iroh). A vault is a directory on this machine. A store may also be an S3 bucket (section 8).
 - Windows. Version 1 targets macOS and Linux.
 
@@ -180,16 +180,18 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
   "syncit": 1,
   "include": [""],
   "exclude": [],
-  "keep_local_history": false,
+  "keep_history": 1,
+  "autocompact": true,
   "nickname": "notes"
 }
 ```
 
 - `syncit`: format version (`R25`). A command refuses to run on a vault, or with a peer, whose version is not 1.
 - `include`, `exclude`: the filter's prefixes, vault-relative, `/`-separated. `""` is the vault root.
-- `keep_local_history`: retain every version this vault sees in `.syncit/blobs/` (`R15`). Local history is whatever blobs are there; it is never required to be complete.
+- `keep_history`: how many versions back from a head this vault keeps the content of in `.syncit/blobs/` (`R15`; section 8, "Retaining"). `0` keeps no history, `null` keeps every version, and a new vault has `1`. Local history is whatever blobs are there; it is never required to be complete.
+- `autocompact`: whether the end of every run drops the blobs `keep_history` no longer covers (section 8, "Compaction"). A new vault has `true`. With `false` they are dropped only by `syncit compact`.
 - `nickname`: the label written into the header of every segment this vault records (`CRDT.md`, "Nickname"). `init` and `clone` set it to the folder's name, with whitespace and control characters replaced by `-`, cut to 64 bytes, or to `vault` if that leaves nothing. It is a label only: `blame` prints it and no other code reads it.
-- Written pretty-printed. Unknown fields are an error. `keep_local_history` and `nickname` are changed with `syncit config` (section 11). Milestone 9 adds a `store` field beside them.
+- Written pretty-printed. Unknown fields are an error. `keep_history`, `autocompact` and `nickname` are changed with `syncit config` (section 11). Milestone 9 adds a `store` field beside them.
 - A vault records nothing about other vaults. There is no origin or default peer: any vault syncs with any other, and folders may move.
 
 **Included** (`PRD.md`, "What a vault has"): a prefix matches a path if it is `""`, equals the path, or is followed in the path by `/`. Among all matching prefixes in both lists, the longest decides: included if it came from `include`. If none matches, the path is excluded. A prefix is never in both lists.
@@ -335,11 +337,35 @@ Implements `PRD.md`, "Blobs" and "Stores". Serves `R11`, `R13`, `R15`, `R16`, `R
 
 ### Retaining
 
-A vault retains blobs if `keep_local_history` is on. With it off the vault never writes to `.syncit/blobs/` (`R13`). Local history is whatever blobs are there: it is never required to be complete.
+`keep_history` says how many versions back from a head a vault keeps the content of. `Log::keep(depth, paths)` is the rule, a pure function of the log that gives a set of hashes:
 
-`retain()`: for every non-null hash in the log that is not already in `.syncit/blobs/`, `fetch` it into `.syncit/blobs/`. Hashes with no source are skipped silently.
+- `null`: every non-null hash.
+- Otherwise, for each path:
+  - one head: the hashes of the entries within `depth` steps of the head along `parents`. The head is step 0, and a tombstone or a change of the executable bit alone is a version like any other;
+  - more than one head, or `Incomplete`: every hash of the path. A merge reads the heads' common ancestor and a conflict copy reads a loser, however far back they are.
+- The union over paths: content two paths share is kept while either needs it.
+
+With depth 1 or more, the last content of a deleted file is kept: the tombstone is the head.
+
+A vault retains blobs unless `keep_history` is `0`; then it never writes to `.syncit/blobs/` (`R13`). Local history is whatever blobs are there: it is never required to be complete.
+
+`retain()`: for every hash that `Log::keep` gives for the paths this vault takes (included and not ignored), and that is not already in `.syncit/blobs/`, `fetch` it into `.syncit/blobs/`. Hashes with no source are skipped silently. Two limits follow from the rule, and both are meant:
+
+- A vault collects only what it keeps. A peer that keeps more, or has not compacted, does not fill it up again.
+- A partial vault does not gather the content of paths it excludes.
 
 A retaining vault calls `retain()` after every scan, and again after segments are exchanged and before anything is materialised, so that a version is saved before it is replaced.
+
+### Compaction
+
+Compaction keeps the whole log and drops only old blobs. No entry and no segment is removed, rewritten or trimmed, so heads, winners, conflicts and ancestry are computed exactly as before, here and in every vault this one syncs with, and nothing becomes `incomplete`. What a compacted vault can no longer do is supply the bytes of an old version: `log` lists it as `no content`, and `restore` of it fails unless a source still has the blob.
+
+`compact()`: remove from `.syncit/blobs/` every file whose name is not in `Log::keep(keep_history)` taken over **all** paths, taken by this vault or not. So:
+
+- The content of a current version is never dropped, at any setting, `0` included. A file removed with `drop` may have its only copy here (section 11).
+- A blob the log does not name is dropped.
+
+It runs at the end of a run and of `snapshot` if `autocompact` is on (section 10, step 8), and when the user runs `syncit compact` (section 11). It does not run in `restore`, `cp`, `move` or `drop`: `restore` and `cp` record the folder and then replace files, and must not drop a version in between. A dry run drops nothing.
 
 ### Stores
 
@@ -367,10 +393,10 @@ This is `.syncit/` without its local files (`config`, `dirstate`, `lock`, `tmp/`
 
 A vault may name one store of its own, which then receives its history automatically:
 
-- `config` gains `"store"`: a store location or `null` (`R16`, `R24`): the absolute path of a directory, or `s3://<bucket>/<prefix>`. It is independent of `keep_local_history`; either, both or neither may be set.
+- `config` gains `"store"`: a store location or `null` (`R16`, `R24`): the absolute path of a directory, or `s3://<bucket>/<prefix>`. It is independent of `keep_history`.
 - `syncit config store <location>` sets it, to an `s3://` location as given or to the absolute form of a directory path, which need not exist yet. `syncit config store none` clears it. `syncit config` prints it, marking a store that is set but not reachable.
-- The vault retains blobs if `keep_local_history` is on **or** `store` is set, and `retain()` skips hashes the store already has.
-- `flush()`, at the end of every run and snapshot when the store is reachable: upload each blob in `.syncit/blobs/` that the store lacks, then each segment in `.syncit/log/` that the store lacks. Then, if `keep_local_history` is off, delete from `.syncit/blobs/` every blob the store now has. While the store is unreachable, blobs wait in `.syncit/blobs/`.
+- The vault retains blobs if `keep_history` is not `0` **or** `store` is set, and `retain()` skips hashes the store already has.
+- `flush()`, at the end of every run and snapshot when the store is reachable: upload each blob in `.syncit/blobs/` that the store lacks, then each segment in `.syncit/log/` that the store lacks. Then, if `keep_history` is `0`, delete from `.syncit/blobs/` every blob the store now has. While the store is unreachable, blobs wait in `.syncit/blobs/`.
 - The store's `blobs/<hash>` is the last source `fetch` tries, and is one more place `move` can send files to.
 
 ## 9. Materialise
@@ -436,7 +462,7 @@ Heads of losers that were not surfaced stay out, so the conflict stays open (`CR
 
 Implements `PRD.md`, "Merging text", and `CRDT.md`, "Merging". A path is merged when all of these hold; if any fails, the steps for a conflict apply unchanged.
 
-1. The versions it replaces are retained in this run: a vault that receives keeps history. A run computes this once, as `kept` = (the local vault receives and has `keep_local_history`) or (the peer receives and has it), and passes it to `materialise`. Such a vault calls `retain()` after the exchange and before anything is materialised (section 10, step 5), and `retain()` collects from the sources the merge reads, so every version a merge reads is already in that vault's `.syncit/blobs/`. The test is the setting, not the blobs on disk, because a dry run retains nothing and must decide alike. Milestone 9 widens it to a vault with a `store`, as it widens `retain()`.
+1. The versions it replaces are retained in this run: a vault that receives keeps history. A run computes this once, as `kept` = (the local vault receives and its `keep_history` is not `0`) or (the peer receives and its is not), and passes it to `materialise`. Such a vault calls `retain()` after the exchange and before anything is materialised (section 10, step 5), and `retain()` collects from the sources the merge reads, so every version a merge reads is already in that vault's `.syncit/blobs/`. The test is the setting, not the blobs on disk, because a dry run retains nothing and must decide alike. Milestone 9 widens it to a vault with a `store`, as it widens `retain()`.
 2. Its file name has the extension `md`, `markdown` or `txt`, compared without regard to ASCII case, after a non-empty stem. A constant, not a setting.
 3. It has exactly two heads, both files, with different hashes.
 4. `merge_base(path, a, b)` gives an entry: the heads' one lowest common ancestor, a file. It is a pure function of the log.
@@ -483,6 +509,7 @@ Save the dirstate once, after all paths.
 5. Each retaining receiver calls `retain()`. This happens for both before either materialises.
 6. Each receiver materialises with the other vault as blob source: the peer first, then the local vault.
 7. Collect conflicts from each receiver's log, for paths it includes, and report each once: for the local vault if it is open there, otherwise for the peer.
+8. Each vault with `autocompact` on compacts (section 8, "Compaction"). Last, so that no step of the run reads a blob that was just dropped. It prints nothing.
 
 `push` also warns when the local vault has files the peer excludes, `<peer> excludes <n> files (<names>); they were not copied`, and likewise for files the peer ignores, `<peer> ignores <n> files (<names>); they were not copied`. Each is printed once. The names are the top-level folders or files involved, at most five, then `and <n> more`. `sync` and `pull` do not warn; for them a partial vault taking only part is the ordinary case. The warning does not change the exit code.
 
@@ -494,7 +521,7 @@ Scanning precedes exchange, so entries are written from what each vault had befo
 
 - Scan: dry mode (section 7).
 - Exchange: a segment is validated and its entries added to the receiver's log in memory, not stored. What the other vault's dry scan recorded exists only in its memory, so the receiver also takes every entry of the other vault's in-memory log.
-- `retain()` does nothing.
+- `retain()` does nothing, and nothing is compacted.
 - Materialise: the safety checks run. Where the real run would fetch a blob, the dry run asks only whether a source file for it exists; it does not hash it, so a corrupt source reads as available. Nothing is written, renamed or deleted, and the dirstate is not saved. Dirstate rows are updated in memory.
 
 - `move` (section 11): every check runs, on the in-memory state, so a move that would be refused is refused with the same error. The config and dirstate are not saved and no file is removed; the `moved` events are printed.
@@ -548,7 +575,7 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit sync [--dry-run] [--no-remove] <vault>` | Section 10, both directions. (`R1`, `R12`) |
 | `syncit push [--dry-run] [--no-remove] <vault>` | Section 10; only the peer receives. (`R2`) |
 | `syncit pull [--dry-run] [--no-remove] <vault>` | Section 10; only the local vault receives. (`R2`) |
-| `syncit snapshot` | Scan, `retain()`. No peer. (`R17`) |
+| `syncit snapshot` | Scan, `retain()`, then compact if `autocompact` is on. No peer. (`R17`) |
 | `syncit status [-a] [path]... [--vs <vault>]` | See below. (`R18`, `R27`) |
 | `syncit get <path>...` | See below. (`R7`) |
 | `syncit move [--dry-run] <path>... <vault>` | See below. (`R7`) |
@@ -557,7 +584,9 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit blame [path]...` | See below. |
 | `syncit log [path]...` | See below. (`R26`) |
 | `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
-| `syncit config [local-history on\|off]` | See below. (`R15`) |
+| `syncit compact [--dry-run]` | See below. (`R15`) |
+| `syncit config [keep-history <n>\|all]` | See below. (`R15`) |
+| `syncit config autocompact on\|off` | See below. (`R15`) |
 | `syncit config nickname <name>` | See below. |
 
 `get`, `move` and `drop` take one or more paths. The steps below run once over all the paths together: `move` and `drop` make their checks for every file before removing anything, so they either remove them all or refuse.
@@ -670,7 +699,7 @@ Without `--in-place`:
 
 With `--in-place`:
 
-1. Open and lock the vault. Scan and `retain()`, so that an edit no scan has recorded is in the log, and kept if local history is on, before it is replaced.
+1. Open and lock the vault. Scan and `retain()`, so that an edit no scan has recorded is in the log, and kept if the vault keeps history, before it is replaced.
 2. If the row has that hash already: say so and stop, exit 0.
 3. If there is no row, the path's winner must be a tombstone; otherwise error. With no file here and a live winner, the vault does not have the path, and a scan would take the restored bytes for an old copy (section 7), which the next run would bring forward.
 4. Write the content at the path as in step 3 above.
@@ -678,10 +707,22 @@ With `--in-place`:
 
 The mtime is now, not the old entry's: restoring is a new edit, and with the old time it would lose a conflict to anything newer. Neither form has a summary; both exit 0 unless they fail. There is no `--dry-run` and no way to name a peer as the source of the content.
 
+### compact
+
+`syncit compact [--dry-run]` drops the stored versions that `keep_history` no longer covers (section 8, "Compaction"). It is how a vault with `autocompact` off is compacted; with it on there is rarely anything left to drop.
+
+1. Open and lock the vault. Nothing is scanned.
+2. Compact.
+3. Print an `info` message: `dropped <n> versions (<size>)`, or `nothing to drop`.
+
+With `--dry-run` the first line is `dry run: nothing is changed`, nothing is removed, and the message is the real run's. It has no summary and exits 0.
+
 ### config
 
-- `syncit config` prints the vault's settings, as `setting` messages: `local-history: on|off`, then `nickname: <nickname>`.
-- `syncit config local-history on|off` sets `keep_local_history`. Turning it off deletes nothing; blobs already stored stay until the user removes them.
+- `syncit config` prints the vault's settings, as `setting` messages: `keep-history: <n>|all`, `autocompact: on|off`, then `nickname: <nickname>`.
+- `syncit config keep-history <n>|all` sets `keep_history`: a number of versions, or `all` for `null`.
+- `syncit config autocompact on|off` sets `autocompact`.
+- A change deletes nothing by itself. If blobs are stored that `keep_history` no longer covers, an `info` line after the settings gives their number and says what will drop them: the next sync or snapshot with `autocompact` on, `syncit compact` with it off.
 - `syncit config nickname <name>` sets `nickname`, and fails if the name is not a valid nickname (section 5). Segments already written keep the old one.
 
 Each form prints the settings afterwards and exits 0. Milestone 9 adds `store`.
@@ -778,6 +819,7 @@ The same run's first and last lines with `--json`:
 | after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones. The deletion record names only the second until the next materialise sets it to both |
 | during `move` or `drop`, after saving the config, before saving the dirstate | present files under an excluded prefix | the scan includes each file on disk again, one include per file; nothing is lost, and running the command again completes it and leaves one exclude (`interrupted_move`) |
 | during `move` or `drop`, after saving the dirstate | files with no rows | the scan adopts and includes them; nothing is recorded as deleted |
+| while compacting | some of the blobs to drop are gone and others are not | each removal is whole; the next compaction removes the rest. The log was not touched |
 | while uploading to a store (milestone 9) | some blobs or segments are in the store and others are not | every object is whole or absent; a reader sees a path as `pending` or `incomplete` and waits; the next run uploads the rest |
 
 ## 14. Tests
@@ -816,8 +858,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `story_b1_conflict` | B.1 | both sides edit; after sync both have the same winner and the same copy; exit status reports the conflict; editing the winner and syncing closes it everywhere |
 | `story_c1_three_vaults` | C.1 | three vaults synced in several pairings and orders converge; a change relays through a middle vault |
 | `story_c2_sync_through_store` | C.2 | two vaults that never sync with each other both sync with one directory store, in either order, and converge, including a conflict; a vault with no history supplies its current files; `clone` is not needed, a new vault `pull`s from the store |
-| `story_d1_no_history` | D.1 | with local history off, `.syncit/blobs/` stays empty after syncs |
-| `story_d2_history` | D.2 | with local history on, every version's blob is present after edits and syncs, and a version that is nowhere else is restored from it; turned off, nothing more is kept and what was kept stays |
+| `story_d1_no_history` | D.1 | with `keep_history` 0, `.syncit/blobs/` stays empty after syncs |
+| `story_d2_history` | D.2 | with `keep_history` all, every version's blob is present after edits and syncs, and a version that is nowhere else is restored from it; set to 0, nothing more is collected and the next run drops what is no longer current |
 | `story_d3_snapshot` | D.3 | two snapshots without a peer give two entries in a chain; a later sync delivers both |
 | `story_e1_rerun` | E.1 | running sync twice changes nothing the second time and writes no segment |
 
@@ -825,6 +867,9 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 
 | Test | Asserts |
 |---|---|
+| `keep_cases` | which versions `Log::keep` keeps: a chain at depths 0, 1, 2 and all; a deletion counts as a version; a conflict and an incomplete path keep everything; a closed conflict keeps both versions it replaced at depth 1; content two paths share; only the paths selected |
+| `history_depth` | a new vault keeps one version back, and two when set so; the log keeps every entry and `log` lists the dropped versions as `no content`; a sync with a vault that keeps all does not bring them back, and that vault collects what this one still has; a deleted file's last content is kept and restored |
+| `compact_command` | with `autocompact` off old blobs pile up; `compact --dry-run` reports and drops nothing; `compact` drops them and leaves the log as it was; a path in conflict keeps every version; at `keep_history` 0 the current versions stay, among them a file removed with `drop`; with `autocompact` on a snapshot compacts |
 | `merge_base_cases` | the lowest common ancestor of two entries: concurrent edits, from further down each side, the lowest of several; none for independent creations, a criss-cross, or a deletion |
 | `mergeable_names` | which file names are merged |
 | `merge_text_conflict` | edits to different lines of a text file in two vaults, with the earlier version in one vault's history: both vaults have the merged text, no copy and no conflict; the path has one head whose parents are both edits, which stay in the log and can be restored; a second sync does nothing |
@@ -860,7 +905,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `move_refuses` | `move` refuses, removing nothing, when the target excludes a path (and then sends nothing), when the target has a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
 | `drop_refuses_sole_copy` | `drop` refuses without `--check` when the vault keeps no history; an unrecorded edit under the path is recorded as an entry, and then blocks the drop against the checked vault until it is pushed; a file the checked vault has lost since its last scan blocks it too; with two paths given, nothing is dropped; nothing reads as deleted afterwards; a path with no files is excluded; local history counts as another copy; a vault cannot check itself; `--force` overrides |
 | `cp_from_plain_folder` | `cp` from a folder that is not a vault adds what the vault lacks, replaces what differs and leaves the rest; the vault is scanned first; ignored files, links and the source's `.syncit` are not copied; a read-only executable arrives executable; the copies show in `status` as unrecorded; `.` copies contents and a named source lands under its name in a folder that need not exist; a missing source copies nothing; a dry run writes nothing and returns the real run's `Summary` |
-| `config_command` | `config` prints the settings, turns local history on and off, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
+| `config_command` | `config` prints the settings; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | `store_layout` | a store has `format`, `log/` and `blobs/`; an empty directory is initialised on first write; a non-empty directory without `format`, and one with version 2, are refused and left untouched |
 | `store_hostile` | a bad segment and a wrong blob planted in a store are rejected and not installed; the rest of the run completes |
@@ -887,7 +932,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | R12 | 6, 10 | `story_c1`, `resolve_order_independent` |
 | R13 | 8 | `story_d1` |
 | R14 | 13 | `story_e1`, `interrupted_before_dirstate`, `interrupted_transfer` |
-| R15 | 8, 11 | `story_d2`, `config_command` |
+| R15 | 8, 11 | `story_d2`, `config_command`, `keep_cases`, `history_depth`, `compact_command` |
 | R16, R24 | 8, 10 | milestones 9 and 10: `story_c2`, `store_layout`, `store_hostile`, `store_configured_gets_log`, `s3_store` |
 | R17 | 7, 11 | `story_d3` |
 | R18 | 11, 12 | `cli_smoke`, `story_b1` |
@@ -915,6 +960,7 @@ Each milestone ends with `cargo test`, `cargo clippy --all-targets -- -D warning
 - [x] **8e. One status.** `ls` is folded into `status`: one state and one mark for each case, unrecorded changes, conflicts and incomplete paths as states, `--all`, and the text form in columns. Tests: `status_states` (in place of `ls_states`), and the `holding` parts of `message_forms` and `cli_smoke`.
 - [x] **8f. Have, present, dirstate, state.** *Held* is retired: a vault *has* a file, which is then *present*; the record of it is a row in the *dirstate*, the file once called the cache; the `holding` message is `state`. A rename, with no change of behaviour. Tests: `lost_dirstate` and `interrupted_before_dirstate` (renamed), and the `state` parts of `message_forms` and `cli_smoke`.
 - [x] **8g. Merging text.** `merge_base`, reading a blob into memory, and the merge step of materialise (section 9, "Merging"). Tests: `merge_base_cases`, `mergeable_names`, `merge_text_conflict`, `merge_on_pull`, `merge_falls_back`, and the merge in `dry_run_matches_real_run`.
+- [x] **8h. History depth and compaction.** `keep_history` and `autocompact` in place of `keep_local_history`; `Log::keep`; `retain()` limited to it and to the paths the vault takes; compaction at the end of a run, and the command `compact` (section 8, "Retaining" and "Compaction"). The log is not compacted. Tests: `keep_cases`, `history_depth`, `compact_command`, and the changed parts of `story_d1`, `story_d2`, `config_command` and `cli_smoke`.
 - [ ] **9. Stores.** Everything under "Stores" in section 8 and "A run with a store" in section 10, for directory stores: the layout, the `store` setting and `config store`, `flush`, the store as a blob source, and `sync`, `push`, `pull` and `move` with a store. Tests: `story_c2_sync_through_store`, `store_layout`, `store_hostile`, `store_configured_gets_log`.
 - [ ] **10. S3 stores.** The second kind of store, behind the same four operations. Test: `s3_store`.
 
@@ -943,6 +989,8 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Seeing a partial vault | `status --all`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
 | Terms for partial replication | three independent facts, one word each: included or excluded (the filter), present (the disk, which the dirstate records), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
 | Merging conflicting files | text only (`.md`, `.markdown`, `.txt`), only in a run where a receiving vault keeps history, so the versions replaced can be restored, and only when a line-by-line three-way merge from their common ancestor is clean; otherwise copies. The merge is an entry with both versions as parents. `PRD.md` first listed merging as a non-goal |
+| History | a depth, not a switch: `keep_history` is how many versions back from a head a vault keeps the content of; 0 is none and `null` is all. A new vault keeps 1, which is enough for most merges of text, at the cost of a second copy of every current file |
+| Compaction | Compaction keeps the whole log and drops only old blobs. As CouchDB's does: it drops the bodies of revisions that are not leaves and keeps the revision tree. Automatic at the end of a run unless `autocompact` is off; then `syncit compact`. Per vault, with nothing to coordinate: a vault collects only what it keeps, so a peer that keeps more does not fill it up again |
 | Tie-break timestamp | file mtime |
 | Empty directories | not tracked; directories emptied by a deletion are removed |
 | Cross-path parents | a read rule, not a segment rejection (`CRDT.md` was corrected to match) |
@@ -955,7 +1003,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 
 - Wildcards in the ignore file, and per-folder ignore files.
 - A stored heads file, if loading the whole log becomes slow.
-- Compaction and blob garbage collection.
+- Compaction of the log. Blobs are compacted (section 8); what cutting the log would need is in `CRDT.md`, "Compaction".
 - Signed segments, and vaults reached over a network (SSH, iroh). Stores cover the case of syncing through a third place. Nicknames give unverified attribution meanwhile; `CRDT.md`, "Planned extension", lists what signing still has to decide.
 - A `size` field in entries.
 - Unicode normalisation of paths.
@@ -965,7 +1013,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 
 Record here anything built differently from these documents, with the reason.
 
-- **Not built yet: milestones 9 and 10, so version 1 has no store.** An earlier store was built with milestone 7 (a `store` setting naming a directory that held blobs as `<hash>` files, with no log) and then removed. It could not be synced through, and its layout would have been incompatible with the store of section 8. Until milestone 9, local history is the only setting, and `R16` and `R24` are unmet.
+- **Not built yet: milestones 9 and 10, so version 1 has no store.** An earlier store was built with milestone 7 (a `store` setting naming a directory that held blobs as `<hash>` files, with no log) and then removed. It could not be synced through, and its layout would have been incompatible with the store of section 8. Until milestone 9, old versions are kept only in the vault, and `R16` and `R24` are unmet.
 
 - **A peer's log is read leniently.** Section 6 says a local segment that fails validation stops the command; section 10 says a bad segment in the other vault is rejected and does not stop the run. Both cannot hold for the peer, which must load its own log to scan. A vault opened as a peer skips its invalid segments with a warning; the receiving vault reports them as `rejected`. The vault a command runs in is still strict.
 - **`.syncit` is matched without regard to ASCII case** by the scan and by materialise, at any depth. A valid segment may name `.SYNCIT/x`, which on a case-insensitive filesystem is this vault's own `.syncit/`. Segment validation is unchanged (the format is not touched); the path is simply never written.

@@ -55,12 +55,19 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["status"]), (0, String::new()));
 
     assert_eq!(run(&a, &["sync"]).0, 1, "no vault named");
-    assert_eq!(run(&a, &["config", "local-history", "maybe"]).0, 1);
-    let (code, out) = run(&a.join("sub"), &["config", "local-history", "on"]);
+    assert_eq!(run(&a, &["config", "keep-history", "maybe"]).0, 1);
+    assert_eq!(run(&a, &["config", "autocompact", "maybe"]).0, 1);
+    let (code, out) = run(&a.join("sub"), &["config", "keep-history", "3"]);
     assert_eq!(
         (code, out.as_str()),
-        (0, "local-history: on\nnickname: a\n")
+        (0, "keep-history: 3\nautocompact: on\nnickname: a\n")
     );
+    let (code, out) = run(&a.join("sub"), &["config", "keep-history", "all"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "keep-history: all\nautocompact: on\nnickname: a\n")
+    );
+    assert_eq!(run(&a, &["compact"]), (0, "nothing to drop\n".to_string()));
     assert_eq!(
         run(&a, &["config", "store", "none"]).0,
         1,
@@ -72,7 +79,7 @@ fn cli_smoke() {
     let (code, out) = run(&a, &["config", "nickname", "desk"]);
     assert_eq!(
         (code, out.as_str()),
-        (0, "local-history: on\nnickname: desk\n")
+        (0, "keep-history: all\nautocompact: on\nnickname: desk\n")
     );
     let (code, out) = run(&a, &["--json", "blame", "sub"]);
     assert_eq!(code, 0);

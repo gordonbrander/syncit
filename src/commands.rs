@@ -1,7 +1,7 @@
 //! One function per command. Each prints as it goes; a command that runs a
 //! sync returns a `Summary` for `main` to print last.
 
-use crate::blobs::{available, hash_file, retain};
+use crate::blobs::{self, available, droppable, hash_file, retain};
 use crate::config::{Config, default_nickname, prefix_matches};
 use crate::dirstate::is_exec;
 use crate::entry::valid_path;
@@ -109,7 +109,19 @@ fn run(opts: &Options, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
     record(opts, &mut a, Some(&b), &mut sum)?;
     record(opts, &mut b, Some(&a), &mut sum)?;
     exchange(opts, &mut a, &mut b, mode, &mut sum)?;
+    autocompact(opts, &a)?;
+    autocompact(opts, &b)?;
     Ok(sum)
+}
+
+/// At the end of a run, drop the stored versions the vault's `keep_history`
+/// no longer covers, if it compacts by itself. After materialise and never
+/// before, so that a run cannot drop a version it is about to read.
+fn autocompact(opts: &Options, v: &Vault) -> Result<()> {
+    if v.config.autocompact {
+        blobs::compact(opts, v)?;
+    }
+    Ok(())
 }
 
 /// Say that this is a dry run, if it is.
@@ -205,7 +217,8 @@ fn exchange(
     // A merge replaces two versions. It is made only if a vault receiving in
     // this run keeps history: its `retain` above then has them, so they can
     // be restored. The setting, not the blobs, so a dry run decides alike.
-    let kept = (to_a && a.config.keep_local_history) || (to_b && b.config.keep_local_history);
+    let keeps = |v: &Vault| v.config.keep_history != Some(0);
+    let kept = (to_a && keeps(a)) || (to_b && keeps(b));
     if to_b {
         materialise(opts, b, Some(a), kept, sum)?;
     }
@@ -351,7 +364,37 @@ pub fn snapshot(opts: &Options, cwd: &Path) -> Result<Summary> {
     let mut v = Vault::open(opts, cwd, true)?;
     let mut sum = Summary::default();
     record(opts, &mut v, None, &mut sum)?;
+    autocompact(opts, &v)?;
     Ok(sum)
+}
+
+/// Bytes, for people.
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..1_000 => format!("{bytes} B"),
+        1_000..1_000_000 => format!("{:.1} kB", bytes as f64 / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1} MB", bytes as f64 / 1e6),
+        _ => format!("{:.1} GB", bytes as f64 / 1e9),
+    }
+}
+
+fn versions(n: usize) -> String {
+    format!("{n} version{}", if n == 1 { "" } else { "s" })
+}
+
+/// Drop from `.syncit/blobs/` the versions older than the vault's
+/// `keep_history` keeps. The log stays whole: only content goes. Returns how
+/// many were dropped, or with `--dry-run` would be, and their bytes.
+pub fn compact(opts: &Options, cwd: &Path) -> Result<(usize, u64)> {
+    let v = Vault::open(opts, cwd, true)?;
+    announce(opts);
+    let (n, bytes) = blobs::compact(opts, &v)?;
+    let message = match n {
+        0 => "nothing to drop".to_string(),
+        _ => format!("dropped {} ({})", versions(n), size(bytes)),
+    };
+    print_stdout(&Message::Info { message }, opts.json);
+    Ok((n, bytes))
 }
 
 /// A vault's state for a path (SPEC.md section 11, `status`); the first rule
@@ -969,7 +1012,7 @@ pub fn restore(
     let exec = newest.is_some_and(|(_, e)| e.exec);
     ensure!(
         write_now(&mut v, &dest, &h, exec)?,
-        "the content of that version is not in this vault; old versions are kept only while local-history is on"
+        "the content of that version is not in this vault; see `syncit config keep-history`"
     );
     if in_place {
         record(opts, &mut v, None, &mut sum)?;
@@ -985,7 +1028,9 @@ pub fn restore(
 
 /// A change `config` can make.
 pub enum Setting {
-    LocalHistory(bool),
+    /// How many versions back to keep content for; `None` is all of them.
+    KeepHistory(Option<u32>),
+    Autocompact(bool),
     Nickname(String),
 }
 
@@ -993,9 +1038,10 @@ pub enum Setting {
 /// config as it now is.
 pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Config> {
     let mut v = Vault::open(opts, cwd, true)?;
-    let was = v.config.keep_local_history;
+    let changed = change.is_some();
     match change {
-        Some(Setting::LocalHistory(on)) => v.config.keep_local_history = on,
+        Some(Setting::KeepHistory(depth)) => v.config.keep_history = depth,
+        Some(Setting::Autocompact(on)) => v.config.autocompact = on,
         Some(Setting::Nickname(name)) => {
             ensure!(
                 valid_nickname(&name),
@@ -1006,16 +1052,30 @@ pub fn config(opts: &Options, cwd: &Path, change: Option<Setting>) -> Result<Con
         None => {}
     }
     v.config.save(&v.root)?;
-    let on = v.config.keep_local_history;
+    let depth = v.config.keep_history;
+    let auto = v.config.autocompact;
     let settings = [
-        ("local-history", if on { "on" } else { "off" }.to_string()),
+        (
+            "keep-history",
+            depth.map_or("all".to_string(), |n| n.to_string()),
+        ),
+        ("autocompact", if auto { "on" } else { "off" }.to_string()),
         ("nickname", v.config.nickname.clone()),
     ];
     for (name, value) in settings {
         print_stdout(&Message::Setting { name, value }, opts.json);
     }
-    if was && !on {
-        let message = "versions already in .syncit/blobs/ are left there".to_string();
+    // Say what a change is about to cost, at the moment it is made.
+    let beyond = droppable(&v)?.len();
+    if changed && beyond > 0 {
+        let by = match auto {
+            true => "the next sync or snapshot drops",
+            false => "`syncit compact` drops",
+        };
+        let message = format!(
+            "keep-history no longer covers {} stored here; {by} what it does not cover",
+            versions(beyond)
+        );
         print_stdout(&Message::Info { message }, opts.json);
     }
     Ok(v.config)

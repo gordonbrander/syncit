@@ -177,13 +177,17 @@ If this becomes slow, the fix is a local, rebuildable file of heads per path, up
 
 ## Compaction
 
-Not designed. The direction is decided:
+Compaction keeps the whole log and drops only old blobs.
 
-- Compaction is never automatic. It is a command the user runs.
-- Coordinating it across vaults is the user's job: every vault should share enough history first. CouchDB treats pruning of revision history the same way.
+**Blobs** are compacted (`SPEC.md`, section 8). A vault keeps the content of the versions within `keep_history` steps of a head, and drops the rest, by itself at the end of a run or when the user runs `syncit compact`. This is CouchDB's compaction: it removes the bodies of revisions that are not leaves and keeps the revision tree, so replicas can still tell which version descends from which. The log is that tree. Because it is kept whole, a compacted vault reads the log exactly as any other does, and compaction needs no coordination between vaults.
+
+**The log** is not compacted, and how it would be is not designed. CouchDB cuts its tree at a depth (`_revs_limit`, 1000 by default); syncit keeps every entry. The direction, if it is ever needed, is decided:
+
+- It is never automatic. It is a command the user runs.
+- Coordinating it across vaults is the user's job: every vault should share enough history first. CouchDB treats pruning of revision history the same way: a replica that updates past the cut between replications gets spurious conflicts.
 - A deep backlog is kept so that problems are rare.
 
-The open part is the mechanism. Dropping old entries leaves parents that name absent entries, which the incomplete-log rule treats as "wait". Compaction must leave a marker so that a cut reads as the start of history.
+The open part is the mechanism. Dropping old entries leaves parents that name absent entries, which the incomplete-log rule treats as "wait". Compaction of the log must leave a marker so that a cut reads as the start of history.
 
 ## Planned extension: signed segments
 
@@ -209,7 +213,7 @@ Unresolved:
 - Where keys are stored and what happens when one is lost.
 - Which keys a vault accepts. Until that is decided a signature gives attribution, not authorisation.
 - How people name keys: a table of local petnames is the likely answer, with the nickname as the name a vault proposes for itself.
-- Compaction, which would replace the original signatures with the compactor's.
+- Compaction of the log, which would replace the original signatures with the compactor's.
 
 ## Open questions
 

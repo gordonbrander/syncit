@@ -111,6 +111,47 @@ impl Log {
         }
     }
 
+    /// The hashes of the versions whose content a vault keeps when it keeps
+    /// `depth` versions back from a head; `None` is every version. A head is
+    /// step 0, so the current versions are always among them. A path with
+    /// several heads, or with incomplete history, keeps every version: a
+    /// merge or a conflict copy may need any of them. Only paths that `of`
+    /// selects are considered.
+    pub fn keep(&self, depth: Option<u32>, of: impl Fn(&str) -> bool) -> BTreeSet<String> {
+        let mut keep = BTreeSet::new();
+        for (path, ids) in self.paths.iter().filter(|(path, _)| of(path)) {
+            let head = match (depth, self.resolve(path)) {
+                (Some(depth), PathState::Resolved { heads, .. }) if heads.len() == 1 => {
+                    Some((depth, heads[0].clone()))
+                }
+                _ => None,
+            };
+            let Some((depth, head)) = head else {
+                keep.extend(ids.iter().filter_map(|id| self.entries[id].hash.clone()));
+                continue;
+            };
+            let mut seen = BTreeSet::from([head.clone()]);
+            let mut level = vec![head];
+            for _ in 0..=depth {
+                let mut next = vec![];
+                for e in level.iter().filter_map(|id| self.entries.get(id)) {
+                    keep.extend(e.hash.clone());
+                    next.extend(
+                        e.parents
+                            .iter()
+                            .filter(|p| seen.insert((*p).clone()))
+                            .cloned(),
+                    );
+                }
+                level = next;
+                if level.is_empty() {
+                    break;
+                }
+            }
+        }
+        keep
+    }
+
     pub fn resolve(&self, path: &str) -> PathState {
         let ids = self.paths.get(path).into_iter().flatten();
         let missing = |p: &Id| !self.entries.contains_key(p);
@@ -249,6 +290,49 @@ mod tests {
         let t = e("p", None, 5, &[&c]);
         expect(&log(&[&a, &b, &c, &t]), &[&t], &t, &[], false);
         assert_eq!(log(&[&a]).resolve("elsewhere"), PathState::Absent);
+    }
+
+    #[test]
+    fn keep_cases() {
+        let hashes = |contents: &[&str]| -> BTreeSet<String> {
+            contents.iter().map(|c| sha256(c.as_bytes())).collect()
+        };
+        let a = e("p", Some("a"), 1, &[]);
+        let b = e("p", Some("b"), 2, &[&a]);
+        let c = e("p", Some("c"), 3, &[&b]);
+        let chain = log(&[&a, &b, &c]);
+        assert_eq!(chain.keep(Some(0), |_| true), hashes(&["c"]));
+        assert_eq!(chain.keep(Some(1), |_| true), hashes(&["b", "c"]));
+        assert_eq!(chain.keep(Some(2), |_| true), hashes(&["a", "b", "c"]));
+        assert_eq!(
+            chain.keep(Some(u32::MAX), |_| true),
+            hashes(&["a", "b", "c"])
+        );
+        assert_eq!(chain.keep(None, |_| true), hashes(&["a", "b", "c"]));
+        // A deletion is a version: one step back from it is the last content.
+        let t = e("p", None, 4, &[&c]);
+        let gone = log(&[&a, &b, &c, &t]);
+        assert!(gone.keep(Some(0), |_| true).is_empty());
+        assert_eq!(gone.keep(Some(1), |_| true), hashes(&["c"]));
+        // A conflict keeps every version of its path, whatever the depth.
+        let c2 = e("p", Some("c2"), 5, &[&b]);
+        let open = log(&[&a, &b, &c, &c2]);
+        assert_eq!(open.keep(Some(0), |_| true), hashes(&["a", "b", "c", "c2"]));
+        // Closed, the step back from the merge is both versions it replaced.
+        let m = e("p", Some("m"), 6, &[&c, &c2]);
+        let closed = log(&[&a, &b, &c, &c2, &m]);
+        assert_eq!(closed.keep(Some(1), |_| true), hashes(&["c", "c2", "m"]));
+        assert_eq!(
+            closed.keep(Some(2), |_| true),
+            hashes(&["b", "c", "c2", "m"])
+        );
+        // So does a path with incomplete history.
+        assert_eq!(log(&[&a, &c]).keep(Some(0), |_| true), hashes(&["a", "c"]));
+        // Content two paths share is kept while either needs it.
+        let q = e("q", Some("a"), 1, &[]);
+        let shared = log(&[&a, &b, &c, &q]);
+        assert_eq!(shared.keep(Some(0), |_| true), hashes(&["a", "c"]));
+        assert_eq!(shared.keep(Some(0), |path| path == "p"), hashes(&["c"]));
     }
 
     #[test]

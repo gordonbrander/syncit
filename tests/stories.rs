@@ -134,6 +134,16 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// Make each vault one that keeps no history and has none: what a new vault
+/// was before `keep_history` had a default.
+fn no_history(dirs: &[&Path]) {
+    for dir in dirs {
+        configure(dir, |c| c.keep_history = Some(0));
+        fs::remove_dir_all(dir.join(".syncit/blobs")).unwrap();
+        fs::create_dir(dir.join(".syncit/blobs")).unwrap();
+    }
+}
+
 fn configure(dir: &Path, change: impl FnOnce(&mut Config)) {
     let mut config = Config::load(dir).unwrap();
     change(&mut config);
@@ -281,7 +291,7 @@ fn story_b1_conflict() {
 /// versions in it: what a later merge starts from.
 fn pair_with_history(files: &[(&str, &str)]) -> (TempDir, PathBuf, PathBuf) {
     let (tmp, a, b) = pair(files);
-    configure(&b, |c| c.keep_local_history = true);
+    configure(&b, |c| c.keep_history = None);
     cmd::snapshot(O, &b).unwrap();
     (tmp, a, b)
 }
@@ -368,9 +378,11 @@ fn merge_falls_back() {
     // No vault keeps history, so the versions replaced would be lost: though
     // the one both edits started from can be read, from another file.
     let (_tmp, a, b) = pair(&[("notes.md", text), ("spare.md", text)]);
+    no_history(&[&a, &b]);
     conflict(&a, &b, "notes.md", "ONE\ntwo\nthree\n", "one\ntwo\nTHREE\n");
     // Only the vault that is not receiving keeps history.
     let (_tmp, a, b) = pair_with_history(&[("notes.md", text)]);
+    no_history(&[&a]);
     put(&a, "notes.md", "ONE\ntwo\nthree\n", 1);
     put(&b, "notes.md", "one\ntwo\nTHREE\n", 2);
     let report = cmd::pull(O, &a, &b).unwrap();
@@ -420,6 +432,7 @@ fn story_c1_three_vaults() {
 #[test]
 fn story_d1_no_history() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
+    no_history(&[&a, &b]);
     put(&a, "f.txt", "v2", 1);
     cmd::sync(O, &b, &a).unwrap();
     put(&b, "f.txt", "v3", 2);
@@ -435,7 +448,8 @@ fn story_d1_no_history() {
 #[test]
 fn story_d2_history() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
-    configure(&b, |c| c.keep_local_history = true);
+    no_history(&[&a]);
+    configure(&b, |c| c.keep_history = None);
     put(&a, "f.txt", "v2", 1);
     cmd::sync(O, &b, &a).unwrap();
     put(&b, "f.txt", "v3", 2);
@@ -461,11 +475,110 @@ fn story_d2_history() {
     fs::remove_file(b.join(".syncit/dirstate")).unwrap();
     assert_eq!(cmd::sync(O, &a, &b).unwrap().exit_code(), 0);
     assert!(is(&a, "f.txt", "v3") && is(&b, "f.txt", "v3"));
-    // Turned off, nothing more is kept, and what was kept stays.
-    cmd::config(O, &b, Some(Setting::LocalHistory(false))).unwrap();
+    // Set to keep nothing, nothing more is collected, and the next run drops
+    // the versions that are no longer current.
+    cmd::config(O, &b, Some(Setting::KeepHistory(Some(0)))).unwrap();
     put(&b, "f.txt", "v4", 3);
     cmd::sync(O, &b, &a).unwrap();
-    assert_eq!(names(&b.join(".syncit/blobs")).len(), 3);
+    assert!(names(&b.join(".syncit/blobs")).is_empty());
+}
+
+/// The names in a vault's `.syncit/blobs/`, and the names these contents have.
+fn blobs(dir: &Path) -> BTreeSet<String> {
+    names(&dir.join(".syncit/blobs"))
+}
+
+fn hashes(contents: &[&str]) -> BTreeSet<String> {
+    contents.iter().map(|c| sha256(c.as_bytes())).collect()
+}
+
+#[test]
+fn history_depth() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("gone.txt", "g")]);
+    configure(&b, |c| c.keep_history = None);
+    let edit = |content: &str, t: u64| {
+        put(&a, "f.txt", content, t);
+        cmd::snapshot(O, &a).unwrap();
+    };
+    // A new vault keeps one version back from the current one.
+    edit("v2", 1);
+    assert_eq!(blobs(&a), hashes(&["v1", "v2", "g"]));
+    edit("v3", 2);
+    assert_eq!(blobs(&a), hashes(&["v2", "v3", "g"]));
+    // Two back.
+    configure(&a, |c| c.keep_history = Some(2));
+    edit("v4", 3);
+    assert_eq!(blobs(&a), hashes(&["v2", "v3", "v4", "g"]));
+    // The log is whole: every version is listed, the oldest without content.
+    assert_eq!(log(&a).entries.len(), 5);
+    let seen = cmd::log(O, &a, &paths(&["f.txt"])).unwrap();
+    let available: Vec<bool> = seen.iter().map(|v| v.available).collect();
+    assert_eq!(available, [true, true, true, false]);
+    // A vault that keeps everything collects what this one still has, and
+    // this one does not collect again what it dropped.
+    cmd::sync(O, &a, &b).unwrap();
+    assert_eq!(blobs(&a), hashes(&["v2", "v3", "v4", "g"]));
+    assert_eq!(blobs(&b), hashes(&["v1", "v2", "v3", "v4", "g"]));
+    cmd::sync(O, &a, &b).unwrap();
+    assert_eq!(blobs(&a), hashes(&["v2", "v3", "v4", "g"]));
+    // A deletion is a version: the file's last content is one step back.
+    fs::remove_file(a.join("gone.txt")).unwrap();
+    cmd::snapshot(O, &a).unwrap();
+    assert!(blobs(&a).contains(&sha256(b"g")));
+    cmd::restore(O, &a, Path::new("gone.txt"), &sha256(b"g")[..8], true).unwrap();
+    assert!(is(&a, "gone.txt", "g"));
+}
+
+#[test]
+fn compact_command() {
+    let dry = &Options {
+        json: false,
+        dry_run: true,
+        no_remove: false,
+    };
+    let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("c.bin", "c1"), ("d.txt", "d")]);
+    configure(&a, |c| c.autocompact = false);
+    let edit = |path: &str, content: &str, t: u64| {
+        put(&a, path, content, t);
+        cmd::snapshot(O, &a).unwrap();
+    };
+    // Without autocompact, versions older than the setting keeps pile up.
+    edit("f.txt", "v2", 1);
+    edit("f.txt", "v3", 2);
+    assert_eq!(blobs(&a), hashes(&["v1", "v2", "v3", "c1", "d"]));
+    // A dry run says what would go and drops nothing.
+    let entries = log(&a).entries;
+    assert_eq!(cmd::compact(dry, &a).unwrap(), (1, 2));
+    assert_eq!(blobs(&a).len(), 5);
+    // `compact` drops them: content only, the log is as it was.
+    assert_eq!(cmd::compact(O, &a).unwrap(), (1, 2));
+    assert_eq!(blobs(&a), hashes(&["v2", "v3", "c1", "d"]));
+    assert_eq!(log(&a).entries, entries);
+    assert_eq!(cmd::compact(O, &a).unwrap(), (0, 0));
+    // A path in conflict keeps every version until the conflict is closed.
+    edit("c.bin", "c2", 3);
+    edit("c.bin", "c3", 4);
+    put(&b, "c.bin", "theirs", 5);
+    assert_eq!(cmd::sync(O, &a, &b).unwrap().conflicts, 1);
+    assert_eq!(cmd::compact(O, &a).unwrap(), (0, 0));
+    assert!(blobs(&a).is_superset(&hashes(&["c1", "c2", "c3", "theirs"])));
+    // Set to keep nothing back, the current versions stay: among them a file
+    // dropped from this vault, whose only copy may be here.
+    cmd::drop(O, &a, &paths(&["d.txt"]), None, false).unwrap();
+    cmd::config(O, &a, Some(Setting::KeepHistory(Some(0)))).unwrap();
+    cmd::compact(O, &a).unwrap();
+    let left = blobs(&a);
+    assert!(!a.join("d.txt").exists() && left.is_superset(&hashes(&["d", "v3"])));
+    assert!(!left.contains(&sha256(b"v2")));
+    // With autocompact on, a run does the same by itself.
+    cmd::config(O, &a, Some(Setting::KeepHistory(Some(1)))).unwrap();
+    edit("f.txt", "v4", 6);
+    edit("f.txt", "v5", 7);
+    assert!(blobs(&a).is_superset(&hashes(&["v3", "v4", "v5"])));
+    cmd::config(O, &a, Some(Setting::Autocompact(true))).unwrap();
+    cmd::snapshot(O, &a).unwrap();
+    assert!(blobs(&a).is_superset(&hashes(&["v4", "v5"])));
+    assert!(!blobs(&a).contains(&sha256(b"v3")));
 }
 
 #[test]
@@ -678,6 +791,7 @@ fn recreate_against_unseen_recreation() {
 #[test]
 fn log_lists_versions() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("d/g.txt", "g")]);
+    no_history(&[&a, &b]);
     cmd::config(O, &b, Some(Setting::Nickname("other".into()))).unwrap();
     put(&a, "f.txt", "v2", 1);
     cmd::sync(O, &a, &b).unwrap();
@@ -689,7 +803,7 @@ fn log_lists_versions() {
         let names = v.nicknames.join(",");
         (v.hash.clone(), names, v.current, v.available)
     };
-    // Newest first. Without local history, only what is on disk is available.
+    // Newest first. Without history, only what is on disk is available.
     let hash = |content: &str| Some(sha256(content.as_bytes()));
     assert_eq!(seen.len(), 3);
     assert_eq!(line(0), (hash("v3"), "other".into(), true, true));
@@ -702,10 +816,10 @@ fn log_lists_versions() {
     assert_eq!(seen.len(), 4);
     assert_eq!((&seen[0].hash, seen[0].current), (&None, true));
     assert!(!seen[1].current && !seen[1].available);
-    // No paths: every file. With local history, old versions are available.
+    // No paths: every file. With history, old versions are available.
     assert_eq!(cmd::log(O, &a, &[]).unwrap().len(), 5);
     // Kept from the first run after it is turned on.
-    cmd::config(O, &b, Some(Setting::LocalHistory(true))).unwrap();
+    cmd::config(O, &b, Some(Setting::KeepHistory(None))).unwrap();
     cmd::snapshot(O, &b).unwrap();
     put(&b, "d/g.txt", "g2", 3);
     cmd::snapshot(O, &b).unwrap();
@@ -719,17 +833,18 @@ fn log_lists_versions() {
 #[test]
 fn restore_version() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("gone.txt", "g1"), ("k.txt", "k")]);
+    no_history(&[&a, &b]);
     let hash = |content: &str| sha256(content.as_bytes());
     let restore = |dir: &Path, path: &str, content: &str, in_place| {
         cmd::restore(O, dir, Path::new(path), &hash(content)[..8], in_place)
     };
-    // Without local history an old version cannot be brought back.
+    // Without history an old version cannot be brought back.
     put(&a, "f.txt", "v2", 1);
     cmd::snapshot(O, &a).unwrap();
     let error = restore(&a, "f.txt", "v1", false).unwrap_err().to_string();
-    assert!(error.contains("local-history"), "{error}");
+    assert!(error.contains("keep-history"), "{error}");
     // The other vault still has v1 on disk; history collects it from there.
-    cmd::config(O, &a, Some(Setting::LocalHistory(true))).unwrap();
+    cmd::config(O, &a, Some(Setting::KeepHistory(None))).unwrap();
     cmd::sync(O, &a, &b).unwrap();
 
     // A copy: beside the file, which is left alone; an ordinary new file.
@@ -940,7 +1055,7 @@ fn exec_change_vs_edit() {
 #[test]
 fn restore_keeps_exec() {
     let (_tmp, a) = vault(&[("run.sh", "v1")]);
-    configure(&a, |c| c.keep_local_history = true);
+    configure(&a, |c| c.keep_history = None);
     chmod(&a, "run.sh", 0o755);
     cmd::snapshot(O, &a).unwrap();
     put(&a, "run.sh", "v2", 1);
@@ -1260,6 +1375,7 @@ fn ignore_file_syncs() {
 #[test]
 fn corrupt_blob_source() {
     let (tmp, a) = vault(&[("f.txt", "good"), ("ok.txt", "ok")]);
+    no_history(&[&a]);
     cmd::snapshot(O, &a).unwrap();
     // Same size and mtime: a's scan does not see the change.
     put(&a, "f.txt", "evil", 0);
@@ -1339,6 +1455,7 @@ fn move_refuses() {
 #[test]
 fn drop_refuses_sole_copy() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("d/g.txt", "g")]);
+    no_history(&[&a, &b]);
     let both = paths(&["d", "f.txt"]);
     // No vault to check against and no history: nothing vouches for a copy.
     let error = cmd::drop(O, &b, &both, None, false)
@@ -1381,11 +1498,11 @@ fn drop_refuses_sole_copy() {
     assert!(!Config::load(&b).unwrap().includes("later/x.txt"));
     // Local history is another copy; --force skips the check.
     assert!(cmd::drop(O, &a, &paths(&["f.txt"]), None, false).is_err());
-    cmd::config(O, &a, Some(Setting::LocalHistory(true))).unwrap();
+    cmd::config(O, &a, Some(Setting::KeepHistory(None))).unwrap();
     cmd::snapshot(O, &a).unwrap();
     cmd::drop(O, &a, &paths(&["f.txt"]), None, false).unwrap();
     assert!(!a.join("f.txt").exists() && a.join(".syncit/blobs").join(sha256(b"edit")).exists());
-    cmd::config(O, &a, Some(Setting::LocalHistory(false))).unwrap();
+    cmd::config(O, &a, Some(Setting::KeepHistory(Some(0)))).unwrap();
     assert!(cmd::drop(O, &a, &paths(&["d"]), Some(&a), false).is_err());
     cmd::drop(O, &a, &paths(&["d"]), None, true).unwrap();
     assert!(tree(&a).is_empty());
@@ -1421,20 +1538,27 @@ fn interrupted_move() {
 fn config_command() {
     let (_tmp, a) = vault(&[("sub/f.txt", "v1")]);
     let config = |change| cmd::config(O, &a.join("sub"), change);
-    let history = |change: Option<bool>| {
-        let change = change.map(Setting::LocalHistory);
-        config(change).unwrap().keep_local_history
+    let history = |change: Option<Option<u32>>| {
+        let change = change.map(Setting::KeepHistory);
+        config(change).unwrap().keep_history
     };
-    assert!(!history(None));
-    assert!(history(Some(true)));
-    assert!(Config::load(&a).unwrap().keep_local_history);
+    // A new vault keeps one version back, and compacts by itself.
+    assert_eq!(history(None), Some(1));
+    assert!(config(None).unwrap().autocompact);
+    assert_eq!(history(Some(None)), None);
+    assert_eq!(Config::load(&a).unwrap().keep_history, None);
     // The setting takes effect.
     cmd::snapshot(O, &a).unwrap();
     assert!(a.join(".syncit/blobs").join(sha256(b"v1")).exists());
-    assert!(!history(Some(false)));
-    assert!(!Config::load(&a).unwrap().keep_local_history);
+    // Set to keep nothing back, the current version's content is not dropped.
+    assert_eq!(history(Some(Some(0))), Some(0));
+    assert_eq!(Config::load(&a).unwrap().keep_history, Some(0));
+    cmd::snapshot(O, &a).unwrap();
     assert!(a.join(".syncit/blobs").join(sha256(b"v1")).exists());
-    assert!(!history(None));
+    assert_eq!(history(None), Some(0));
+    let auto = |on| config(Some(Setting::Autocompact(on))).unwrap().autocompact;
+    assert!(!auto(false) && !Config::load(&a).unwrap().autocompact);
+    assert!(auto(true) && Config::load(&a).unwrap().autocompact);
 
     // A vault is nicknamed after its folder until it is renamed.
     assert_eq!(config(None).unwrap().nickname, "a");
@@ -1708,7 +1832,7 @@ fn dry_run_matches_real_run() {
             ("merge.md", "one\ntwo\nthree\n"),
         ];
         let (tmp, a, b) = pair_with_history(&files);
-        configure(&a, |c| c.keep_local_history = true);
+        configure(&a, |c| c.keep_history = None);
         put(&a, "merge.md", "ONE\ntwo\nthree\n", 1);
         put(&b, "merge.md", "one\ntwo\nTHREE\n", 2);
         put(&a, "notes.txt", "edited in a", 1);
@@ -1735,6 +1859,7 @@ fn dry_run_matches_real_run() {
 
     // `move`, both when it would go through and when it would be refused.
     let (tmp, a, b) = pair(&[("keep.txt", "k"), ("big/one.bin", "1")]);
+    no_history(&[&b]);
     put(&a, "big/two.bin", "2", 1);
     let c = tmp.path().join("c");
     cmd::clone(O, &a.join("keep.txt"), &c).unwrap();
