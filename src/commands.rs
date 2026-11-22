@@ -56,6 +56,77 @@ pub fn init(opts: &Options, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The error for a URL in a build without remote vaults.
+#[cfg(not(feature = "remote"))]
+fn no_remote() -> anyhow::Error {
+    anyhow::anyhow!("this build has no remote support: install with the remote feature")
+}
+
+/// Make a remote vault at `url`, which must be reachable and empty. Returns
+/// the phrase it printed, if it generated the key.
+#[cfg(feature = "remote")]
+pub fn init_remote(
+    opts: &Options,
+    cwd: &Path,
+    url: &str,
+    nickname: Option<String>,
+    save_key: bool,
+) -> Result<Option<String>> {
+    use crate::{crypt, keys, remote::Bucket};
+    let nickname = nickname.unwrap_or_else(|| "origin".to_string());
+    ensure!(
+        valid_nickname(&nickname),
+        "a nickname is 1 to 64 bytes, with no spaces or control characters"
+    );
+    let bucket = Bucket::new(url)?;
+    ensure!(bucket.is_empty()?, "{url} is not empty");
+    let (key, generated) = match &opts.secret_key {
+        Some(phrase) => (
+            keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?,
+            false,
+        ),
+        None => (crypt::new_key()?, true),
+    };
+    let config = Config {
+        keep_history: None,
+        autocompact: false,
+        ..Config::new(String::new(), nickname)
+    };
+    bucket.create(&key, &config)?;
+    let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
+    print_stdout(&Message::Info { message }, opts.json);
+    if !generated {
+        return Ok(None);
+    }
+    let words = keys::phrase(&key);
+    let message = format!(
+        "Secret key for {url}:\n\n  {}\n\nWrite these words down and keep them safe. They are the only way to\nread this vault from another computer, and they are not shown again.",
+        *words
+    );
+    print_stdout(&Message::Info { message }, opts.json);
+    let local = find_root(cwd).ok();
+    keys::save(
+        opts,
+        url,
+        &key,
+        keys::Source::New,
+        local.as_deref(),
+        save_key,
+    )?;
+    Ok(Some(words.to_string()))
+}
+
+#[cfg(not(feature = "remote"))]
+pub fn init_remote(
+    _opts: &Options,
+    _cwd: &Path,
+    _url: &str,
+    _nickname: Option<String>,
+    _save_key: bool,
+) -> Result<Option<String>> {
+    Err(no_remote())
+}
+
 pub fn clone(opts: &Options, src: &Path, dir: &Path) -> Result<Summary> {
     let src = resolve_path(src)?;
     let root = find_root(&src)?;

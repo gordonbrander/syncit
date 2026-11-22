@@ -17,10 +17,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Make a folder a vault
+    /// Make a folder a vault, or make a remote vault at a URL
     Init {
+        /// A folder, or a URL such as s3://bucket/prefix
         #[arg(default_value = ".")]
-        dir: PathBuf,
+        dir: String,
+        /// A remote vault's nickname [default: origin]
+        #[arg(long)]
+        nickname: Option<String>,
+        /// Save a new remote's key in .syncit/secrets.env if there is no keychain
+        #[arg(long)]
+        save_key: bool,
     },
     /// Create a vault from another vault, or from a sub-folder of one
     Clone { src: PathBuf, dir: PathBuf },
@@ -208,7 +215,19 @@ fn main() {
     };
     // Commands that run a sync return a summary, printed last.
     let result = match cli.command {
-        Command::Init { dir } => commands::init(opts, &dir).map(|_| None),
+        Command::Init {
+            dir,
+            nickname,
+            save_key,
+        } if dir.contains("://") => {
+            commands::init_remote(opts, cwd, &dir, nickname, save_key).map(|_| None)
+        }
+        Command::Init {
+            nickname: Some(_), ..
+        } => Err(anyhow::anyhow!(
+            "--nickname is for a remote vault; see `syncit config nickname`"
+        )),
+        Command::Init { dir, .. } => commands::init(opts, Path::new(&dir)).map(|_| None),
         Command::Clone { src, dir } => commands::clone(opts, &src, &dir).map(Some),
         Command::Sync { vault, .. } => commands::sync(opts, cwd, &vault).map(Some),
         Command::Push { vault, .. } => commands::push(opts, cwd, &vault).map(Some),

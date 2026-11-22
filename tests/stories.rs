@@ -1962,3 +1962,100 @@ fn cp_from_plain_folder() {
     // The destination must be in a vault.
     assert!(cmd::cp(O, &a, &paths(&["keep.txt"]), &plain.join("d")).is_err());
 }
+
+// ---- Remote vaults (store.md) -------------------------------------------
+
+#[cfg(feature = "remote")]
+mod remote {
+    use super::*;
+    use syncit::keys;
+    use syncit::remote::{Bucket, Remote};
+    use syncit::storage::Storage;
+
+    /// Options with a phrase. Every remote test starts here, so that the
+    /// keychain is the mock one, never the machine's.
+    fn opts(phrase: Option<&str>) -> Options {
+        #[cfg(feature = "keychain")]
+        {
+            static MOCK: std::sync::Once = std::sync::Once::new();
+            MOCK.call_once(|| {
+                keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap())
+            });
+        }
+        Options {
+            json: false,
+            dry_run: false,
+            no_remove: false,
+            secret_key: phrase.map(String::from),
+        }
+    }
+
+    fn url(dir: &Path) -> String {
+        format!("file://{}", dir.display())
+    }
+
+    /// An empty folder for a remote vault, in `tmp`.
+    fn place(tmp: &TempDir, name: &str) -> PathBuf {
+        let dir = tmp.path().join(name);
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn init_remote() {
+        let tmp = TempDir::new().unwrap();
+        let r = place(&tmp, "r");
+        let words = cmd::init_remote(&opts(None), tmp.path(), &url(&r), None, false).unwrap();
+        let words = words.expect("a generated key is printed");
+        assert_eq!(words.split(' ').count(), 24);
+        assert_eq!(
+            names(&r),
+            BTreeSet::from(["config".into(), "format".into()])
+        );
+        let format = fs::read_to_string(r.join("format")).unwrap();
+        let check = format
+            .strip_prefix(r#"{"check":""#)
+            .and_then(|f| f.strip_suffix("\",\"syncit\":1}\n"))
+            .unwrap();
+        assert!(syncit::entry::is_hash(check), "{format}");
+        let key = keys::parse_phrase(&words).unwrap();
+        let remote = Remote::open(Bucket::new(&url(&r)).unwrap(), key, None).unwrap();
+        let config = remote.load_config().unwrap();
+        assert_eq!(
+            (config.include, config.keep_history, config.autocompact),
+            (vec![String::new()], None, false)
+        );
+        assert_eq!(config.nickname, "origin");
+        assert!(
+            !fs::read(r.join("config"))
+                .unwrap()
+                .windows(6)
+                .any(|w| w == b"origin")
+        );
+
+        // Given a key, it prints none.
+        let given = opts(Some(&words));
+        let s = place(&tmp, "s");
+        let printed = cmd::init_remote(&given, tmp.path(), &url(&s), Some("box".into()), false);
+        assert_eq!(printed.unwrap(), None);
+
+        // Not empty: refused, and left as it was.
+        let t = place(&tmp, "t");
+        put(&t, "keep.txt", "mine", 0);
+        assert!(cmd::init_remote(&given, tmp.path(), &url(&t), None, false).is_err());
+        assert_eq!(names(&t), BTreeSet::from(["keep.txt".into()]));
+        assert!(cmd::init_remote(&given, tmp.path(), &url(&r), None, false).is_err());
+        let missing = tmp.path().join("missing");
+        assert!(cmd::init_remote(&given, tmp.path(), &url(&missing), None, false).is_err());
+        assert!(!missing.exists(), "syncit never creates a directory");
+
+        // A format other than version 1 is refused.
+        fs::write(
+            s.join("format"),
+            format.replace("\"syncit\":1", "\"syncit\":2"),
+        )
+        .unwrap();
+        let err = Bucket::new(&url(&s)).unwrap().check().unwrap_err();
+        assert!(err.to_string().contains("format version 2"), "{err}");
+    }
+}

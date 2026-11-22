@@ -12,6 +12,8 @@ pub mod keys;
 pub mod log;
 pub mod materialise;
 pub mod output;
+#[cfg(feature = "remote")]
+pub mod remote;
 pub mod scan;
 pub mod segment;
 pub mod storage;
