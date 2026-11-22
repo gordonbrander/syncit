@@ -18,6 +18,8 @@ cd syncit
 cargo install --path .
 ```
 
+This builds everything, remote vaults included; the first build takes a few minutes. For a smaller tool that syncs local folders only, add `--no-default-features`. On a machine with no keychain, use `--no-default-features --features remote`.
+
 Check that it worked:
 
 ```sh
@@ -471,11 +473,65 @@ There are no wildcards. Ignored files are never sent, never overwritten and neve
 
 `.syncitignore` is an ordinary file, so it syncs too and every vault gets the same rules. Rules that arrive during a sync apply from the next run. If you want a vault to have its own rules, add the line `.syncitignore` to its file; that file then stays put and is not replaced by another vault's.
 
+## Syncing through a remote vault
+
+A vault can live in cloud storage: an S3 bucket, Google Cloud Storage, Azure, Cloudflare R2, or a plain folder by `file://` URL. Such a *remote vault* has no working folder of its own. It holds the files and their history, encrypted, and any vault can sync with it. Two computers that never see each other stay in step by both syncing with the same remote.
+
+Make one in an empty place:
+
+```sh
+syncit init s3://my-bucket/notes
+```
+
+```
+Vault initialized: s3://my-bucket/notes
+Nickname: origin
+Secret key for s3://my-bucket/notes:
+
+  word1 word2 … word24
+
+Write these words down and keep them safe. They are the only way to
+read this vault from another computer, and they are not shown again.
+```
+
+**The 24 words are the key.** Everything in the remote is encrypted with it: file contents, names, and the record of changes. The storage provider sees only how many objects there are and how big. If every copy of the words is lost, the remote cannot be read by anyone, including you.
+
+Then, in a vault, remember the remote under its nickname and sync with it like any other vault:
+
+```sh
+cd ~/Documents
+syncit remote add s3://my-bucket/notes
+syncit sync origin
+```
+
+On another computer, make a vault from it, all of it or part:
+
+```sh
+syncit clone s3://my-bucket/notes ~/Documents
+syncit clone s3://my-bucket/notes ~/Photos --only photos/2024 --only music
+syncit get music --from origin     # later, add more
+```
+
+`sync`, `push`, `pull`, `move`, `status --vs` and `drop --check` all take a remote by nickname or URL. A remote keeps every version by default; change that, or compact it, with `--vault`:
+
+```sh
+syncit config --vault origin keep-history 5
+syncit compact --vault origin
+```
+
+`syncit remote` lists the remotes this vault knows, and `syncit remote remove origin` forgets one (it touches nothing in the remote). A folder vault can be remembered too: `syncit remote add /Volumes/Backup/Documents`. To reach a folder that has the same name as a remote, write it as a path: `./origin`.
+
+**Where the key is kept.** `remote add` and `clone` ask for the words once, then keep them in the system keychain (macOS Keychain, or the Secret Service on Linux). After you reinstall or rebuild syncit, macOS asks once whether it may read the keychain item again. Where there is no keychain, such as a server over SSH, you can put the key in the vault's `.syncit/secrets.env` (`--save-key`, or answer yes when asked); it is then stored there unencrypted, readable by your user only. Or set `SYNCIT_SECRET_KEY` to the 24 words for each command, which is what scripts and cron jobs usually do.
+
+**Credentials** for the storage come from the usual environment variables, never from a file syncit writes: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (for R2, MinIO and other S3-compatible services) and `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. `~/.aws/credentials` is not read.
+
+**Interrupted uploads.** Files of 16 MB or more are uploaded in parts. If an upload is interrupted, the parts already sent stay in the bucket, unseen, until the bucket removes them. Give the bucket a lifecycle rule that aborts incomplete multipart uploads after a few days.
+
 ## Good to know
 
 - **Safe to interrupt.** You can stop syncit at any point, or unplug the drive. Run it again and it finishes the job.
 - **It won't overwrite work in progress.** If a file changes while a sync is running, that file is skipped and reported, and handled on the next run.
-- **Local folders only.** The other folder must be reachable as a path on this machine: an internal disk, an external drive, a mounted network share. syncit does not connect over the network itself.
+- **Folders, or a remote vault.** Another vault is a folder reachable as a path on this machine (an internal disk, an external drive, a mounted network share) or a [remote vault](#syncing-through-a-remote-vault) in cloud storage.
 - **Not synced:** symbolic links, empty folders, and file permissions other than whether a file is executable.
 - **Renames** are seen as a delete plus a new file, so a renamed file is copied again.
 - **A vault inside a vault.** If you drag one vault into another, its files are synced as ordinary files of the outer vault, and syncit prints a warning. The two cannot be synced with each other.
@@ -502,20 +558,23 @@ syncit --json push /Volumes/Backup/Documents
 {"type":"summary","recorded":1,"added":0,"updated":1,"deleted":0,"conflicts":0,"pending":0,"skipped":0,"incomplete":0,"rejected":0}
 ```
 
-The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `state` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
+The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `state`, `remote` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `syncit init [dir]` | make a folder a vault |
+| `syncit init <url> [--nickname <name>]` | make a remote vault in an empty place in cloud storage |
 | `syncit clone <vault or sub-folder> <dir>` | make a new vault from another, or from part of one |
+| `syncit clone <vault> <dir> --only <path>...` | make a new vault with only these paths of a vault or remote |
 | `syncit sync <vault>` | sync both ways with another vault; `--dry-run` only shows what would happen; `--no-remove` keeps deleted files |
 | `syncit push <vault>` | send changes only; takes `--dry-run` and `--no-remove` |
 | `syncit pull <vault>` | receive changes only; takes `--dry-run` and `--no-remove` |
 | `syncit status [path]... [--vs <vault>]` | show the files that need something; `--all` lists every file; `--vs` compares with another vault |
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | add those files to this vault, and fetch them |
+| `syncit get <path>... --from <vault>` | the same, with paths from the root of a vault or remote |
 | `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
 | `syncit cp <path>... <folder in a vault>` | copy files from anywhere into a vault; takes `--dry-run` |
 | `syncit drop [--check <vault>] [--force] <path>...` | remove these files here only, sending nothing; takes `--dry-run` |
@@ -527,9 +586,13 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `st
 | `syncit config autocompact on\|off` | drop older versions after every sync, or only on `syncit compact` |
 | `syncit compact [--dry-run]` | drop the old versions `keep-history` no longer covers |
 | `syncit config nickname <name>` | name this vault in the changes it records |
+| `syncit config --vault <vault> ...`, `syncit compact --vault <vault>` | act on another vault, such as a remote |
+| `syncit remote` | list the vaults this one remembers by nickname |
+| `syncit remote add [--name <name>] <url or folder>` | remember a vault; for a remote, find or ask for its key |
+| `syncit remote remove <name>` | forget a remote |
 
-A `<vault>` is the path of any folder in the other vault.
+A `<vault>` is the path of any folder in the other vault, a remote vault's URL, or a nickname from `syncit remote`.
 
 ## How it works
 
-For the design and the reasoning behind it, see [PRD.md](specs/PRD.md). The format of the sync log is in [CRDT.md](specs/CRDT.md), and the implementation specification is [SPEC.md](specs/SPEC.md). Stores on object storage are designed in [store.md](specs/store.md) and not built yet.
+For the design and the reasoning behind it, see [PRD.md](specs/PRD.md). The format of the sync log is in [CRDT.md](specs/CRDT.md), and the implementation specification is [SPEC.md](specs/SPEC.md). Remote vaults are specified in [store.md](specs/store.md).

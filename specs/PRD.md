@@ -237,8 +237,6 @@ With `keep_history` 0 the vault stores no blobs and its log records hashes only.
 
 ### Stores
 
-Stores are not built yet. They are specified in `store.md`.
-
 A store is a vault with no working folder, kept on object storage: a bucket, or a folder on a shared or external drive. It has what every vault has, a log, blobs and a config with a nickname and a filter, and it syncs by the same commands. Two things set it apart, and every difference in how it behaves follows from one of them:
 
 - **It is bare.** With no folder, the content of its current versions is kept as blobs, nothing is scanned, and it never records a change of its own.
