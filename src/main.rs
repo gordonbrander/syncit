@@ -70,6 +70,17 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Copy files from anywhere into a vault; they need not be in one
+    Cp {
+        /// Files and folders to copy; `.` is this folder's contents
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// A folder in the vault to copy into
+        dest: PathBuf,
+        /// Show what would happen; change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Remove files from this vault only, without sending them anywhere
     Drop {
         #[arg(required = true)]
@@ -153,6 +164,7 @@ fn main() {
         | Command::Push { dry_run, .. }
         | Command::Pull { dry_run, .. }
         | Command::Move { dry_run, .. }
+        | Command::Cp { dry_run, .. }
         | Command::Drop { dry_run, .. } => dry_run,
         _ => false,
     };
@@ -182,6 +194,7 @@ fn main() {
         Command::Move { paths, vault, .. } => {
             commands::move_to(opts, cwd, &paths, &vault).map(Some)
         }
+        Command::Cp { paths, dest, .. } => commands::cp(opts, cwd, &paths, &dest).map(Some),
         Command::Drop {
             paths,
             check,

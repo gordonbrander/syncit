@@ -119,7 +119,7 @@ The log is a grow-only set of entries. `CRDT.md` specifies it in full. Each entr
 - An entry's id is the hash of its canonical bytes. Two byte-identical entries are the same entry.
 - Entries are written in segments. A segment is an immutable JSON Lines file named by its hash, holding the entries one scan produced.
 - Merging two logs is set union: copy the segments you don't have.
-- Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot`, `move` and `drop`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
+- Only commands that scan write entries: `sync`, `push`, `pull`, `snapshot`, `move`, `drop` and `cp`. A segment is frozen the moment it is written locally; a failed transfer re-sends the same bytes.
 - A vault has the log entries of every vault it has heard from, directly or through a relay.
 
 ### Current state
@@ -281,12 +281,13 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
 | `syncit status [path]... [--vs <vault>]` | Show each file that needs something: unrecorded changes, files behind or missing, open conflicts. `--all` lists every file, with those current, excluded and ignored; `--vs` shows another vault's state beside this one's. Writes nothing. |
 | `syncit get <path in another vault>...` / `syncit move <path>... <vault>` / `syncit drop <path>...` | Change what this vault has. |
+| `syncit cp <path>... <folder in a vault>` | Copy files into a vault from anywhere; the source need not be a vault. Adds and replaces, deletes nothing, records nothing. |
 | `syncit blame [path]...` | Show which vault recorded the current version of each file. |
 | `syncit log [path]...` | List the recorded versions of each file, newest first, with their hashes. |
 | `syncit restore <path> <hash>` | Bring back a version as a copy beside the file; `--in-place` replaces the file. |
 | `syncit config` | Show or change `keep_local_history`, `nickname` and `store`. |
 
-`sync`, `push`, `pull`, `move` and `drop` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
+`sync`, `push`, `pull`, `move`, `drop` and `cp` take `--dry-run`, which prints what the run would do and changes nothing in either vault.
 
 `sync`, `push` and `pull` take `--no-remove`, which removes no file because it was deleted elsewhere: a vault that still has the file keeps it, and records it as re-created, so it comes back in the vault that deleted it.
 

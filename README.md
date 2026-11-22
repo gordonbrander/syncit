@@ -99,6 +99,34 @@ If the other folder has only [part of a larger archive](#working-with-part-of-a-
 warning: /Volumes/Small excludes 4 files (new.txt, notes.txt, photos/, todo.txt); they were not copied
 ```
 
+## Copying files in from any folder
+
+`cp` copies files into a vault from anywhere. The folder they come from does not have to be a vault, and you can run it from there:
+
+```sh
+cd ~/Desktop
+syncit cp scans notes.txt /Volumes/Backup/Archive
+```
+
+```
+A notes.txt
+A scans/new.pdf
+M scans/receipt.pdf
+recorded 0, added 2, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
+```
+
+The last argument is a folder in the vault, which need not exist yet. Each file or folder you name lands in it under its own name, as with `cp -R`. Name `.` to copy the contents of the folder you are in.
+
+A file the vault lacks is added and one that differs is replaced. Files that are already the same are left alone, and nothing is deleted. What the vault [ignores](#ignoring-files) is not copied, nor are symbolic links.
+
+To see what it would change in the vault first, add `--dry-run`:
+
+```sh
+syncit cp --dry-run . /Volumes/Backup/Archive
+```
+
+`cp` only copies. The files are then ordinary changes in that vault, as if you had dragged them in, and its next `sync` or `snapshot` records them. Before replacing anything, `cp` records the vault as it is, so with [history](#version-history) on, a replaced version can be restored.
+
 ## Working with part of a larger backup
 
 Say a backup drive has a large archive and you only want one folder of it on your laptop. Clone that sub-folder:
@@ -347,7 +375,7 @@ dry run: nothing is changed
 recorded 3, added 1, updated 1, deleted 1, conflicts 0, pending 0, skipped 0
 ```
 
-`push`, `pull`, `move` and `drop` take `--dry-run` too. For `move` and `drop` it shows which files would be removed here, or the error if they would refuse.
+`push`, `pull`, `move`, `drop` and `cp` take `--dry-run` too. For `move` and `drop` it shows which files would be removed here, or the error if they would refuse.
 
 To sync without removing anything, add `--no-remove`. A file deleted in one folder is kept in the other and put back where it was deleted. Both are adds:
 
@@ -365,7 +393,7 @@ The deletion is undone, not postponed: later syncs leave the file alone. `push` 
 
 ## Reading the output
 
-Every line about a file has a letter, then the file's path in its vault. When a command involves another vault, the line starts with an arrow: `->` for a file in your vault, `<-` for a file in the other one. `snapshot` looks only at your vault and prints no arrow. `status` has its own marks, [above](#checking-before-you-sync).
+Every line about a file has a letter, then the file's path in its vault. When a command involves another vault, the line starts with an arrow: `->` for a file in your vault, `<-` for a file in the other one. `snapshot` looks only at your vault and prints no arrow, and nor does `cp`, which writes to one vault. `status` has its own marks, [above](#checking-before-you-sync).
 
 | Letter | Meaning |
 |---|---|
@@ -466,6 +494,7 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `st
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | add those files to this vault, and fetch them |
 | `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
+| `syncit cp <path>... <folder in a vault>` | copy files from anywhere into a vault; takes `--dry-run` |
 | `syncit drop [--check <vault>] [--force] <path>...` | remove these files here only, sending nothing; takes `--dry-run` |
 | `syncit blame [path]...` | show which vault recorded the current version of each file |
 | `syncit log [path]...` | list the recorded versions of each file, newest first |
