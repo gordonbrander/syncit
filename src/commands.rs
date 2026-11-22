@@ -70,7 +70,6 @@ fn no_remote() -> anyhow::Error {
 #[cfg(feature = "remote")]
 pub fn init_remote(
     opts: &Options,
-    cwd: &Path,
     url: &str,
     nickname: Option<String>,
     save_key: bool,
@@ -82,8 +81,7 @@ pub fn init_remote(
         valid_nickname(&nickname),
         "a nickname is 1 to 64 bytes, with no spaces or control characters"
     );
-    let local = find_root(cwd).ok();
-    let bucket = Bucket::new(url, credentials(opts, local.as_deref(), url)?)?;
+    let bucket = Bucket::new(url, credentials(opts, url)?)?;
     ensure!(bucket.is_empty()?, "{url} is not empty");
     let (key, generated) = match &opts.secret_key {
         Some(phrase) => (
@@ -109,21 +107,13 @@ pub fn init_remote(
         *words
     );
     print_stdout(&Message::Info { message }, opts.json);
-    keys::save(
-        opts,
-        url,
-        &key,
-        keys::Source::New,
-        local.as_deref(),
-        save_key,
-    )?;
+    keys::save(opts, url, &key, keys::Source::New, save_key)?;
     Ok(Some(words.to_string()))
 }
 
 #[cfg(not(feature = "remote"))]
 pub fn init_remote(
     _opts: &Options,
-    _cwd: &Path,
     _url: &str,
     _nickname: Option<String>,
     _save_key: bool,
@@ -878,7 +868,7 @@ fn add(
     save_key: bool,
 ) -> Result<String> {
     let (location, config, found) = if location.contains("://") {
-        let (config, found) = find_remote(opts, &v.root, location)?;
+        let (config, found) = find_remote(opts, location)?;
         (location.to_string(), config, Some(found))
     } else {
         let root = resolve_path(Path::new(location))?;
@@ -900,7 +890,7 @@ fn add(
         "{name} is already a remote here: pass --name <name>"
     );
     if let Some(found) = found {
-        save_found(opts, &location, found, &v.root, save_key)?;
+        save_found(opts, &location, found, save_key)?;
     }
     v.config.remotes.insert(name.clone(), location.clone());
     v.storage.save_config(&v.config)?;
@@ -909,14 +899,12 @@ fn add(
     Ok(name)
 }
 
-/// Forget a remote. Its `secrets.env` entry goes too; its keychain item
-/// stays, since other vaults on this machine may use it.
+/// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
+/// other vaults on this machine may use them.
 pub fn remote_remove(opts: &Options, cwd: &Path, name: &str) -> Result<()> {
     let mut v = Vault::open(opts, cwd, true)?;
     let location = v.config.remotes.remove(name);
     let location = location.with_context(|| format!("no remote named {name}"))?;
-    #[cfg(feature = "remote")]
-    crate::keys::remove_secret(&v.root, &location)?;
     v.storage.save_config(&v.config)?;
     let message = format!("removed remote {name}: {location}");
     print_stdout(&Message::Info { message }, opts.json);
@@ -932,16 +920,16 @@ type Found = ();
 /// The config of the remote at `url`, and its key: found (store.md,
 /// section 8), or else asked for on a terminal.
 #[cfg(feature = "remote")]
-fn find_remote(opts: &Options, root: &Path, url: &str) -> Result<(Config, Found)> {
+fn find_remote(opts: &Options, url: &str) -> Result<(Config, Found)> {
     use crate::keys::{self, Source};
     use std::io::IsTerminal;
     if let Some(phrase) = &opts.secret_key {
         keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
     }
-    let settings = crate::remote::credentials(opts, Some(root), url)?;
+    let settings = crate::remote::credentials(opts, url)?;
     let bucket = crate::remote::Bucket::new(url, settings)?;
     let check = bucket.check()?;
-    let found = match keys::find(opts, url, &check, Some(root)) {
+    let found = match keys::find(opts, url, &check) {
         Ok(found) => found,
         Err(e) if !std::io::stdin().is_terminal() => return Err(e),
         Err(_) => (keys::prompt(url, &check)?, Source::New),
@@ -950,17 +938,17 @@ fn find_remote(opts: &Options, root: &Path, url: &str) -> Result<(Config, Found)
 }
 
 #[cfg(not(feature = "remote"))]
-fn find_remote(_opts: &Options, _root: &Path, _url: &str) -> Result<(Config, Found)> {
+fn find_remote(_opts: &Options, _url: &str) -> Result<(Config, Found)> {
     Err(no_remote())
 }
 
 #[cfg(feature = "remote")]
-fn save_found(opts: &Options, url: &str, found: Found, root: &Path, save: bool) -> Result<()> {
-    crate::keys::save(opts, url, &found.0, found.1, Some(root), save)
+fn save_found(opts: &Options, url: &str, found: Found, save: bool) -> Result<()> {
+    crate::keys::save(opts, url, &found.0, found.1, save)
 }
 
 #[cfg(not(feature = "remote"))]
-fn save_found(_: &Options, _: &str, _: Found, _: &Path, _: bool) -> Result<()> {
+fn save_found(_: &Options, _: &str, _: Found, _: bool) -> Result<()> {
     Ok(())
 }
 

@@ -30,7 +30,7 @@ Every difference in behaviour must follow from one of the two properties:
 
 Everything else is the same as for any vault: a `config` with `nickname`, `include`, `exclude`, `keep_history` and `autocompact`; a log; blobs; validation of every segment (`CRDT.md`, "Validation") and blob received. The log format does not change.
 
-**Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from `credentials.json` and the environment, section 5). Parallel transfers. A bare vault on a plain local path.
+**Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from `credentials.toml` and the environment, section 5). Parallel transfers. A bare vault on a plain local path.
 
 ## 2. Dependencies
 
@@ -40,7 +40,7 @@ default = ["remote", "keychain"]
 remote = [
     "dep:object_store", "dep:tokio", "dep:futures", "dep:url",
     "dep:chacha20poly1305", "dep:aead-stream", "dep:hkdf", "dep:getrandom",
-    "dep:zeroize", "dep:bip39", "dep:rpassword",
+    "dep:zeroize", "dep:bip39", "dep:rpassword", "dep:toml_edit",
 ]
 keychain = [
     "remote", "dep:keyring-core",
@@ -59,6 +59,7 @@ getrandom = { version = "0.4", optional = true }
 zeroize = { version = "1", optional = true }
 bip39 = { version = "3", features = ["zeroize"], optional = true }
 rpassword = { version = "7", optional = true }
+toml_edit = { version = "0.25", optional = true }
 keyring-core = { version = "1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -73,7 +74,7 @@ These are added to the dependencies the crate has today. Everything this documen
 | Feature | Adds | Without it |
 |---|---|---|
 | `remote` | remote vaults: `remote.rs`, `crypt.rs`, `keys.rs`, `init <url>`, URL targets | the build has today's dependencies. A URL target, or a nickname that names one, fails with `this build has no remote support: install with the remote feature` |
-| `keychain` | the OS keychain as a place for the key. Needs `remote` | the keychain is left out of the search of section 8, and a key is saved only in `secrets.env`. `SYNCIT_SECRET_KEY` and `secrets.env` work as specified |
+| `keychain` | the OS keychain as a place for the key. Needs `remote` | the keychain is left out of the search of section 8, and a key is saved only in `secrets.toml`. `SYNCIT_SECRET_KEY` and `secrets.toml` work as specified |
 
 Rules for the features:
 
@@ -108,7 +109,7 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 | `src/storage.rs` (new) | the `Storage` trait and `Dir`, the plain-directory implementation: today's `.syncit/` access, moved |
 | `src/remote.rs` (new) | `Remote`, the encrypted object-store implementation |
 | `src/crypt.rs` (new) | key derivation, object names, stream encryption. No I/O beyond `Read` and `Write` |
-| `src/keys.rs` (new) | phrase and key; keychain, environment and `secrets.env` |
+| `src/keys.rs` (new) | phrase and key; keychain, environment and `secrets.toml` |
 | `src/vault.rs` | `Vault` holds `storage: Box<dyn Storage>`, `bare: bool` and a display `name`; opening by target |
 | `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.storage` |
 | `src/config.rs` | `remotes` |
@@ -172,23 +173,17 @@ The remote implementation needs a scratch directory for plaintext in transit. It
 **URLs.**
 
 - Any URL `object_store::parse_url_opts` accepts: `file:///abs/dir`, `s3://bucket/prefix`, `gs://…`, `az://…`, and R2 `https://` URLs.
-- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They come from `credentials.json` files, which map URL prefixes to settings:
+- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They come from the user's `credentials.toml`, then the environment, which wins (`remote::credentials`). The file is in the user's syncit folder, `$XDG_CONFIG_HOME/syncit`, else `~/.config/syncit`; `main` finds it with `output::config_dir` and puts it in `Options.config_dir`, so tests never read the real one, except `cloud_remote`, which needs it. The file maps URL prefixes to settings:
 
-  ```json
-  {
-    "remotes": {
-      "": { "AWS_DEFAULT_REGION": "auto" },
-      "s3://bucket": { "AWS_ACCESS_KEY_ID": "…", "AWS_SECRET_ACCESS_KEY": "…" }
-    }
-  }
+  ```toml
+  [remotes."s3://bucket"]
+  AWS_ACCESS_KEY_ID = "…"
+  AWS_SECRET_ACCESS_KEY = "…"
   ```
 
-  A prefix, less any trailing `/`, applies to a URL equal to it or that goes on after a `/` (`s3://bucket` applies to `s3://bucket/notes`, not to `s3://bucket2`); `""` applies to every URL. They are read in this order, with a later one winning (`remote::credentials`, then the environment):
-  1. The user's file: `$XDG_CONFIG_HOME/syncit/credentials.json`, else `~/.config/syncit/credentials.json`. `main` finds the path with `output::user_credentials` and puts it in `Options.credentials`, so tests never read the real one, except `cloud_remote`, which needs it.
-  2. `.syncit/credentials.json` in the local vault, if the command runs in one.
-  3. The environment, which so overrides every section.
+  A prefix, less any trailing `/`, applies to a URL equal to it or that goes on after a `/`: `s3://bucket` applies to `s3://bucket/notes`, not to `s3://bucket2`. The sections that apply are taken from the shortest prefix to the longest, a later one winning. There is no section for every remote. A missing file has no settings; bad TOML, a section that is not a table or a setting that is not a string is an error, `corrupt credentials <path>`. The user writes this file; syncit never does, and never reads a phrase from it (phrases are in `secrets.toml`, section 8). The settings are passed to `parse_url_opts` and never set in the process environment.
 
-  Within a file, the sections that apply are taken from the shortest prefix to the longest. A missing file has no settings; one that is not this shape is an error, `corrupt credentials <path>`. The user writes these files; syncit never does, and never reads a phrase from them (phrases are in `secrets.env`, section 8). The settings are passed to `parse_url_opts` and never set in the process environment.
+  Files people edit are TOML, read and written with `toml_edit`, which keeps their comments; everything syncit alone writes is JSON.
 
 **Listing and transfers.**
 
@@ -253,25 +248,28 @@ A remote vault created by `init` has `keep_history: null` (all) and `autocompact
 
 1. `Options.secret_key`.
 2. The keychain: service `syncit`, account = the URL, password = the phrase.
-3. `.syncit/secrets.env` in the local vault, if the command runs in one: every `SYNCIT_SECRET_KEY="…"` line.
+3. The user's `secrets.toml`: the phrase under the remote's exact URL.
 
 If none matches: `no key for <url>: set SYNCIT_SECRET_KEY, or run syncit remote add <url>`. Only `remote add` and `clone` ever prompt.
 
 **Keychain.** Only in a build with the `keychain` feature (section 2); without it this candidate does not exist. Set the platform store as `keyring_core`'s default once per process. `NoEntry` means "not here". Any other error means the keychain cannot be used on this machine now (a headless Linux box, macOS over SSH): go on to the next candidate, do not fail.
 
-**`.syncit/secrets.env`.** Local, like `config`; `.syncit` is never synced. Mode 0600, written with `write_atomic`. One entry for each remote:
+**`secrets.toml`.** In the user's syncit folder (section 5), beside `credentials.toml`, never in a vault, so every vault and every command on this machine finds the same keys. Mode 0600, replaced whole through a temporary file in the same folder. One entry for each remote:
 
+```toml
+[remotes]
+"s3://bucket/notes" = "abandon ability … zoo"
 ```
-# s3://bucket/notes
-SYNCIT_SECRET_KEY="abandon ability … zoo"
-```
+
+syncit writes it with `toml_edit`, so entries and comments the user added by hand stay. A missing file has no keys; bad TOML, a `remotes` that is not a table or a phrase that is not a string is an error, `corrupt secrets <path>`.
 
 **Saving a phrase**, after `init <url>`, `remote add` or `clone` has a key that matched:
 
 - It came from `Options.secret_key`: save nothing.
 - The keychain is usable (and the build has it): save it there. Already there: nothing to do.
-- Otherwise, if the command runs in a vault: with `--save-key`, write it to `secrets.env`; on a terminal, ask `Save the key to .syncit/secrets.env? [y/N]`; with neither, do not save, and say that `SYNCIT_SECRET_KEY` must be set for every command that uses this remote.
-- Otherwise (no keychain and no local vault): do not save, and say the same.
+- It came from `secrets.toml`: it is already there.
+- Otherwise: with `--save-key`, write it to `secrets.toml`; on a terminal, ask `Save the key to <path>? [y/N]`; with neither, do not save, and say that `SYNCIT_SECRET_KEY` must be set for every command that uses this remote. This needs no vault, so `init <url>` run anywhere can save its key.
+- With no syncit folder (no `HOME`): do not save, and say the same.
 
 ## 9. Commands
 
@@ -306,7 +304,7 @@ read this vault from another computer, and they are not shown again.
 |---|---|
 | `syncit remote` | List the remotes: nickname, then location. |
 | `syncit remote add [--name <name>] [--save-key] <location>` | Remember a vault. See below. |
-| `syncit remote remove <name>` | Forget it. Its `secrets.env` entry is removed. Its keychain item stays, since other vaults on this machine may use it. Nothing in the remote is touched. |
+| `syncit remote remove <name>` | Forget it. Its keychain item and `secrets.toml` entry stay, since other vaults on this machine may use them. Nothing in the remote is touched. |
 
 `remote add`:
 
@@ -362,11 +360,10 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `crypt_rejects` | wrong key, wrong name, wrong kind, a changed byte, truncation at a chunk boundary, a short nonce: each is an error and none panics |
 | `names_are_keyed` | names differ between keys and between kinds, are stable for one key, and are never the plaintext hash |
 | `phrase_round_trip` | 32 bytes to 24 words and back; a misspelt word is named by position; a swapped word is a checksum error |
-| `key_lookup_order` | `Options`, mock keychain, `secrets.env`: the first whose check matches is used; one that does not match is passed over; none gives the documented error |
-| `secrets_env_file` | mode 0600; two remotes give two entries; `remote remove` deletes only its own |
-| `credentials_match` | a prefix applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; `""` applies to all; the sections that apply come from the shortest prefix to the longest |
-| `credentials_order` | the user's file comes before the vault's, so the vault's wins; without a vault, only the user's |
-| `credentials_errors` | missing files give no settings; a file with no `remotes`, or a setting that is not a string, is `corrupt credentials <path>` |
+| `key_lookup_order` | `Options`, mock keychain, `secrets.toml`: the first whose check matches is used; one that does not match is passed over; none gives the documented error |
+| `secrets_file` | mode 0600, in a folder saving makes; two remotes give two entries; saving again replaces; comments and other keys written by hand stay; a missing file gives no key; bad TOML, a `remotes` that is not a table and a phrase that is not a string are each `corrupt secrets` |
+| `credentials_match` | a prefix applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; the sections that apply come from the shortest prefix to the longest; a URL no section covers gets none |
+| `credentials_errors` | a missing file gives no settings; bad TOML, a `remotes` or section that is not a table, and a setting that is not a string are each `corrupt credentials <path>` |
 | `init_remote` | writes `format` and `config`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses `format` version 2 |
 | `remote_add` | records the target's nickname and location for a URL and for a path; a taken name needs `--name`; a wrong phrase is refused and `config` is unchanged; `remote remove` forgets it |
 | `story_c2_sync_through_remote` | two vaults that never sync with each other converge through one remote, in either order, including a conflict; a vault with no history supplies its current files; a third machine `clone`s the URL and has everything |
@@ -380,7 +377,7 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `remote_history_depth` | with `config --vault origin keep-history 1` and `compact --vault origin`, older blobs are dropped, the log is whole, and current versions remain |
 | `status_vs_remote` | `status --vs origin` reports the same states as against an equivalent folder vault |
 | `dry_run_remote` | a dry `sync` leaves the remote and the vault byte-identical and reports what the real run then does |
-| `cloud_remote` | `story_c2_sync_through_remote` against the URL in `SYNCIT_TEST_REMOTE_URL`, with the user's `credentials.json`; skipped when it is not set |
+| `cloud_remote` | `story_c2_sync_through_remote` against the URL in `SYNCIT_TEST_REMOTE_URL`, with the user's `credentials.toml`; skipped when it is not set |
 | `no_remote_feature` | compiled only without `remote`: a URL target and `init <url>` fail with the message of section 2 and change nothing; `remote add` of a folder vault and `sync` by its nickname work |
 | `cli_smoke` additions | `init <url>`, `remote`, `remote add`, `remote remove`, `sync origin`, with `SYNCIT_SECRET_KEY` set |
 
@@ -390,7 +387,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 
 1. **The storage seam.** The `Storage` trait and `Dir`; `Vault.storage`; every access to log, blobs and config through it. No behaviour changes and no new dependency. Test: the existing suite, unchanged.
 2. **`crypt`.** The `remote` and `keychain` features of section 2 are declared here, with the first optional dependencies, and CI gains its second and third jobs (section 14). Tests: `crypt_round_trip`, `crypt_rejects`, `names_are_keyed`.
-3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_env_file`.
+3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_file`.
 4. **`Remote` and `init <url>`.** The object-store implementation of `Storage`, `format`, the encrypted `config`. Test: `init_remote`.
 5. **Bare vaults in a run.** `Vault.bare`, the derived dirstate, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
 6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
@@ -416,7 +413,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 
 - If every copy of the phrase is lost, the remote cannot be read.
 - On macOS, a rebuilt binary is asked once for keychain access.
-- A phrase in `secrets.env` is plaintext on disk. That is the user's choice.
+- A phrase in `secrets.toml` is plaintext on disk. That is the user's choice.
 - Two machines running `init` on the same empty URL at the same moment can both write `format`; the later one wins and the other's key stops matching.
 - A push from a vault that has not pulled recently downloads the remote's unseen segments to learn its log.
 - A vault that keeps history collects it from a peer, as today. From a remote that is a download: a `pull` fetches the older versions `keep_history` covers as well as the current files.

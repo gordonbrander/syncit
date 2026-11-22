@@ -25,7 +25,7 @@ enum Command {
         /// A remote vault's nickname [default: origin]
         #[arg(long)]
         nickname: Option<String>,
-        /// Save a new remote's key in .syncit/secrets.env if there is no keychain
+        /// Save a new remote's key in ~/.config/syncit/secrets.toml if there is no keychain
         #[arg(long)]
         save_key: bool,
     },
@@ -37,7 +37,7 @@ enum Command {
         /// Include only this path, from the vault's root; may be repeated
         #[arg(long, value_name = "PATH")]
         only: Vec<String>,
-        /// Save a remote's key in .syncit/secrets.env if there is no keychain
+        /// Save a remote's key in ~/.config/syncit/secrets.toml if there is no keychain
         #[arg(long)]
         save_key: bool,
     },
@@ -188,7 +188,7 @@ enum RemoteArg {
         /// The name to use [default: the vault's own nickname]
         #[arg(long)]
         name: Option<String>,
-        /// Save a remote's key in .syncit/secrets.env if there is no keychain
+        /// Save a remote's key in ~/.config/syncit/secrets.toml if there is no keychain
         #[arg(long)]
         save_key: bool,
     },
@@ -253,7 +253,7 @@ fn main() {
         dry_run,
         no_remove,
         secret_key: std::env::var("SYNCIT_SECRET_KEY").ok(),
-        credentials: syncit::output::user_credentials(),
+        config_dir: syncit::output::config_dir(),
     };
     // Commands that run a sync return a summary, printed last.
     let result = match cli.command {
@@ -262,7 +262,7 @@ fn main() {
             nickname,
             save_key,
         } if dir.contains("://") => {
-            commands::init_remote(opts, cwd, &dir, nickname, save_key).map(|_| None)
+            commands::init_remote(opts, &dir, nickname, save_key).map(|_| None)
         }
         Command::Init {
             nickname: Some(_), ..

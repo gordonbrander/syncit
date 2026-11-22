@@ -14,7 +14,7 @@ const O: &Options = &Options {
     dry_run: false,
     no_remove: false,
     secret_key: None,
-    credentials: None,
+    config_dir: None,
 };
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
@@ -544,7 +544,7 @@ fn compact_command() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
-        credentials: None,
+        config_dir: None,
     };
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("c.bin", "c1"), ("d.txt", "d")]);
     configure(&a, |c| c.autocompact = false);
@@ -662,7 +662,7 @@ fn no_remove_keeps_deleted() {
         dry_run,
         no_remove: true,
         secret_key: None,
-        credentials: None,
+        config_dir: None,
     };
     let files = [
         ("f.txt", "f"),
@@ -1835,7 +1835,7 @@ fn dry_run_matches_real_run() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
-        credentials: None,
+        config_dir: None,
     };
     type Run = fn(&Options, &Path, &Path) -> anyhow::Result<Summary>;
     for run in [cmd::sync as Run, cmd::push, cmd::pull] {
@@ -1909,7 +1909,7 @@ fn cp_from_plain_folder() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
-        credentials: None,
+        config_dir: None,
     };
     let files = [
         ("same.txt", "s"),
@@ -1997,7 +1997,7 @@ mod remote {
             dry_run: false,
             no_remove: false,
             secret_key: phrase.map(String::from),
-            credentials: None,
+            config_dir: None,
         }
     }
 
@@ -2016,7 +2016,7 @@ mod remote {
     fn init_remote() {
         let tmp = TempDir::new().unwrap();
         let r = place(&tmp, "r");
-        let words = cmd::init_remote(&opts(None), tmp.path(), &url(&r), None, false).unwrap();
+        let words = cmd::init_remote(&opts(None), &url(&r), None, false).unwrap();
         let words = words.expect("a generated key is printed");
         assert_eq!(words.split(' ').count(), 24);
         assert_eq!(
@@ -2047,17 +2047,17 @@ mod remote {
         // Given a key, it prints none.
         let given = opts(Some(&words));
         let s = place(&tmp, "s");
-        let printed = cmd::init_remote(&given, tmp.path(), &url(&s), Some("box".into()), false);
+        let printed = cmd::init_remote(&given, &url(&s), Some("box".into()), false);
         assert_eq!(printed.unwrap(), None);
 
         // Not empty: refused, and left as it was.
         let t = place(&tmp, "t");
         put(&t, "keep.txt", "mine", 0);
-        assert!(cmd::init_remote(&given, tmp.path(), &url(&t), None, false).is_err());
+        assert!(cmd::init_remote(&given, &url(&t), None, false).is_err());
         assert_eq!(names(&t), BTreeSet::from(["keep.txt".into()]));
-        assert!(cmd::init_remote(&given, tmp.path(), &url(&r), None, false).is_err());
+        assert!(cmd::init_remote(&given, &url(&r), None, false).is_err());
         let missing = tmp.path().join("missing");
-        assert!(cmd::init_remote(&given, tmp.path(), &url(&missing), None, false).is_err());
+        assert!(cmd::init_remote(&given, &url(&missing), None, false).is_err());
         assert!(!missing.exists(), "syncit never creates a directory");
 
         // A format other than version 1 is refused.
@@ -2084,7 +2084,7 @@ mod remote {
     /// as a target.
     fn remote(tmp: &TempDir, name: &str) -> (PathBuf, PathBuf) {
         let dir = place(tmp, name);
-        cmd::init_remote(&o(), tmp.path(), &url(&dir), None, false).unwrap();
+        cmd::init_remote(&o(), &url(&dir), None, false).unwrap();
         (dir.clone(), PathBuf::from(url(&dir)))
     }
 
@@ -2120,7 +2120,7 @@ mod remote {
     }
 
     /// Run against `SYNCIT_TEST_REMOTE_URL`, in a new prefix under it, with
-    /// credentials from the user's `credentials.json` and the environment.
+    /// credentials from the user's `credentials.toml` and the environment.
     /// Skipped when it is not set.
     #[test]
     fn cloud_remote() {
@@ -2135,10 +2135,10 @@ mod remote {
             .as_nanos();
         let url = format!("{}/syncit-test-{unique}", base.trim_end_matches('/'));
         let o = Options {
-            credentials: syncit::output::user_credentials(),
+            config_dir: syncit::output::config_dir(),
             ..o()
         };
-        cmd::init_remote(&o, tmp.path(), &url, None, false).unwrap();
+        cmd::init_remote(&o, &url, None, false).unwrap();
         story_c2(&o, tmp, Path::new(&url));
     }
 
@@ -2474,15 +2474,22 @@ mod remote {
         let err = cmd::remote_add(o, &a, &url_of(&empty), None, false).unwrap_err();
         assert!(err.to_string().starts_with("no vault at "), "{err}");
 
-        // The key from secrets.env; remove forgets only its own entry.
+        // The key from the user's secrets.toml, which belongs to no vault:
+        // clone, run in a vault, finds it too.
         let (_s, second) = remote(&tmp, "s");
         let second = second.to_str().unwrap();
-        keys::add_secret(&a, url, &phrase()).unwrap();
-        keys::add_secret(&a, second, &phrase()).unwrap();
-        let added = cmd::remote_add(&opts(None), &a, second, Some("two".into()), false);
+        let saved = &Options {
+            config_dir: Some(tmp.path().join("config")),
+            ..opts(None)
+        };
+        keys::add_saved(saved, second, &phrase()).unwrap();
+        let added = cmd::remote_add(saved, &a, second, Some("two".into()), false);
         assert_eq!(added.unwrap(), "two");
+        let copy = tmp.path().join("copy");
+        cmd::clone(saved, &a, Path::new("two"), &copy, &[], false).unwrap();
+        // remove forgets the remote, not its key.
         cmd::remote_remove(o, &a, "two").unwrap();
-        assert_eq!(keys::secrets(&a).len(), 1);
+        assert!(keys::saved(saved, second).unwrap().is_some());
         cmd::remote_remove(o, &a, "backup").unwrap();
         assert!(cmd::remote_remove(o, &a, "backup").is_err());
         let names: Vec<String> = cmd::remotes(o, &a)
@@ -2669,7 +2676,7 @@ fn no_remote_feature() {
     let url = format!("file://{}", r.display());
     let err = cmd::sync(O, &a, Path::new(&url)).unwrap_err();
     assert_eq!(err.to_string(), message);
-    let err = cmd::init_remote(O, &a, &url, None, false).unwrap_err();
+    let err = cmd::init_remote(O, &url, None, false).unwrap_err();
     assert_eq!(err.to_string(), message);
     let err = cmd::remote_add(O, &a, &url, None, false).unwrap_err();
     assert_eq!(err.to_string(), message);

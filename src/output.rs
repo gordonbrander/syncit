@@ -17,16 +17,17 @@ pub struct Options {
     /// A remote vault's secret key, as its 24 words: `SYNCIT_SECRET_KEY`.
     /// Read by `main`; the library never reads the environment for it.
     pub secret_key: Option<String>,
-    /// The user's `credentials.json`, for every remote. Found by `main`.
-    pub credentials: Option<std::path::PathBuf>,
+    /// The user's syncit folder, which holds `credentials.toml` and
+    /// `secrets.toml`. Found by `main`; tests leave it out.
+    pub config_dir: Option<std::path::PathBuf>,
 }
 
-/// The user's `credentials.json`: under `$XDG_CONFIG_HOME`, else `~/.config`.
-pub fn user_credentials() -> Option<std::path::PathBuf> {
+/// The user's syncit folder: under `$XDG_CONFIG_HOME`, else `~/.config`.
+pub fn config_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::home_dir().map(|h| h.join(".config")))
-        .map(|dir| dir.join("syncit/credentials.json"))
+        .map(|dir| dir.join("syncit"))
 }
 
 /// Something that happened to one file.

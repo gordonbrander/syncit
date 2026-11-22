@@ -43,24 +43,46 @@ fn not_found(e: &object_store::Error) -> bool {
     matches!(e, object_store::Error::NotFound { .. })
 }
 
-/// Settings for each URL prefix.
-type Sections = BTreeMap<String, BTreeMap<String, String>>;
-
-/// A `credentials.json`.
-#[derive(Serialize, Deserialize)]
-struct Credentials {
-    remotes: Sections,
-}
-
-/// The `remotes` of a `credentials.json`; a missing file has none.
-fn sections(path: &Path) -> Result<Sections> {
+/// A TOML file the user may edit; a missing one is empty. `what` names it in
+/// an error.
+pub(crate) fn read_toml(path: &Path, what: &str) -> Result<toml_edit::DocumentMut> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str::<Credentials>(&text)
-            .map(|c| c.remotes)
-            .with_context(|| format!("corrupt credentials {}", path.display())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Sections::new()),
+        Ok(text) => text
+            .parse()
+            .with_context(|| format!("corrupt {what} {}", path.display())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Default::default()),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
+}
+
+/// Settings, as name and value.
+type Settings = Vec<(String, String)>;
+
+/// The `[remotes."<url prefix>"]` sections of a `credentials.toml`.
+fn sections(path: &Path) -> Result<Vec<(String, Settings)>> {
+    let doc = read_toml(path, "credentials")?;
+    let corrupt = |why: String| anyhow!("corrupt credentials {}: {why}", path.display());
+    let Some(remotes) = doc.get("remotes") else {
+        return Ok(vec![]);
+    };
+    let remotes = remotes
+        .as_table_like()
+        .ok_or_else(|| corrupt("remotes is not a table".into()))?;
+    let mut found = vec![];
+    for (prefix, section) in remotes.iter() {
+        let section = section
+            .as_table_like()
+            .ok_or_else(|| corrupt(format!("{prefix} is not a table")))?;
+        let mut settings = vec![];
+        for (name, value) in section.iter() {
+            let value = value
+                .as_str()
+                .ok_or_else(|| corrupt(format!("{name} in {prefix} is not a string")))?;
+            settings.push((name.to_string(), value.to_string()));
+        }
+        found.push((prefix.to_string(), settings));
+    }
+    Ok(found)
 }
 
 /// Whether the section `prefix` applies to `url`: "" applies to all, and a
@@ -74,24 +96,18 @@ fn matches(prefix: &str, url: &str) -> bool {
 }
 
 /// Settings for the bucket at `url`: the sections of the user's
-/// `credentials.json` that match it, then those of the vault at `local`,
-/// each from the shortest prefix to the longest. A later one wins.
-pub fn credentials(
-    opts: &Options,
-    local: Option<&Path>,
-    url: &str,
-) -> Result<Vec<(String, String)>> {
-    let vault = local.map(|root| root.join(".syncit/credentials.json"));
-    let mut settings = vec![];
-    for path in opts.credentials.iter().chain(&vault) {
-        let mut found: Vec<_> = sections(path)?
-            .into_iter()
-            .filter(|(p, _)| matches(p, url))
-            .collect();
-        found.sort_by_key(|(p, _)| p.trim_end_matches('/').len());
-        settings.extend(found.into_iter().flat_map(|(_, s)| s));
-    }
-    Ok(settings)
+/// `credentials.toml` that match it, from the shortest prefix to the
+/// longest. A later one wins.
+pub fn credentials(opts: &Options, url: &str) -> Result<Settings> {
+    let Some(dir) = &opts.config_dir else {
+        return Ok(vec![]);
+    };
+    let mut found: Vec<_> = sections(&dir.join("credentials.toml"))?
+        .into_iter()
+        .filter(|(p, _)| matches(p, url))
+        .collect();
+    found.sort_by_key(|(p, _)| p.trim_end_matches('/').len());
+    Ok(found.into_iter().flat_map(|(_, s)| s).collect())
 }
 
 impl Bucket {
@@ -523,72 +539,49 @@ mod tests {
             .collect()
     }
 
-    fn opts(user: &Path) -> Options {
+    /// Options whose syncit folder is `dir`.
+    fn opts(dir: &Path) -> Options {
         Options {
             json: false,
             dry_run: false,
             no_remove: false,
             secret_key: None,
-            credentials: Some(user.to_path_buf()),
+            config_dir: Some(dir.to_path_buf()),
         }
-    }
-
-    /// Each section sets `S` to its own name, so the order shows.
-    fn write(path: &Path, prefixes: &[&str]) {
-        let map: Sections = prefixes
-            .iter()
-            .map(|p| (p.to_string(), [("S".to_string(), p.to_string())].into()))
-            .collect();
-        let file = Credentials { remotes: map };
-        fs::write(path, serde_json::to_string(&file).unwrap()).unwrap();
     }
 
     #[test]
     fn credentials_match() {
         let tmp = TempDir::new().unwrap();
-        let user = tmp.path().join("credentials.json");
-        write(&user, &["s3://b/x/", "s3://b2", "", "s3://b"]);
-        let o = opts(&user);
-        let got = credentials(&o, None, "s3://b/x/y").unwrap();
-        assert_eq!(
-            got,
-            pairs(&[("S", ""), ("S", "s3://b"), ("S", "s3://b/x/")])
-        );
-        let got = credentials(&o, None, "s3://b").unwrap();
-        assert_eq!(got, pairs(&[("S", ""), ("S", "s3://b")]));
-        let got = credentials(&o, None, "s3://other").unwrap();
-        assert_eq!(got, pairs(&[("S", "")]));
-    }
-
-    #[test]
-    fn credentials_order() {
-        let tmp = TempDir::new().unwrap();
-        let user = tmp.path().join("credentials.json");
-        write(&user, &["s3://b"]);
-        let vault = tmp.path().join("vault");
-        fs::create_dir_all(vault.join(".syncit")).unwrap();
-        write(&vault.join(".syncit/credentials.json"), &[""]);
-        let o = opts(&user);
-        let both = pairs(&[("S", "s3://b"), ("S", "")]);
-        assert_eq!(credentials(&o, Some(&vault), "s3://b/v").unwrap(), both);
-        assert_eq!(credentials(&o, None, "s3://b/v").unwrap(), both[..1]);
+        // Each section sets S to its own name, so the order shows.
+        let text = "# by hand\n[remotes.\"s3://b/x/\"]\nS = \"s3://b/x/\"\n\
+                    [remotes.\"s3://b2\"]\nS = \"s3://b2\"\n\
+                    [remotes.\"s3://b\"]\nS = \"s3://b\"\n";
+        fs::write(tmp.path().join("credentials.toml"), text).unwrap();
+        let o = opts(tmp.path());
+        let got = credentials(&o, "s3://b/x/y").unwrap();
+        assert_eq!(got, pairs(&[("S", "s3://b"), ("S", "s3://b/x/")]));
+        let got = credentials(&o, "s3://b").unwrap();
+        assert_eq!(got, pairs(&[("S", "s3://b")]));
+        assert!(credentials(&o, "s3://other").unwrap().is_empty());
     }
 
     #[test]
     fn credentials_errors() {
         let tmp = TempDir::new().unwrap();
-        let user = tmp.path().join("credentials.json");
-        let o = opts(&user);
-        assert!(
-            credentials(&o, Some(tmp.path()), "s3://b")
-                .unwrap()
-                .is_empty()
-        );
-        // No `remotes`, and a setting that is not a string.
-        for text in ["{}", "{\"remotes\": {\"s3://b\": {\"A\": 1}}}"] {
-            fs::write(&user, text).unwrap();
-            let err = credentials(&o, None, "s3://b").unwrap_err().to_string();
-            assert_eq!(err, format!("corrupt credentials {}", user.display()));
+        let o = opts(tmp.path());
+        assert!(credentials(&o, "s3://b").unwrap().is_empty());
+        let file = tmp.path().join("credentials.toml");
+        for text in [
+            "not toml",
+            "remotes = 1",
+            "[remotes]\n\"s3://b\" = 1",
+            "[remotes.\"s3://b\"]\nA = 1",
+        ] {
+            fs::write(&file, text).unwrap();
+            let err = credentials(&o, "s3://b").unwrap_err().to_string();
+            let want = format!("corrupt credentials {}", file.display());
+            assert!(err.starts_with(&want), "{text}: {err}");
         }
     }
 }

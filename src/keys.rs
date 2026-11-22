@@ -1,6 +1,7 @@
 //! The secret key of a remote vault (store.md, section 8): its phrase, and
 //! where it is found and saved: `Options.secret_key`, the OS keychain and
-//! `.syncit/secrets.env`. The phrase is never put in an error or a warning.
+//! the user's `secrets.toml`. The phrase is never put in an error or a
+//! warning.
 
 use crate::crypt::{self, Key};
 use crate::output::{Message, Options, print_stdout, warn};
@@ -10,7 +11,7 @@ use bip39::{Language, Mnemonic};
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 /// Where a key that matched came from.
@@ -18,7 +19,8 @@ use zeroize::Zeroizing;
 pub enum Source {
     Options,
     Keychain,
-    SecretsEnv,
+    /// The user's `secrets.toml`.
+    Secrets,
     /// Generated, or typed in at a prompt.
     New,
 }
@@ -57,8 +59,8 @@ fn no_key(url: &str) -> anyhow::Error {
 
 /// The key for the remote at `url` whose `format` has `check`: the first
 /// candidate that matches, of `Options.secret_key`, the keychain, and the
-/// `secrets.env` of the vault at `local`.
-pub fn find(opts: &Options, url: &str, check: &str, local: Option<&Path>) -> Result<(Key, Source)> {
+/// user's `secrets.toml`.
+pub fn find(opts: &Options, url: &str, check: &str) -> Result<(Key, Source)> {
     if let Some(phrase) = &opts.secret_key {
         let key = parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
         if crypt::check(&key) == check {
@@ -71,12 +73,11 @@ pub fn find(opts: &Options, url: &str, check: &str, local: Option<&Path>) -> Res
     {
         return Ok((key, Source::Keychain));
     }
-    for phrase in local.map(secrets).unwrap_or_default() {
-        if let Ok(key) = parse_phrase(&phrase)
-            && crypt::check(&key) == check
-        {
-            return Ok((key, Source::SecretsEnv));
-        }
+    if let Some(phrase) = saved(opts, url)?
+        && let Ok(key) = parse_phrase(&phrase)
+        && crypt::check(&key) == check
+    {
+        return Ok((key, Source::Secrets));
     }
     Err(no_key(url))
 }
@@ -96,15 +97,8 @@ pub fn prompt(url: &str, check: &str) -> Result<Key> {
 }
 
 /// Keep a key that matched where later commands find it (store.md,
-/// section 8, "Saving a phrase"). `local` is the vault the command runs in.
-pub fn save(
-    opts: &Options,
-    url: &str,
-    key: &Key,
-    source: Source,
-    local: Option<&Path>,
-    save_key: bool,
-) -> Result<()> {
+/// section 8, "Saving a phrase").
+pub fn save(opts: &Options, url: &str, key: &Key, source: Source, save_key: bool) -> Result<()> {
     if source == Source::Options {
         return Ok(());
     }
@@ -118,16 +112,16 @@ pub fn save(
         );
         warn(opts, message);
     };
-    let Some(root) = local else {
+    if source == Source::Secrets {
+        return Ok(());
+    }
+    let Some(file) = secrets_path(opts) else {
         unsaved();
         return Ok(());
     };
-    if source == Source::SecretsEnv {
-        return Ok(());
-    }
-    if save_key || ask("Save the key to .syncit/secrets.env? [y/N] ") {
-        add_secret(root, url, &words)?;
-        let message = format!("saved the key for {url} in .syncit/secrets.env");
+    if save_key || ask(&format!("Save the key to {}? [y/N] ", file.display())) {
+        add_saved(opts, url, &words)?;
+        let message = format!("saved the key for {url} in {}", file.display());
         print_stdout(&Message::Info { message }, opts.json);
     } else {
         unsaved();
@@ -146,71 +140,56 @@ fn ask(question: &str) -> bool {
         && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
 }
 
-const PREFIX: &str = "SYNCIT_SECRET_KEY=\"";
-
-/// Every phrase in the vault's `secrets.env`.
-pub fn secrets(root: &Path) -> Vec<Zeroizing<String>> {
-    let text =
-        Zeroizing::new(fs::read_to_string(root.join(".syncit/secrets.env")).unwrap_or_default());
-    text.lines()
-        .filter_map(|l| l.trim().strip_prefix(PREFIX)?.strip_suffix('"'))
-        .map(|p| Zeroizing::new(p.to_string()))
-        .collect()
+/// The user's `secrets.toml`: a phrase for each remote URL.
+fn secrets_path(opts: &Options) -> Option<PathBuf> {
+    Some(opts.config_dir.as_ref()?.join("secrets.toml"))
 }
 
-/// The lines of `secrets.env` without the entry for `url`: its comment and
-/// the key line after it.
-fn without(text: &str, url: &str) -> String {
-    let (mut out, mut skip) = (String::new(), false);
-    for line in text.lines() {
-        if line == format!("# {url}") {
-            skip = true;
-            continue;
-        }
-        if skip && line.starts_with(PREFIX) {
-            skip = false;
-            continue;
-        }
-        skip = false;
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
+/// The phrase saved for `url` in `secrets.toml`, if there is one.
+pub fn saved(opts: &Options, url: &str) -> Result<Option<Zeroizing<String>>> {
+    let Some(file) = secrets_path(opts) else {
+        return Ok(None);
+    };
+    let doc = crate::remote::read_toml(&file, "secrets")?;
+    let corrupt = |why: &str| format!("corrupt secrets {}: {why}", file.display());
+    let Some(remotes) = doc.get("remotes") else {
+        return Ok(None);
+    };
+    let remotes = remotes
+        .as_table_like()
+        .with_context(|| corrupt("remotes is not a table"))?;
+    let Some(item) = remotes.get(url) else {
+        return Ok(None);
+    };
+    let phrase = item
+        .as_str()
+        .with_context(|| corrupt(&format!("{url} is not a string")))?;
+    Ok(Some(Zeroizing::new(phrase.to_string())))
 }
 
-fn write_secrets(root: &Path, text: &str) -> Result<()> {
-    let tmp = root.join(".syncit/tmp");
-    fs::create_dir_all(&tmp)?;
-    let tmp = tmp.join(unique());
-    let dest = root.join(".syncit/secrets.env");
-    let mut file = OpenOptions::new()
+/// Save `phrase` for `url` in `secrets.toml`, keeping everything else in the
+/// file, comments too. The file is replaced whole and readable by its owner
+/// only.
+pub fn add_saved(opts: &Options, url: &str, phrase: &str) -> Result<()> {
+    let file = secrets_path(opts).context("no folder for secrets.toml: set HOME")?;
+    let mut doc = crate::remote::read_toml(&file, "secrets")?;
+    let remotes = doc
+        .entry("remotes")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .with_context(|| format!("corrupt secrets {}: remotes is not a table", file.display()))?;
+    remotes.insert(url, toml_edit::value(phrase));
+    let dir = file.parent().context("secrets.toml has no folder")?;
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(unique());
+    let text = Zeroizing::new(doc.to_string());
+    let mut out = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
-    file.write_all(text.as_bytes())?;
-    fs::rename(&tmp, &dest).with_context(|| format!("cannot write {}", dest.display()))
-}
-
-/// Add or replace the entry for `url` in the vault's `secrets.env`.
-pub fn add_secret(root: &Path, url: &str, phrase: &str) -> Result<()> {
-    let old =
-        Zeroizing::new(fs::read_to_string(root.join(".syncit/secrets.env")).unwrap_or_default());
-    let text = Zeroizing::new(without(&old, url) + &format!("# {url}\n{PREFIX}{phrase}\"\n"));
-    write_secrets(root, &text)
-}
-
-/// Remove the entry for `url` from the vault's `secrets.env`, if it has one.
-pub fn remove_secret(root: &Path, url: &str) -> Result<()> {
-    let Ok(old) = fs::read_to_string(root.join(".syncit/secrets.env")) else {
-        return Ok(());
-    };
-    let old = Zeroizing::new(old);
-    let text = Zeroizing::new(without(&old, url));
-    if *text != *old {
-        write_secrets(root, &text)?;
-    }
-    Ok(())
+    out.write_all(text.as_bytes())?;
+    fs::rename(&tmp, &file).with_context(|| format!("cannot write {}", file.display()))
 }
 
 /// The OS keychain: service `syncit`, account the URL, password the phrase.
@@ -272,15 +251,17 @@ mod keychain {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use tempfile::TempDir;
 
-    fn opts(secret_key: Option<String>) -> Options {
+    /// Options with a phrase, whose syncit folder is `dir`.
+    fn opts(secret_key: Option<String>, dir: &Path) -> Options {
         Options {
             json: false,
             dry_run: false,
             no_remove: false,
             secret_key,
-            credentials: None,
+            config_dir: Some(dir.to_path_buf()),
         }
     }
 
@@ -318,21 +299,20 @@ mod tests {
     #[test]
     fn key_lookup_order() {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        fs::create_dir_all(root.join(".syncit")).unwrap();
+        let dir = tmp.path();
         let url = "file:///lookup-order";
         let (a, c) = (key(1), key(3));
-        let found = |opts: &Options, check: &str| find(opts, url, check, Some(root));
+        let found = |opts: &Options, check: &str| find(opts, url, check);
 
-        add_secret(root, url, &phrase(&c)).unwrap();
-        let given = opts(Some(phrase(&a).to_string()));
+        add_saved(&opts(None, dir), url, &phrase(&c)).unwrap();
+        let given = opts(Some(phrase(&a).to_string()), dir);
         assert_eq!(found(&given, &crypt::check(&a)).unwrap().1, Source::Options);
         // One that does not match is passed over.
         let (k, source) = found(&given, &crypt::check(&c)).unwrap();
-        assert_eq!((*k, source), (*c, Source::SecretsEnv));
+        assert_eq!((*k, source), (*c, Source::Secrets));
         assert_eq!(
-            found(&opts(None), &crypt::check(&c)).unwrap().1,
-            Source::SecretsEnv
+            found(&opts(None, dir), &crypt::check(&c)).unwrap().1,
+            Source::Secrets
         );
 
         #[cfg(feature = "keychain")]
@@ -342,10 +322,10 @@ mod tests {
             assert!(keychain::set(url, &phrase(&b)));
             let (k, source) = found(&given, &crypt::check(&b)).unwrap();
             assert_eq!((*k, source), (*b, Source::Keychain));
-            // The keychain comes before secrets.env.
+            // The keychain comes before secrets.toml.
             assert!(keychain::set(url, &phrase(&c)));
             assert_eq!(
-                found(&opts(None), &crypt::check(&c)).unwrap().1,
+                found(&opts(None, dir), &crypt::check(&c)).unwrap().1,
                 Source::Keychain
             );
         }
@@ -356,31 +336,45 @@ mod tests {
             format!("no key for {url}: set SYNCIT_SECRET_KEY, or run syncit remote add {url}")
         );
         // An invalid SYNCIT_SECRET_KEY is an error, not passed over.
-        assert!(found(&opts(Some("not a phrase".into())), &crypt::check(&c)).is_err());
+        let bad = opts(Some("not a phrase".into()), dir);
+        assert!(found(&bad, &crypt::check(&c)).is_err());
     }
 
     #[test]
-    fn secrets_env_file() {
+    fn secrets_file() {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        fs::create_dir_all(root.join(".syncit")).unwrap();
+        // The folder does not exist yet: saving makes it.
+        let dir = tmp.path().join("syncit");
+        let o = opts(None, &dir);
+        assert!(saved(&o, "s3://bucket/one").unwrap().is_none());
         let (one, two) = (phrase(&key(1)), phrase(&key(2)));
-        add_secret(root, "s3://bucket/one", &one).unwrap();
-        add_secret(root, "s3://bucket/two", &two).unwrap();
-        add_secret(root, "s3://bucket/one", &one).unwrap();
-        let file = root.join(".syncit/secrets.env");
+        add_saved(&o, "s3://bucket/one", &two).unwrap();
+        add_saved(&o, "s3://bucket/two", &two).unwrap();
+        add_saved(&o, "s3://bucket/one", &one).unwrap();
+        let file = dir.join("secrets.toml");
         let mode = fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        let text = fs::read_to_string(&file).unwrap();
-        assert_eq!(
-            text,
-            format!(
-                "# s3://bucket/two\n{PREFIX}{}\"\n# s3://bucket/one\n{PREFIX}{}\"\n",
-                *two, *one
-            )
+        assert_eq!(*saved(&o, "s3://bucket/one").unwrap().unwrap(), *one);
+        assert_eq!(*saved(&o, "s3://bucket/two").unwrap().unwrap(), *two);
+        assert!(saved(&o, "s3://bucket").unwrap().is_none());
+
+        // What the user wrote by hand stays.
+        let text = format!(
+            "# mine\nother = 1\n\n[remotes]\n# work\n\"s3://w\" = \"{}\"\n",
+            *one
         );
-        remove_secret(root, "s3://bucket/one").unwrap();
-        let left = secrets(root);
-        assert!(left.len() == 1 && *left[0] == *two);
+        fs::write(&file, text).unwrap();
+        add_saved(&o, "s3://bucket/two", &two).unwrap();
+        let after = fs::read_to_string(&file).unwrap();
+        assert!(after.starts_with("# mine\nother = 1\n"), "{after}");
+        assert!(after.contains("# work\n\"s3://w\""), "{after}");
+        assert_eq!(*saved(&o, "s3://w").unwrap().unwrap(), *one);
+        assert_eq!(*saved(&o, "s3://bucket/two").unwrap().unwrap(), *two);
+
+        for text in ["not toml", "remotes = 1", "[remotes]\n\"s3://w\" = 1"] {
+            fs::write(&file, text).unwrap();
+            let err = saved(&o, "s3://w").unwrap_err().to_string();
+            assert!(err.starts_with("corrupt secrets "), "{text}: {err}");
+        }
     }
 }
