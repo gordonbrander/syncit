@@ -58,7 +58,8 @@ pub(crate) fn read_toml(path: &Path, what: &str) -> Result<toml_edit::DocumentMu
 /// Settings, as name and value.
 type Settings = Vec<(String, String)>;
 
-/// The `[remotes."<url prefix>"]` sections of a `credentials.toml`.
+/// The `[[remotes]]` entries of a `credentials.toml`: each one's `url`
+/// prefix, and its other settings. Entries are named by position in errors.
 fn sections(path: &Path) -> Result<Vec<(String, Settings)>> {
     let doc = read_toml(path, "credentials")?;
     let corrupt = |why: String| anyhow!("corrupt credentials {}: {why}", path.display());
@@ -66,21 +67,31 @@ fn sections(path: &Path) -> Result<Vec<(String, Settings)>> {
         return Ok(vec![]);
     };
     let remotes = remotes
-        .as_table_like()
-        .ok_or_else(|| corrupt("remotes is not a table".into()))?;
-    let mut found = vec![];
-    for (prefix, section) in remotes.iter() {
-        let section = section
-            .as_table_like()
-            .ok_or_else(|| corrupt(format!("{prefix} is not a table")))?;
+        .as_array_of_tables()
+        .ok_or_else(|| corrupt("remotes is not [[remotes]] entries".into()))?;
+    let mut found: Vec<(String, Settings)> = vec![];
+    for (i, entry) in remotes.iter().enumerate() {
+        let n = i + 1;
+        let url = entry
+            .get("url")
+            .ok_or_else(|| corrupt(format!("entry {n} has no url")))?
+            .as_str()
+            .ok_or_else(|| corrupt(format!("url in entry {n} is not a string")))?;
+        let same = |u: &str| u.trim_end_matches('/') == url.trim_end_matches('/');
+        if let Some(m) = found.iter().position(|(u, _)| same(u)) {
+            return Err(corrupt(format!(
+                "entries {} and {n} have the same url {url}",
+                m + 1
+            )));
+        }
         let mut settings = vec![];
-        for (name, value) in section.iter() {
+        for (name, value) in entry.iter().filter(|(name, _)| *name != "url") {
             let value = value
                 .as_str()
-                .ok_or_else(|| corrupt(format!("{name} in {prefix} is not a string")))?;
+                .ok_or_else(|| corrupt(format!("{name} in entry {n} is not a string")))?;
             settings.push((name.to_string(), value.to_string()));
         }
-        found.push((prefix.to_string(), settings));
+        found.push((url.to_string(), settings));
     }
     Ok(found)
 }
@@ -95,9 +106,9 @@ fn matches(prefix: &str, url: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// Settings for the bucket at `url`: the sections of the user's
-/// `credentials.toml` that match it, from the shortest prefix to the
-/// longest. A later one wins.
+/// Settings for the bucket at `url`: the `[[remotes]]` entries of the
+/// user's `credentials.toml` whose `url` is a prefix of it, from the
+/// shortest prefix to the longest. A later one wins.
 pub fn credentials(opts: &Options, url: &str) -> Result<Settings> {
     let Some(dir) = &opts.config_dir else {
         return Ok(vec![]);
@@ -553,16 +564,20 @@ mod tests {
     #[test]
     fn credentials_match() {
         let tmp = TempDir::new().unwrap();
-        // Each section sets S to its own name, so the order shows.
-        let text = "# by hand\n[remotes.\"s3://b/x/\"]\nS = \"s3://b/x/\"\n\
-                    [remotes.\"s3://b2\"]\nS = \"s3://b2\"\n\
-                    [remotes.\"s3://b\"]\nS = \"s3://b\"\n";
-        fs::write(tmp.path().join("credentials.toml"), text).unwrap();
+        // Each entry sets s to its own url, so the order shows; the file
+        // lists them out of order.
+        let entry = |url: &str| format!("[[remotes]]\nurl = \"{url}\"\ns = \"{url}\"\n");
+        let text = ["s3://b/x/", "s3://b2", "s3://b"].map(entry).join("\n");
+        fs::write(
+            tmp.path().join("credentials.toml"),
+            "# by hand\n".to_string() + &text,
+        )
+        .unwrap();
         let o = opts(tmp.path());
         let got = credentials(&o, "s3://b/x/y").unwrap();
-        assert_eq!(got, pairs(&[("S", "s3://b"), ("S", "s3://b/x/")]));
+        assert_eq!(got, pairs(&[("s", "s3://b"), ("s", "s3://b/x/")]));
         let got = credentials(&o, "s3://b").unwrap();
-        assert_eq!(got, pairs(&[("S", "s3://b")]));
+        assert_eq!(got, pairs(&[("s", "s3://b")]));
         assert!(credentials(&o, "s3://other").unwrap().is_empty());
     }
 
@@ -572,15 +587,27 @@ mod tests {
         let o = opts(tmp.path());
         assert!(credentials(&o, "s3://b").unwrap().is_empty());
         let file = tmp.path().join("credentials.toml");
-        for text in [
-            "not toml",
-            "remotes = 1",
-            "[remotes]\n\"s3://b\" = 1",
-            "[remotes.\"s3://b\"]\nA = 1",
+        for (text, why) in [
+            ("not toml", ""),
+            ("remotes = 1", ": remotes is not [[remotes]] entries"),
+            (
+                "[remotes]\nurl = \"s3://b\"",
+                ": remotes is not [[remotes]] entries",
+            ),
+            ("[[remotes]]\na = \"x\"", ": entry 1 has no url"),
+            ("[[remotes]]\nurl = 1", ": url in entry 1 is not a string"),
+            (
+                "[[remotes]]\nurl = \"s3://b\"\na = 1",
+                ": a in entry 1 is not a string",
+            ),
+            (
+                "[[remotes]]\nurl = \"s3://b\"\n[[remotes]]\nurl = \"s3://c\"\n[[remotes]]\nurl = \"s3://b/\"",
+                ": entries 1 and 3 have the same url s3://b/",
+            ),
         ] {
             fs::write(&file, text).unwrap();
             let err = credentials(&o, "s3://b").unwrap_err().to_string();
-            let want = format!("corrupt credentials {}", file.display());
+            let want = format!("corrupt credentials {}{why}", file.display());
             assert!(err.starts_with(&want), "{text}: {err}");
         }
     }

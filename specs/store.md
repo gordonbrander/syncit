@@ -173,15 +173,16 @@ The remote implementation needs a scratch directory for plaintext in transit. It
 **URLs.**
 
 - Any URL `object_store::parse_url_opts` accepts: `file:///abs/dir`, `s3://bucket/prefix`, `gs://…`, `az://…`, and R2 `https://` URLs.
-- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They come from the user's `credentials.toml`, then the environment, which wins (`remote::credentials`). The file is in the user's syncit folder, `$XDG_CONFIG_HOME/syncit`, else `~/.config/syncit`; `main` finds it with `output::config_dir` and puts it in `Options.config_dir`, so tests never read the real one, except `cloud_remote`, which needs it. The file maps URL prefixes to settings:
+- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They come from the user's `credentials.toml`, then the environment, which wins (`remote::credentials`). The file is in the user's syncit folder, `$XDG_CONFIG_HOME/syncit`, else `~/.config/syncit`; `main` finds it with `output::config_dir` and puts it in `Options.config_dir`, so tests never read the real one, except `cloud_remote`, which needs it. The file is a list of `[[remotes]]` entries, each a `url` prefix and its settings:
 
   ```toml
-  [remotes."s3://bucket"]
-  AWS_ACCESS_KEY_ID = "…"
-  AWS_SECRET_ACCESS_KEY = "…"
+  [[remotes]]
+  url = "s3://bucket"
+  aws_access_key_id = "…"
+  aws_secret_access_key = "…"
   ```
 
-  A prefix, less any trailing `/`, applies to a URL equal to it or that goes on after a `/`: `s3://bucket` applies to `s3://bucket/notes`, not to `s3://bucket2`. The sections that apply are taken from the shortest prefix to the longest, a later one winning. There is no section for every remote. A missing file has no settings; bad TOML, a section that is not a table or a setting that is not a string is an error, `corrupt credentials <path>`. The user writes this file; syncit never does, and never reads a phrase from it (phrases are in `secrets.toml`, section 8). The settings are passed to `parse_url_opts` and never set in the process environment.
+  A setting's name is passed as written; `object_store` matches names without regard to case, so `aws_access_key_id` and `AWS_ACCESS_KEY_ID` are the same, and the docs use lower case, as `~/.aws/credentials` does. `url` itself is not passed on. A prefix, less any trailing `/`, applies to a URL equal to it or that goes on after a `/`: `s3://bucket` applies to `s3://bucket/notes`, not to `s3://bucket2`. The entries that apply are taken from the shortest prefix to the longest, a later one winning; their order in the file does not matter. There is no entry for every remote. A missing file has no settings. These are errors, `corrupt credentials <path>: …`, naming an entry by its position: bad TOML; a `remotes` that is not `[[remotes]]` entries; an entry with no `url`, or one that is not a string; a setting that is not a string; two entries with the same `url`, less any trailing `/`. The user writes this file; syncit never does, and never reads a phrase from it (phrases are in `secrets.toml`, section 8). The settings are passed to `parse_url_opts` and never set in the process environment.
 
   Files people edit are TOML, read and written with `toml_edit`, which keeps their comments; everything syncit alone writes is JSON.
 
@@ -298,20 +299,20 @@ read this vault from another computer, and they are not shown again.
 
 `init` with a path is unchanged.
 
-**`syncit remote`.** `config` gains `remotes`: a map from nickname to location, where a location is a URL or the absolute path of a vault. It is this vault's address book and nothing else reads it. `remotes` is a required field, like the others: vaults made before it are not migrated, since syncit has not shipped. A name in it is a valid nickname with no `/`, so that it cannot be taken for a path or a URL; a target's nickname that does not qualify needs `--name`. The nickname stays what `CRDT.md`, "Nickname", says it is: a label that no rule of the log reads.
+**`syncit remote`.** `config` gains `remotes`: a map from nickname to location, where a location is a URL or the absolute path of a vault. It is this vault's address book and nothing else reads it. `remotes` is a required field, like the others: vaults made before it are not migrated, since syncit has not shipped. A name in it is a valid nickname with no `/`, so that it cannot be taken for a path or a URL; a target's nickname that does not qualify needs `--nickname`. The nickname stays what `CRDT.md`, "Nickname", says it is: a label that no rule of the log reads.
 
 | Command | Behaviour |
 |---|---|
 | `syncit remote` | List the remotes: nickname, then location. |
-| `syncit remote add [--name <name>] [--save-key] <location>` | Remember a vault. See below. |
+| `syncit remote add [--nickname <name>] [--save-key] <location>` | Remember a vault. See below. |
 | `syncit remote remove <name>` | Forget it. Its keychain item and `secrets.toml` entry stay, since other vaults on this machine may use them. Nothing in the remote is touched. |
 
 `remote add`:
 
 1. A location with `://` is a URL, kept as given. Otherwise it is a path, kept in absolute form, and must be a vault.
 2. For a URL, read `format` and find the key (section 8). If no candidate matches and there is a terminal, ask `Secret key (24 words): ` without echo and check it. With no terminal, fail.
-3. Read the target's `config`. The name is `--name` if given, otherwise the target's own `nickname`.
-4. If that name is already in `remotes`, fail and say to pass `--name`.
+3. Read the target's `config`. The name is `--nickname` if given, otherwise the target's own `nickname`.
+4. If that name is already in `remotes`, fail and say to pass `--nickname`.
 5. Save the key (section 8), then add the entry to `config.remotes`. This is last, so a failed add changes nothing.
 
 A URL with no `format` fails with `no vault at <url>: run syncit init <url>`.
@@ -362,10 +363,10 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `phrase_round_trip` | 32 bytes to 24 words and back; a misspelt word is named by position; a swapped word is a checksum error |
 | `key_lookup_order` | `Options`, mock keychain, `secrets.toml`: the first whose check matches is used; one that does not match is passed over; none gives the documented error |
 | `secrets_file` | mode 0600, in a folder saving makes; two remotes give two entries; saving again replaces; comments and other keys written by hand stay; a missing file gives no key; bad TOML, a `remotes` that is not a table and a phrase that is not a string are each `corrupt secrets` |
-| `credentials_match` | a prefix applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; the sections that apply come from the shortest prefix to the longest; a URL no section covers gets none |
-| `credentials_errors` | a missing file gives no settings; bad TOML, a `remotes` or section that is not a table, and a setting that is not a string are each `corrupt credentials <path>` |
+| `credentials_match` | an entry's `url` applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; the entries that apply come from the shortest prefix to the longest, whatever their order in the file; `url` is not among the settings; a URL no entry covers gets none |
+| `credentials_errors` | a missing file gives no settings; bad TOML, a `remotes` that is not `[[remotes]]` entries, an entry with no `url` or a `url` that is not a string, a setting that is not a string, and two entries with the same `url` are each `corrupt credentials <path>`, naming the entry |
 | `init_remote` | writes `format` and `config`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses `format` version 2 |
-| `remote_add` | records the target's nickname and location for a URL and for a path; a taken name needs `--name`; a wrong phrase is refused and `config` is unchanged; `remote remove` forgets it |
+| `remote_add` | records the target's nickname and location for a URL and for a path; a taken name needs `--nickname`; a wrong phrase is refused and `config` is unchanged; `remote remove` forgets it |
 | `story_c2_sync_through_remote` | two vaults that never sync with each other converge through one remote, in either order, including a conflict; a vault with no history supplies its current files; a third machine `clone`s the URL and has everything |
 | `remote_is_opaque` | no object in the remote's directory contains a known line of a file, a path, a nickname or a plaintext hash, and no object name is a plaintext hash |
 | `remote_hostile` | a garbage object, a valid object copied to another name, and a truncated blob are rejected or left pending; the rest of the run completes |

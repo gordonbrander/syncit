@@ -523,22 +523,24 @@ syncit compact --vault origin
 
 **Where the key is kept.** `remote add` and `clone` ask for the words once, then keep them in the system keychain (macOS Keychain, or the Secret Service on Linux). After you reinstall or rebuild syncit, macOS asks once whether it may read the keychain item again. Where there is no keychain, such as a server over SSH, you can save the key in `~/.config/syncit/secrets.toml` (`--save-key`, or answer yes when asked); it is then stored there unencrypted, readable by your user only, and every vault on the machine finds it. Or set `SYNCIT_SECRET_KEY` to the 24 words for each command, which is what scripts and cron jobs usually do.
 
-**Credentials** for the storage are the usual settings: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (for R2, MinIO and other S3-compatible services) and `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. Put them in `~/.config/syncit/credentials.toml` (or `$XDG_CONFIG_HOME/syncit/credentials.toml`), under the URL of the bucket or remote they are for, and every command finds them. For a Cloudflare R2 bucket and an S3 bucket on another account:
+**Credentials** for the storage are the usual settings: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL` (for R2, MinIO and other S3-compatible services) and `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. Put them in `~/.config/syncit/credentials.toml` (or `$XDG_CONFIG_HOME/syncit/credentials.toml`), one `[[remotes]]` entry for each bucket or remote, and every command finds them. Names may be written in lower case, as in `~/.aws/credentials`. For a Cloudflare R2 bucket and an S3 bucket on another account:
 
 ```toml
-[remotes."s3://my-bucket"]           # personal, on R2
-AWS_ACCESS_KEY_ID = "…"
-AWS_SECRET_ACCESS_KEY = "…"
-AWS_ENDPOINT_URL = "https://<account-id>.r2.cloudflarestorage.com"
-AWS_DEFAULT_REGION = "auto"
+[[remotes]]                          # personal, on R2
+url = "s3://my-bucket"
+aws_access_key_id = "…"
+aws_secret_access_key = "…"
+aws_endpoint_url = "https://<account-id>.r2.cloudflarestorage.com"
+aws_default_region = "auto"
 
-[remotes."s3://work-backups"]
-AWS_ACCESS_KEY_ID = "…"
-AWS_SECRET_ACCESS_KEY = "…"
-AWS_DEFAULT_REGION = "us-east-1"
+[[remotes]]                          # work
+url = "s3://work-backups"
+aws_access_key_id = "…"
+aws_secret_access_key = "…"
+aws_default_region = "us-east-1"
 ```
 
-`s3://my-bucket` covers every remote in that bucket, such as `s3://my-bucket/notes`; a longer prefix overrides it for the remotes under it. Environment variables override the file. It is plain text, so make it readable by your user only (`chmod 600`). Syncit never writes it. `~/.aws/credentials` is not read.
+A `url` is a prefix: `s3://my-bucket` covers every remote in that bucket, such as `s3://my-bucket/notes`, and an entry with a longer `url` overrides it for the remotes under it. Environment variables override the file. It is plain text, so make it readable by your user only (`chmod 600`). Syncit never writes it. `~/.aws/credentials` is not read.
 
 **Interrupted uploads.** Files of 16 MB or more are uploaded in parts. If an upload is interrupted, the parts already sent stay in the bucket, unseen, until the bucket removes them. Give the bucket a lifecycle rule that aborts incomplete multipart uploads after a few days.
 
