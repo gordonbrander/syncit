@@ -205,7 +205,7 @@ enum RemoteArg {
 
 #[derive(Subcommand)]
 enum SettingArg {
-    /// How many versions back to store snapshot data? (Number of revisions, or "all")
+    /// How many versions back to store snapshot data? (Number of versions to keep, or "all")
     KeepHistory {
         #[arg(value_parser = depth, value_name = "N|all")]
         value: Depth,
