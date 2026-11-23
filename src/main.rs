@@ -35,7 +35,11 @@ enum Command {
         src: PathBuf,
         /// Directory to clone to
         dir: PathBuf,
-        /// Clone only this subpath of the vault (partial replication). Repeat to clone multiple subpaths.
+        /// Clone only this subpath of the vault.
+        ///
+        /// Repeat to clone multiple subpaths.
+        /// Makes clone a partial replica of the original, including only some of
+        /// its subpaths when syncing. Useful for syncing just part of a large backup.
         #[arg(long, value_name = "PATH")]
         only: Vec<String>,
         /// Save remote's secret keys to `~/.config/syncit/secrets.toml` if there is no OS keychain
@@ -48,7 +52,9 @@ enum Command {
         /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Do not delete anything. Resurrects any files that were deleted on either side.
+        /// Do not delete anything during sync.
+        ///
+        /// Resurrects any files that were deleted on either side.
         #[arg(long)]
         no_remove: bool,
     },
@@ -58,7 +64,9 @@ enum Command {
         /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Do not delete anything. Resurrects any files that were deleted.
+        /// Do not delete anything during push.
+        ///
+        /// Resurrects any files that were deleted.
         #[arg(long)]
         no_remove: bool,
     },
@@ -68,11 +76,15 @@ enum Command {
         /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Do not delete anything. Resurrects any files that were deleted.
+        /// Do not delete anything during pull.
+        ///
+        /// Resurrects any files that were deleted.
         #[arg(long)]
         no_remove: bool,
     },
-    /// Snapshot current state without syncing. File snapshots added to version history.
+    /// Snapshot current state without syncing.
+    ///
+    /// File snapshots are added to version history.
     Snapshot,
     /// Get subfolders of another vault (partial replication).
     Get {
@@ -83,7 +95,9 @@ enum Command {
         #[arg(long, value_name = "VAULT")]
         from: Option<PathBuf>,
     },
-    /// Move files to another vault. Sends files to the other vault, stops tracking them here.
+    /// Move files to another vault.
+    ///
+    /// Sends files to the other vault, stops tracking them here.
     /// Useful for offloading files to a larger backup vault (partial replication).
     Move {
         #[arg(required = true)]
@@ -104,13 +118,17 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Stop tracking paths in this vault. Removes this vault's copy of the files,
+    /// Stop tracking paths in this vault.
+    ///
+    /// Removes this vault's copy of the files,
     /// and excludes the paths from future replication. Doesn't remove them from other vaults.
     Drop {
         /// Paths to stop tracking
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Another vault that has a backup of the files. The the current state of the dropped files will be snapshotted and pushed there, for backup.
+        /// Make sure another vault has a backup of the files.
+        ///
+        /// The current state of the dropped files will be snapshotted and pushed there for backup.
         #[arg(long, value_name = "VAULT")]
         check: Option<PathBuf>,
         /// Drop files, even if no backup can be made
@@ -158,6 +176,7 @@ With --vs there are two marks and two words: ours first, theirs second.")]
         /// The start of the version's hash (find hashes with `syncit log`)
         hash: String,
         /// Replace the current file with the historical version?
+        ///
         /// If omitted, will place the historical version as a copy beside the current one.
         #[arg(long)]
         in_place: bool,
@@ -205,7 +224,9 @@ enum RemoteArg {
 
 #[derive(Subcommand)]
 enum SettingArg {
-    /// How many versions back to store snapshot data? (Number of versions to keep, or "all")
+    /// How many versions back to store snapshot data?
+    ///
+    /// (Number of versions to keep, or "all")
     KeepHistory {
         #[arg(value_parser = depth, value_name = "N|all")]
         value: Depth,
