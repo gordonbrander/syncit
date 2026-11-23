@@ -17,106 +17,110 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Make a folder a vault, or make a remote vault at a URL
+    /// Initialize a vault in a directory (or create a remote vault at a URL)
     Init {
-        /// A folder, or a URL such as s3://bucket/prefix
+        /// Directory path (or URL such as s3://bucket/prefix)
         #[arg(default_value = ".")]
         dir: String,
-        /// A remote vault's nickname [default: origin]
+        /// Nickname for the remote vault [default: origin]
         #[arg(long)]
         nickname: Option<String>,
-        /// Save a new remote's key in ~/.config/syncit/secrets.toml if there is no keychain
+        /// Save remote's secret keys to `~/.config/syncit/secrets.toml` if there is no OS keychain
         #[arg(long)]
         save_key: bool,
     },
-    /// Create a vault from another vault, or from a sub-folder of one
+    /// Clone (copy) a vault
     Clone {
-        /// A vault's folder or a folder in one, or a URL
+        /// Vault or URL
         src: PathBuf,
+        /// Directory to clone to
         dir: PathBuf,
-        /// Include only this path, from the vault's root; may be repeated
+        /// Clone only this subpath of the vault (partial replication). Repeat to clone multiple subpaths.
         #[arg(long, value_name = "PATH")]
         only: Vec<String>,
-        /// Save a remote's key in ~/.config/syncit/secrets.toml if there is no keychain
+        /// Save remote's secret keys to `~/.config/syncit/secrets.toml` if there is no OS keychain
         #[arg(long)]
         save_key: bool,
     },
     /// Sync both ways with another vault
     Sync {
         vault: PathBuf,
-        /// Show what would happen; change nothing
+        /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Keep files that were deleted; they come back in the vault that deleted them
+        /// Do not delete anything. Resurrects any files that were deleted on either side.
         #[arg(long)]
         no_remove: bool,
     },
-    /// Send this vault's changes to another vault
+    /// Push this vault's changes to another vault
     Push {
         vault: PathBuf,
-        /// Show what would happen; change nothing
+        /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Keep files that were deleted; they come back in the vault that deleted them
+        /// Do not delete anything. Resurrects any files that were deleted on either side.
         #[arg(long)]
         no_remove: bool,
     },
-    /// Take another vault's changes into this one
+    /// Pull another vault's changes into this one
     Pull {
         vault: PathBuf,
-        /// Show what would happen; change nothing
+        /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Keep files that were deleted; they come back in the vault that deleted them
+        /// Do not delete anything. Resurrects any files that were deleted on either side.
         #[arg(long)]
         no_remove: bool,
     },
-    /// Record the folder's current state without syncing
+    /// Snapshot current state without syncing. File snapshots added to version history.
     Snapshot,
-    /// Add files of another vault to this one: give their paths in that vault
+    /// Get subfolders of another vault (partial replication).
     Get {
         #[arg(required = true)]
+        /// Subpaths to add (relative to other vault)
         paths: Vec<PathBuf>,
-        /// The vault to get them from: a path, URL or remote name. The paths
-        /// are then from its root
+        /// The vault to get from. Path, URL, or remote nickname.
         #[arg(long, value_name = "VAULT")]
         from: Option<PathBuf>,
     },
-    /// Move files to another vault: send them, check they arrived, remove them here
+    /// Move files to another vault. Sends files to the other vault, stops tracking them here.
+    /// Useful for offloading files to a larger backup vault (partial replication).
     Move {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         vault: PathBuf,
-        /// Show what would happen; change nothing
+        /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Copy files from anywhere into a vault; they need not be in one
+    /// Add files to a vault (original files don't have to be in a vault)
     Cp {
         /// Files and folders to copy; `.` is this folder's contents
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// A folder in the vault to copy into
+        /// Destination directory in the vault
         dest: PathBuf,
-        /// Show what would happen; change nothing
+        /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Remove files from this vault only, without sending them anywhere
+    /// Stop tracking paths in this vault. Removes this vault's copy of the files,
+    /// and excludes the paths from future replication. Doesn't remove them from other vaults.
     Drop {
+        /// Paths to stop tracking
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// A vault that has the files: nothing is dropped unless it does
+        /// Another vault that has a backup of the files. The the current state of the dropped files will be snapshotted and pushed there, for backup.
         #[arg(long, value_name = "VAULT")]
         check: Option<PathBuf>,
-        /// Drop even files no other copy is known of
+        /// Drop files, even if no backup can be made
         #[arg(long)]
         force: bool,
-        /// Show what would happen; change nothing
+        /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Show the state of each file here: what needs recording, syncing or you
+    /// Show the state of each file here
     #[command(after_help = "\
 Marks:
   ✓  current     here and up to date
@@ -143,9 +147,9 @@ With --vs there are two marks and two words: ours first, theirs second.")]
         #[arg(short, long)]
         all: bool,
     },
-    /// Show which vault recorded the current version of each file
+    /// Show which vault edited each version of a file
     Blame { paths: Vec<PathBuf> },
-    /// List the recorded versions of files, newest first
+    /// List file version history, newest first
     Log { paths: Vec<PathBuf> },
     /// Bring back an old version of a file, as a copy beside it
     Restore {
@@ -188,7 +192,7 @@ enum RemoteArg {
         /// The name to use [default: the vault's own nickname]
         #[arg(long)]
         name: Option<String>,
-        /// Save a remote's key in ~/.config/syncit/secrets.toml if there is no keychain
+        /// Save remote's secret keys to `~/.config/syncit/secrets.toml` if there is no OS keychain
         #[arg(long)]
         save_key: bool,
     },
