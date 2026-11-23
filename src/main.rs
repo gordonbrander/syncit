@@ -189,18 +189,18 @@ With --vs there are two marks and two words: ours first, theirs second.")]
 
 #[derive(Subcommand)]
 enum RemoteArg {
-    /// Remember a vault by name (URL or vault directory)
+    /// Remember a vault by nickname (URL or vault directory)
     Add {
         location: String,
         /// Nickname for vault [default: the vault's own nickname]
         #[arg(long)]
-        name: Option<String>,
+        nickname: Option<String>,
         /// Save remote's secret keys to `~/.config/syncit/secrets.toml` if there is no OS keychain
         #[arg(long)]
         save_key: bool,
     },
     /// Forget a remote
-    Remove { name: String },
+    Remove { nickname: String },
 }
 
 #[derive(Subcommand)]
@@ -327,13 +327,13 @@ fn main() {
             action:
                 Some(RemoteArg::Add {
                     location,
-                    name,
+                    nickname,
                     save_key,
                 }),
-        } => commands::remote_add(opts, cwd, &location, name, save_key).map(|_| None),
+        } => commands::remote_add(opts, cwd, &location, nickname, save_key).map(|_| None),
         Command::Remote {
-            action: Some(RemoteArg::Remove { name }),
-        } => commands::remote_remove(opts, cwd, &name).map(|_| None),
+            action: Some(RemoteArg::Remove { nickname }),
+        } => commands::remote_remove(opts, cwd, &nickname).map(|_| None),
         Command::Config { vault, setting } => {
             let change = setting.map(|setting| match setting {
                 SettingArg::KeepHistory { value } => Setting::KeepHistory(value.0),
