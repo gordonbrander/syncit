@@ -147,37 +147,40 @@ With --vs there are two marks and two words: ours first, theirs second.")]
         #[arg(short, long)]
         all: bool,
     },
-    /// Show which vault edited each version of a file
+    /// Show the vault that edited each version of a file
     Blame { paths: Vec<PathBuf> },
     /// List file version history, newest first
     Log { paths: Vec<PathBuf> },
-    /// Bring back an old version of a file, as a copy beside it
+    /// Restore an old version of a file
     Restore {
+        /// Path of file to restore
         path: PathBuf,
-        /// The start of the version's hash, as `log` prints it
+        /// The start of the version's hash (find hashes with `syncit log`)
         hash: String,
-        /// Replace the file itself instead of writing a copy
+        /// Replace the current file with the historical version?
+        /// If omitted, will place the historical version as a copy beside the current one.
         #[arg(long)]
         in_place: bool,
     },
-    /// Drop old versions' content that keep-history no longer covers
+    /// Delete the file data for old versions to free up space
     Compact {
-        /// Show what would happen; change nothing
+        /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Compact this vault instead: a path, URL or remote name
+        /// Compact a different vault (path, URL, or remote nickname)
         #[arg(long, value_name = "VAULT")]
         vault: Option<PathBuf>,
     },
-    /// Show this vault's settings, or change one
+    /// Show this vault's settings, or change a setting
     Config {
-        /// Act on this vault instead: a path, URL or remote name
+        /// Configure a different vault (path, URL, or remote nickname)
         #[arg(long, value_name = "VAULT")]
         vault: Option<PathBuf>,
+        /// Key and value to set
         #[command(subcommand)]
         setting: Option<SettingArg>,
     },
-    /// List the vaults this one remembers by name, or add or remove one
+    /// List other vaults this one knows about. Add or remove other vaults.
     Remote {
         #[command(subcommand)]
         action: Option<RemoteArg>,
@@ -186,33 +189,33 @@ With --vs there are two marks and two words: ours first, theirs second.")]
 
 #[derive(Subcommand)]
 enum RemoteArg {
-    /// Remember a vault by name: a URL, or a vault's folder
+    /// Remember a vault by name (URL or vault directory)
     Add {
         location: String,
-        /// The name to use [default: the vault's own nickname]
+        /// Nickname for vault [default: the vault's own nickname]
         #[arg(long)]
         name: Option<String>,
         /// Save remote's secret keys to `~/.config/syncit/secrets.toml` if there is no OS keychain
         #[arg(long)]
         save_key: bool,
     },
-    /// Forget a remote; nothing in it is touched
+    /// Forget a remote
     Remove { name: String },
 }
 
 #[derive(Subcommand)]
 enum SettingArg {
-    /// How many versions back to keep the content of: a number, or all
+    /// How many versions back to store snapshot data? (Number of revisions, or "all")
     KeepHistory {
         #[arg(value_parser = depth, value_name = "N|all")]
         value: Depth,
     },
-    /// Drop versions older than that at the end of every run: on or off
+    /// Automatically delete version data older than the cutoff?
     Autocompact {
         #[arg(value_parser = ["on", "off"])]
         value: String,
     },
-    /// The name this vault's changes are recorded under
+    /// The nickname this vault's changes are recorded under
     Nickname { value: String },
 }
 
