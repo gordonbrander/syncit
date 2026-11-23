@@ -837,9 +837,9 @@ fn open_vault(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<Vault>
 /// List the remotes this vault remembers. Returns them, as printed.
 pub fn remotes(opts: &Options, cwd: &Path) -> Result<Vec<(String, String)>> {
     let v = Vault::open(opts, cwd, true)?;
-    for (name, location) in &v.config.remotes {
+    for (nickname, location) in &v.config.remotes {
         let message = Message::Remote {
-            name: name.clone(),
+            nickname: nickname.clone(),
             location: location.clone(),
         };
         print_stdout(&message, opts.json);
@@ -847,24 +847,24 @@ pub fn remotes(opts: &Options, cwd: &Path) -> Result<Vec<(String, String)>> {
     Ok(v.config.remotes.into_iter().collect())
 }
 
-/// Remember the vault at `location`, a URL or a path, under `name` or its
-/// own nickname. Returns the name.
+/// Remember the vault at `location`, a URL or a path, under `nickname` or its
+/// own nickname. Returns the nickname.
 pub fn remote_add(
     opts: &Options,
     cwd: &Path,
     location: &str,
-    name: Option<String>,
+    nickname: Option<String>,
     save_key: bool,
 ) -> Result<String> {
     let mut v = Vault::open(opts, cwd, true)?;
-    add(opts, &mut v, location, name, save_key)
+    add(opts, &mut v, location, nickname, save_key)
 }
 
 fn add(
     opts: &Options,
     v: &mut Vault,
     location: &str,
-    name: Option<String>,
+    nickname: Option<String>,
     save_key: bool,
 ) -> Result<String> {
     let (location, config, found) = if location.contains("://") {
@@ -880,33 +880,33 @@ fn add(
         ensure!(!nested(&root, &v.root), "a vault cannot be its own remote");
         (root.display().to_string(), Config::load(&root)?, None)
     };
-    let name = name.unwrap_or(config.nickname);
+    let nickname = nickname.unwrap_or(config.nickname);
     ensure!(
-        valid_nickname(&name) && !name.contains('/'),
-        "{name} cannot name a remote: pass --name <name>"
+        valid_nickname(&nickname) && !nickname.contains('/'),
+        "{nickname} cannot be a remote nickname: pass --nickname <nickname>"
     );
     ensure!(
-        !v.config.remotes.contains_key(&name),
-        "{name} is already a remote here: pass --name <name>"
+        !v.config.remotes.contains_key(&nickname),
+        "{nickname} is already a remote here: pass --nickname <nickname>"
     );
     if let Some(found) = found {
         save_found(opts, &location, found, save_key)?;
     }
-    v.config.remotes.insert(name.clone(), location.clone());
+    v.config.remotes.insert(nickname.clone(), location.clone());
     v.storage.save_config(&v.config)?;
-    let message = format!("remote {name}: {location}");
+    let message = format!("remote {nickname}: {location}");
     print_stdout(&Message::Info { message }, opts.json);
-    Ok(name)
+    Ok(nickname)
 }
 
 /// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
 /// other vaults on this machine may use them.
-pub fn remote_remove(opts: &Options, cwd: &Path, name: &str) -> Result<()> {
+pub fn remote_remove(opts: &Options, cwd: &Path, nickname: &str) -> Result<()> {
     let mut v = Vault::open(opts, cwd, true)?;
-    let location = v.config.remotes.remove(name);
-    let location = location.with_context(|| format!("no remote named {name}"))?;
+    let location = v.config.remotes.remove(nickname);
+    let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
     v.storage.save_config(&v.config)?;
-    let message = format!("removed remote {name}: {location}");
+    let message = format!("removed remote {nickname}: {location}");
     print_stdout(&Message::Info { message }, opts.json);
     Ok(())
 }
@@ -1391,12 +1391,12 @@ pub fn config(
     match change {
         Some(Setting::KeepHistory(depth)) => v.config.keep_history = depth,
         Some(Setting::Autocompact(on)) => v.config.autocompact = on,
-        Some(Setting::Nickname(name)) => {
+        Some(Setting::Nickname(nickname)) => {
             ensure!(
-                valid_nickname(&name),
+                valid_nickname(&nickname),
                 "a nickname is 1 to 64 bytes, with no spaces or control characters"
             );
-            v.config.nickname = name;
+            v.config.nickname = nickname;
         }
         None => {}
     }

@@ -2455,9 +2455,9 @@ mod remote {
                 ("origin".to_string(), url.to_string())
             ]
         );
-        // A taken name needs --name.
+        // A taken nickname needs --nickname.
         let err = cmd::remote_add(o, &a, url, None, false).unwrap_err();
-        assert!(err.to_string().contains("--name"), "{err}");
+        assert!(err.to_string().contains("--nickname"), "{err}");
         let named = cmd::remote_add(o, &a, url, Some("backup".into()), false).unwrap();
         assert_eq!(named, "backup");
         // A wrong phrase is refused, and the config is unchanged.

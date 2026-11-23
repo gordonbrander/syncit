@@ -603,8 +603,8 @@ The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `st
 | `syncit config nickname <name>` | name this vault in the changes it records |
 | `syncit config --vault <vault> ...`, `syncit compact --vault <vault>` | act on another vault, such as a remote |
 | `syncit remote` | list the vaults this one remembers by nickname |
-| `syncit remote add [--name <name>] <url or folder>` | remember a vault; for a remote, find or ask for its key |
-| `syncit remote remove <name>` | forget a remote |
+| `syncit remote add [--nickname <name>] <url or folder>` | remember a vault; for a remote, find or ask for its key |
+| `syncit remote remove <nickname>` | forget a remote |
 
 A `<vault>` is the path of any folder in the other vault, a remote vault's URL, or a nickname from `syncit remote`.
 
