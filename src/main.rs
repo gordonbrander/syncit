@@ -58,7 +58,7 @@ enum Command {
         /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Do not delete anything. Resurrects any files that were deleted on either side.
+        /// Do not delete anything. Resurrects any files that were deleted.
         #[arg(long)]
         no_remove: bool,
     },
@@ -68,7 +68,7 @@ enum Command {
         /// Show what would happen. Change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// Do not delete anything. Resurrects any files that were deleted on either side.
+        /// Do not delete anything. Resurrects any files that were deleted.
         #[arg(long)]
         no_remove: bool,
     },
