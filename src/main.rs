@@ -23,7 +23,8 @@ Output:
   The last line counts: recorded (changes newly noticed, in either
   vault); added, updated, deleted, renamed (files the run changed, in
   either vault); conflicts, pending, skipped (what needs a look).
-  Results go to stdout, warnings and errors to stderr.
+  Results go to stdout, warnings and errors to stderr. A long run shows
+  its progress on stderr when that is a terminal, and never with --json.
   With --json every line is a JSON object with a \"type\" field.
 
 Exit codes:
@@ -435,6 +436,7 @@ fn main() {
         dry_run,
         no_remove,
         secret_key: std::env::var("SYNCIT_SECRET_KEY").ok(),
+        progress: !cli.json,
         config_dir: syncit::output::config_dir(),
     };
     // Commands that run a sync return a summary, printed last.

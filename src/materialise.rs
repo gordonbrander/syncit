@@ -4,7 +4,7 @@ use crate::blobs::{available, fetch, hash_file, read};
 use crate::dirstate::{Row, TICK_MARGIN_MS, mtime_ms};
 use crate::entry::{Entry, Id, sha256};
 use crate::log::{Loser, PathState};
-use crate::output::{Options, Summary};
+use crate::output::{Options, Progress, Summary};
 use crate::scan::moves;
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault, unique};
@@ -108,11 +108,14 @@ pub fn materialise(
     }
     // A path that fails a safety check or hits a filesystem error is left as
     // it was, and the run goes on.
+    let progress = Progress::new(opts, "Writing", states.len());
     for (path, state) in states {
+        progress.tick();
         if let Err(e) = one(opts, v, peer, kept, &path, state, &mut pass, sum) {
             v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
         }
     }
+    drop(progress);
     for (path, heads) in std::mem::take(&mut pass.deferred) {
         if let Err(e) = delete(opts, v, &path, heads, &mut pass) {
             v.event(opts, sum, "skipped", &path, &format!("{e:#}"));

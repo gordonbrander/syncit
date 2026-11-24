@@ -123,7 +123,7 @@ Suggested layout. Merge or split if it reads better, but keep the pure parts fre
 | `materialise` | the per-path procedure, merging text, conflict copies, setting base | yes |
 | `vault` | `Vault` (root, config, dirstate, log, lock), finding the root | yes |
 | `commands` | one function per command; a command that runs a sync returns a `Summary` | yes |
-| `output` | `Options`, the `Message` types with their text and JSON forms, `print_stdout`, `print_stderr`, `Summary` | no |
+| `output` | `Options`, the `Message` types with their text and JSON forms, `print_stdout`, `print_stderr`, `Progress`, `Summary` | no |
 | `main` | argument parsing, printing the `Summary` and errors, exit code | yes |
 
 Remote vaults add `storage`, `remote`, `crypt` and `keys`, and put every read and write of a vault's log, blobs and config behind one trait (`store.md`, sections 3 and 4).
@@ -706,13 +706,15 @@ Three rules:
 
 - **Code prints the moment something happens.** Nothing is collected for printing, so a long run shows its progress and an interrupted one has already said what it did.
 - **stdout is the result; stderr is warnings and errors.** A warning never changes the exit code.
+- **A long loop shows a progress bar on stderr**, only when stderr is a terminal and never with `--json`: `Scanning` (the scan), `Storing` (blobs put into a vault's storage) and `Writing` (materialise), each as `<label> [<bar>] <done> / <total> (<time left>)`, counting files. It is erased when the loop ends, so it is in no captured output.
 - **`--json`, a flag every command accepts, changes the form and not the stream.** Each line of either stream is then one JSON object with a `type` field (JSON Lines).
 
 How it is built:
 
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
-- `Options` holds the process-wide settings (`json`, and `dry_run` and `no_remove` of section 10) and is passed to everything that can print or write.
+- `Progress::new(opts, label, total)` is the bar (the `indicatif` crate), `tick()` counts one, and dropping it erases it. While one is up, the print functions print above it.
+- `Options` holds the process-wide settings (`json`, `progress`, and `dry_run` and `no_remove` of section 10) and is passed to everything that can print or write.
 - What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages

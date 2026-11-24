@@ -14,6 +14,7 @@ const O: &Options = &Options {
     dry_run: false,
     no_remove: false,
     secret_key: None,
+    progress: false,
     config_dir: None,
 };
 use syncit::config::Config;
@@ -601,6 +602,7 @@ fn compact_command() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
+        progress: false,
         config_dir: None,
     };
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("c.bin", "c1"), ("d.txt", "d")]);
@@ -719,6 +721,7 @@ fn no_remove_keeps_deleted() {
         dry_run,
         no_remove: true,
         secret_key: None,
+        progress: false,
         config_dir: None,
     };
     let files = [
@@ -1893,6 +1896,7 @@ fn dry_run_matches_real_run() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
+        progress: false,
         config_dir: None,
     };
     type Run = fn(&Options, &Path, &Path) -> anyhow::Result<Summary>;
@@ -1967,6 +1971,7 @@ fn cp_from_plain_folder() {
         dry_run: true,
         no_remove: false,
         secret_key: None,
+        progress: false,
         config_dir: None,
     };
     let files = [
@@ -2055,6 +2060,7 @@ mod remote {
             dry_run: false,
             no_remove: false,
             secret_key: phrase.map(String::from),
+            progress: false,
             config_dir: None,
         }
     }
@@ -2201,6 +2207,7 @@ mod remote {
             .as_nanos();
         let url = format!("{}/syncit-test-{unique}", base.trim_end_matches('/'));
         let o = Options {
+            progress: false,
             config_dir: syncit::output::config_dir(),
             ..o()
         };
@@ -2546,6 +2553,7 @@ mod remote {
         let (_s, second) = remote(&tmp, "s");
         let second = second.to_str().unwrap();
         let saved = &Options {
+            progress: false,
             config_dir: Some(tmp.path().join("config")),
             ..opts(None)
         };

@@ -261,6 +261,7 @@ mod tests {
             dry_run: false,
             no_remove: false,
             secret_key,
+            progress: false,
             config_dir: Some(dir.to_path_buf()),
         }
     }

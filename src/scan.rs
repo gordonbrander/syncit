@@ -4,7 +4,7 @@ use crate::blobs::hash_file;
 use crate::dirstate::{Row, is_exec, mtime_ms};
 use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
-use crate::output::{Options, warn};
+use crate::output::{Options, Progress, warn};
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault};
 use anyhow::{Context, Result};
@@ -67,7 +67,9 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     let (mut dirstate, mut config, mut out) =
         (v.dirstate.clone(), v.config.clone(), Scan::default());
     let (mut excluded, mut added, mut deleted) = (vec![], vec![], vec![]);
+    let progress = Progress::new(opts, "Scanning", files.len());
     for path in &files {
+        progress.tick();
         // A file on disk is included, whether or not the vault knew it.
         if !config.includes(path) {
             excluded.push(path.clone());
@@ -157,6 +159,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
         out.changes.push((path.clone(), kind));
         out.entries.push(entry);
     }
+    drop(progress);
 
     let gone = |p: &&String| !files.contains(*p) && !v.skips(p);
     let gone: Vec<String> = dirstate.rows.keys().filter(gone).cloned().collect();

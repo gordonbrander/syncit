@@ -1,7 +1,7 @@
 //! Blobs: file contents addressed by SHA-256, and where to find them.
 
 use crate::entry::sha256;
-use crate::output::Options;
+use crate::output::{Options, Progress};
 use crate::vault::{Vault, unique};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -137,7 +137,10 @@ pub fn retain(opts: &Options, v: &mut Vault, peer: Option<&Vault>) -> Result<()>
         v.traffic.borrow_mut().sent_files.extend(sending);
     } else if !opts.dry_run && (v.bare || v.config.keep_history != Some(0)) {
         fs::create_dir_all(&v.tmp)?;
-        for hash in &v.storage.missing(&keep) {
+        let missing = v.storage.missing(&keep);
+        let progress = Progress::new(opts, "Storing", missing.len());
+        for hash in &missing {
+            progress.tick();
             let tmp = v.tmp.join(unique());
             if fetch(v, peer, hash, &tmp)? {
                 v.storage.put_blob(hash, &tmp)?;

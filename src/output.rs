@@ -2,8 +2,10 @@
 //! nothing is collected. A message has a text form (`Display`) and a JSON
 //! form (`Serialize`); the caller picks the stream, `json` picks the form.
 
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::fmt::{self, Display};
+use std::sync::Mutex;
 
 /// Settings for the whole process, passed to everything.
 #[derive(Clone)]
@@ -17,6 +19,9 @@ pub struct Options {
     /// A remote vault's secret key, as its 24 words: `SYNCIT_SECRET_KEY`.
     /// Read by `main`; the library never reads the environment for it.
     pub secret_key: Option<String>,
+    /// Show a progress bar in long loops, if stderr is a terminal. Set by
+    /// `main` unless `--json`; tests leave it off.
+    pub progress: bool,
     /// The user's syncit folder, which holds `credentials.toml` and
     /// `secrets.toml`. Found by `main`; tests leave it out.
     pub config_dir: Option<std::path::PathBuf>,
@@ -346,14 +351,62 @@ fn line<T: Display + Serialize>(value: &T, json: bool) -> String {
     }
 }
 
+/// The progress bar on screen, if there is one. The phases that show one
+/// never overlap.
+static BAR: Mutex<Option<ProgressBar>> = Mutex::new(None);
+
+/// Print with the progress bar out of the way: the line goes above it.
+fn show(print: impl FnOnce()) {
+    let bar = BAR.lock().unwrap().clone();
+    match bar {
+        Some(bar) => bar.suspend(print),
+        None => print(),
+    }
+}
+
+/// How far a long loop has come, on stderr: `Scanning [===>  ] 41,200 /
+/// 90,112 (2m)`. Drawn only with `Options::progress` and when stderr is a
+/// terminal; erased when dropped.
+// ponytail: counts files, so one huge file stalls the bar and skews the time
+// left; count bytes if that misleads.
+pub struct Progress(ProgressBar);
+
+impl Progress {
+    pub fn new(opts: &Options, label: &'static str, total: usize) -> Progress {
+        let bar = if !opts.progress {
+            ProgressBar::hidden()
+        } else {
+            let template = "{msg} [{bar:20}] {human_pos} / {human_len} ({eta})";
+            let style = ProgressStyle::with_template(template).expect("the template is valid");
+            ProgressBar::new(total as u64)
+                .with_style(style.progress_chars("=> "))
+                .with_message(label)
+        };
+        *BAR.lock().unwrap() = Some(bar.clone());
+        Progress(bar)
+    }
+
+    /// One more done.
+    pub fn tick(&self) {
+        self.0.inc(1);
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        self.0.finish_and_clear();
+        *BAR.lock().unwrap() = None;
+    }
+}
+
 /// Results.
 pub fn print_stdout<T: Display + Serialize>(value: &T, json: bool) {
-    println!("{}", line(value, json));
+    show(|| println!("{}", line(value, json)));
 }
 
 /// Warnings and errors.
 pub fn print_stderr<T: Display + Serialize>(value: &T, json: bool) {
-    eprintln!("{}", line(value, json));
+    show(|| eprintln!("{}", line(value, json)));
 }
 
 /// The lines of `status`, with the paths padded to one width.
@@ -365,7 +418,7 @@ pub fn print_states(lines: &[State], json: bool) {
         if json {
             print_stdout(&Message::State(h.clone()), true);
         } else {
-            println!("{}", h.row(width.unwrap_or(0)));
+            show(|| println!("{}", h.row(width.unwrap_or(0))));
         }
     }
 }
@@ -377,6 +430,24 @@ pub fn warn(opts: &Options, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_counts() {
+        for progress in [false, true] {
+            let opts = Options {
+                json: false,
+                dry_run: false,
+                no_remove: false,
+                secret_key: None,
+                progress,
+                config_dir: None,
+            };
+            let progress = Progress::new(&opts, "Scanning", 3);
+            progress.tick();
+            progress.tick();
+            assert_eq!(progress.0.position(), 2);
+        }
+    }
 
     #[test]
     fn message_forms() {
