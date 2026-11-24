@@ -4,11 +4,11 @@ use crate::blobs::{available, fetch, hash_file, read};
 use crate::dirstate::{Row, TICK_MARGIN_MS, mtime_ms};
 use crate::entry::{Entry, Id, sha256};
 use crate::log::{Loser, PathState};
-use crate::output::{Options, Summary};
+use crate::output::{Context, Progress, Summary};
 use crate::scan::moves;
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault, unique};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
@@ -84,7 +84,7 @@ fn merged(
 /// that the versions a merge replaces are retained in this run; without it
 /// nothing is merged.
 pub fn materialise(
-    opts: &Options,
+    ctx: &Context,
     v: &mut Vault,
     peer: Option<&Vault>,
     kept: bool,
@@ -108,14 +108,17 @@ pub fn materialise(
     }
     // A path that fails a safety check or hits a filesystem error is left as
     // it was, and the run goes on.
+    let progress = Progress::new(&ctx.bar, "writing", states.len());
     for (path, state) in states {
-        if let Err(e) = one(opts, v, peer, kept, &path, state, &mut pass, sum) {
-            v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
+        progress.tick();
+        if let Err(e) = one(ctx, v, peer, kept, &path, state, &mut pass, sum) {
+            v.event(ctx, sum, "skipped", &path, &format!("{e:#}"));
         }
     }
+    drop(progress);
     for (path, heads) in std::mem::take(&mut pass.deferred) {
-        if let Err(e) = delete(opts, v, &path, heads, &mut pass) {
-            v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
+        if let Err(e) = delete(ctx, v, &path, heads, &mut pass) {
+            v.event(ctx, sum, "skipped", &path, &format!("{e:#}"));
         }
     }
     // A deletion and an addition of the same content are one file moved.
@@ -130,11 +133,11 @@ pub fn materialise(
     lines.sort();
     for (path, kind, from) in lines {
         match from {
-            Some(from) => v.renamed(opts, sum, from, path),
-            None => v.event(opts, sum, kind, path, ""),
+            Some(from) => v.renamed(ctx, sum, from, path),
+            None => v.event(ctx, sum, kind, path, ""),
         }
     }
-    if opts.dry_run {
+    if ctx.dry_run {
         return Ok(());
     }
     v.dirstate.save(&v.root)
@@ -154,11 +157,11 @@ struct Pass {
 }
 
 /// Remove the file at `p`, whose winner is a tombstone.
-fn delete(opts: &Options, v: &mut Vault, p: &str, heads: Vec<Id>, pass: &mut Pass) -> Result<()> {
+fn delete(ctx: &Context, v: &mut Vault, p: &str, heads: Vec<Id>, pass: &mut Pass) -> Result<()> {
     if let Some(row) = v.dirstate.rows.get(p) {
         let hash = row.hash.clone();
         safe(v, p)?;
-        if !opts.dry_run {
+        if !ctx.dry_run {
             let file = v.root.join(p);
             fs::remove_file(&file)?;
             prune(&v.root, &file);
@@ -173,7 +176,7 @@ fn delete(opts: &Options, v: &mut Vault, p: &str, heads: Vec<Id>, pass: &mut Pas
 
 #[allow(clippy::too_many_arguments)]
 fn one(
-    opts: &Options,
+    ctx: &Context,
     v: &mut Vault,
     peer: Option<&Vault>,
     kept: bool,
@@ -185,7 +188,7 @@ fn one(
     let (heads, winner, losers) = match state {
         PathState::Absent => return Ok(()),
         PathState::Incomplete => {
-            v.event(opts, sum, "incomplete", p, "waiting for missing history");
+            v.event(ctx, sum, "incomplete", p, "waiting for missing history");
             return Ok(());
         }
         PathState::Resolved {
@@ -209,13 +212,13 @@ fn one(
             pass.deferred.push((p.to_string(), heads));
             return Ok(());
         }
-        return delete(opts, v, p, heads, pass);
+        return delete(ctx, v, p, heads, pass);
     };
     let merge = kept.then(|| merged(v, peer, p, &heads, &winner)).flatten();
     if let Some((text, entry)) = merge {
         safe(v, p)?;
         let hash = sha256(text.as_bytes());
-        let (size, mtime) = if opts.dry_run {
+        let (size, mtime) = if ctx.dry_run {
             (0, entry.mtime) // in memory only
         } else {
             let fill = |tmp: &Path| fs::write(tmp, &text).map(|_| true);
@@ -242,7 +245,7 @@ fn one(
         let nickname = v.config.nickname.clone();
         v.log.add(entry, &nickname);
         let kind = if row.is_some() { "updated" } else { "added" };
-        v.event(opts, sum, kind, p, "merged");
+        v.event(ctx, sum, kind, p, "merged");
         return Ok(());
     }
     // The copy name the local version was renamed to, if it was.
@@ -263,15 +266,15 @@ fn one(
                 "the conflict copy name {c} is taken"
             );
         }
-        let (size, mtime) = if opts.dry_run {
+        let (size, mtime) = if ctx.dry_run {
             if !available(v, peer, &h) {
-                v.event(opts, sum, "pending", p, UNAVAILABLE);
+                v.event(ctx, sum, "pending", p, UNAVAILABLE);
                 return Ok(());
             }
             (0, w.mtime) // in memory only
         } else {
             let Some(tmp) = stage(v, p, w.mtime, w.exec, |tmp| fetch(v, peer, &h, tmp))? else {
-                v.event(opts, sum, "pending", p, UNAVAILABLE);
+                v.event(ctx, sum, "pending", p, UNAVAILABLE);
                 return Ok(());
             };
             if let (Some(c), Some(row)) = (&copy, &row) {
@@ -295,7 +298,7 @@ fn one(
             },
         );
         if row.is_some() {
-            v.event(opts, sum, "updated", p, "");
+            v.event(ctx, sum, "updated", p, "");
         } else {
             pass.added.push((p.to_string(), h.clone()));
         }
@@ -303,15 +306,15 @@ fn one(
     } else if row.is_some_and(|row| row.exec != w.exec) {
         // Same content, other executable bit: nothing to fetch.
         safe(v, p)?;
-        if !opts.dry_run {
+        if !ctx.dry_run {
             set_exec(&file, w.exec)?;
         }
         if let Some(row) = v.dirstate.rows.get_mut(p) {
             row.exec = w.exec;
         }
-        v.event(opts, sum, "updated", p, "");
+        v.event(ctx, sum, "updated", p, "");
     }
-    copies_and_base(opts, v, peer, p, &h, heads, &losers, renamed, sum);
+    copies_and_base(ctx, v, peer, p, &h, heads, &losers, renamed, sum);
     Ok(())
 }
 
@@ -319,7 +322,7 @@ fn one(
 /// set the row's base to the heads now visible in this vault.
 #[allow(clippy::too_many_arguments)]
 fn copies_and_base(
-    opts: &Options,
+    ctx: &Context,
     v: &mut Vault,
     peer: Option<&Vault>,
     p: &str,
@@ -338,16 +341,16 @@ fn copies_and_base(
         } else if file.symlink_metadata().is_ok() {
             let same = hash_file(&file).is_ok_and(|x| x == l.hash);
             if !same {
-                v.event(opts, sum, "skipped", &c, "the conflict copy name is taken");
+                v.event(ctx, sum, "skipped", &c, "the conflict copy name is taken");
             }
             same
         } else {
-            match write_copy(opts, v, peer, &c, l) {
-                Ok(true) => v.event(opts, sum, "copied", &c, ""),
-                Ok(false) => v.event(opts, sum, "pending", &c, UNAVAILABLE),
-                Err(e) => v.event(opts, sum, "skipped", &c, &format!("{e:#}")),
+            match write_copy(ctx, v, peer, &c, l) {
+                Ok(true) => v.event(ctx, sum, "copied", &c, ""),
+                Ok(false) => v.event(ctx, sum, "pending", &c, UNAVAILABLE),
+                Err(e) => v.event(ctx, sum, "skipped", &c, &format!("{e:#}")),
             }
-            opts.dry_run || file.symlink_metadata().is_ok()
+            ctx.dry_run || file.symlink_metadata().is_ok()
         };
         if surfaced {
             visible.push(&l.hash);
@@ -368,7 +371,7 @@ fn copies_and_base(
 /// A conflict copy is an ordinary file with no dirstate row: the next scan
 /// records it.
 fn write_copy(
-    opts: &Options,
+    ctx: &Context,
     v: &mut Vault,
     peer: Option<&Vault>,
     c: &str,
@@ -376,7 +379,7 @@ fn write_copy(
 ) -> Result<bool> {
     ensure!(!v.skips(c), "the conflict copy name is ignored");
     no_symlinked_parent(v, c)?;
-    if opts.dry_run {
+    if ctx.dry_run {
         return Ok(available(v, peer, &l.hash));
     }
     let Some(tmp) = stage(v, c, l.mtime, l.exec, |tmp| fetch(v, peer, &l.hash, tmp))? else {

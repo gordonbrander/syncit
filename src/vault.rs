@@ -3,9 +3,9 @@
 use crate::config::{Config, prefix_matches};
 use crate::dirstate::Dirstate;
 use crate::log::Log;
-use crate::output::{Event, Message, Options, Summary, print_stdout};
+use crate::output::{Context, Event, Message, Summary, print_stdout};
 use crate::storage::{Dir, Storage};
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
@@ -136,7 +136,7 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
 impl Vault {
     /// Find, lock and load the vault at or above `start`. `local` is for the
     /// vault a command runs in; a peer's log is read leniently.
-    pub fn open(opts: &Options, start: &Path, local: bool) -> Result<Vault> {
+    pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault> {
         let root = find_root(start)?;
         let dot = root.join(".syncit");
         let lock = File::options()
@@ -158,7 +158,7 @@ impl Vault {
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
-            log: Log::load(opts, &storage, local)?,
+            log: Log::load(ctx, &storage, local)?,
             name: root.display().to_string(),
             bare: false,
             traffic: RefCell::default(),
@@ -186,12 +186,12 @@ impl Vault {
     /// there is one: it finds the key there, and moves files through its
     /// `.syncit/tmp`. A remote is bare and is not locked.
     #[cfg(feature = "remote")]
-    pub fn open_url(opts: &Options, url: &str, local: Option<&Vault>) -> Result<Vault> {
+    pub fn open_url(ctx: &Context, url: &str, local: Option<&Vault>) -> Result<Vault> {
         use crate::remote::{Bucket, Remote, credentials};
         let root = local.map(|v| v.root.as_path());
-        let bucket = Bucket::new(url, credentials(opts, url)?)?;
+        let bucket = Bucket::new(url, credentials(ctx, url)?)?;
         let check = bucket.check()?;
-        let (key, _) = crate::keys::find(opts, url, &check)?;
+        let (key, _) = crate::keys::find(ctx, url, &check)?;
         let storage = Remote::open(bucket, key, root.map(Dir::new))?;
         let config = storage.load_config()?;
         ensure!(
@@ -203,7 +203,7 @@ impl Vault {
             root: PathBuf::new(),
             name: url.to_string(),
             bare: true,
-            log: Log::load(opts, &storage, false)?,
+            log: Log::load(ctx, &storage, false)?,
             storage: Box::new(storage),
             tmp: local.map(|v| v.tmp.clone()).unwrap_or_default(),
             side: "",
@@ -254,7 +254,7 @@ impl Vault {
     /// Print what happened to one file, and count it.
     pub fn event(
         &self,
-        opts: &Options,
+        ctx: &Context,
         sum: &mut Summary,
         kind: &'static str,
         path: &str,
@@ -268,12 +268,12 @@ impl Vault {
             from: None,
             side: self.side,
         };
-        print_stdout(&Message::Event(event.clone()), opts.json);
+        print_stdout(ctx, &Message::Event(event.clone()));
         sum.record(event);
     }
 
     /// Print that a file was moved from `from` to `to`, and count it.
-    pub fn renamed(&self, opts: &Options, sum: &mut Summary, from: &str, to: &str) {
+    pub fn renamed(&self, ctx: &Context, sum: &mut Summary, from: &str, to: &str) {
         let event = Event {
             kind: "renamed",
             vault: self.name.clone(),
@@ -282,7 +282,7 @@ impl Vault {
             from: Some(from.to_string()),
             side: self.side,
         };
-        print_stdout(&Message::Event(event.clone()), opts.json);
+        print_stdout(ctx, &Message::Event(event.clone()));
         sum.record(event);
     }
 

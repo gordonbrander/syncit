@@ -2,12 +2,14 @@
 //! nothing is collected. A message has a text form (`Display`) and a JSON
 //! form (`Serialize`); the caller picks the stream, `json` picks the form.
 
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::fmt::{self, Display};
 
-/// Settings for the whole process, passed to everything.
+/// What everything that prints or writes is passed: the settings of the
+/// whole process, and its progress bar.
 #[derive(Clone)]
-pub struct Options {
+pub struct Context {
     /// Print JSON Lines instead of text.
     pub json: bool,
     /// Run in full but write nothing to either vault.
@@ -17,6 +19,9 @@ pub struct Options {
     /// A remote vault's secret key, as its 24 words: `SYNCIT_SECRET_KEY`.
     /// Read by `main`; the library never reads the environment for it.
     pub secret_key: Option<String>,
+    /// Where long loops show how far they are: `bar(shown)`. One bar for the
+    /// process, idle between loops; the print functions print above it.
+    pub bar: ProgressBar,
     /// The user's syncit folder, which holds `credentials.toml` and
     /// `secrets.toml`. Found by `main`; tests leave it out.
     pub config_dir: Option<std::path::PathBuf>,
@@ -346,37 +351,95 @@ fn line<T: Display + Serialize>(value: &T, json: bool) -> String {
     }
 }
 
+/// The bar for `Context`. Shown, it is drawn on stderr when that is a
+/// terminal: `████░░░░ scanning 41,200 / 90,112`. `main` shows it unless
+/// `--json`; tests do not. It starts idle, drawing nothing.
+pub fn bar(shown: bool) -> ProgressBar {
+    if !shown {
+        return ProgressBar::hidden();
+    }
+    let template = "{bar:20} {msg} {human_pos} / {human_len}";
+    let style = ProgressStyle::with_template(template).expect("the template is valid");
+    let bar = ProgressBar::new(0).with_style(style.progress_chars("█░"));
+    bar.finish_and_clear();
+    bar
+}
+
+/// One long loop on the bar. Dropping it erases the bar and leaves it idle.
+// ponytail: counts files, so one huge file stalls the bar; count bytes if
+// that misleads.
+pub struct Progress(ProgressBar);
+
+impl Progress {
+    pub fn new(bar: &ProgressBar, label: &'static str, total: usize) -> Progress {
+        bar.set_length(total as u64);
+        bar.set_message(label);
+        bar.reset();
+        Progress(bar.clone())
+    }
+
+    /// One more done.
+    pub fn tick(&self) {
+        self.0.inc(1);
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        self.0.finish_and_clear();
+    }
+}
+
 /// Results.
-pub fn print_stdout<T: Display + Serialize>(value: &T, json: bool) {
-    println!("{}", line(value, json));
+pub fn print_stdout<T: Display + Serialize>(ctx: &Context, value: &T) {
+    ctx.bar.suspend(|| println!("{}", line(value, ctx.json)));
 }
 
 /// Warnings and errors.
-pub fn print_stderr<T: Display + Serialize>(value: &T, json: bool) {
-    eprintln!("{}", line(value, json));
+pub fn print_stderr<T: Display + Serialize>(ctx: &Context, value: &T) {
+    ctx.bar.suspend(|| eprintln!("{}", line(value, ctx.json)));
 }
 
 /// The lines of `status`, with the paths padded to one width.
 // ponytail: the width is counted in characters, so wide ones (CJK) put the
 // columns out of line; use the unicode-width crate if that matters.
-pub fn print_states(lines: &[State], json: bool) {
+pub fn print_states(ctx: &Context, lines: &[State]) {
     let width = lines.iter().map(|h| h.shown().chars().count()).max();
     for h in lines {
-        if json {
-            print_stdout(&Message::State(h.clone()), true);
+        if ctx.json {
+            print_stdout(ctx, &Message::State(h.clone()));
         } else {
-            println!("{}", h.row(width.unwrap_or(0)));
+            ctx.bar
+                .suspend(|| println!("{}", h.row(width.unwrap_or(0))));
         }
     }
 }
 
-pub fn warn(opts: &Options, message: String) {
-    print_stderr(&Message::Warning { message }, opts.json);
+pub fn warn(ctx: &Context, message: String) {
+    print_stderr(ctx, &Message::Warning { message });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_counts() {
+        for shown in [false, true] {
+            let ctx = Context {
+                json: false,
+                dry_run: false,
+                no_remove: false,
+                secret_key: None,
+                bar: bar(shown),
+                config_dir: None,
+            };
+            let progress = Progress::new(&ctx.bar, "scanning", 3);
+            progress.tick();
+            progress.tick();
+            assert_eq!(progress.0.position(), 2);
+        }
+    }
 
     #[test]
     fn message_forms() {

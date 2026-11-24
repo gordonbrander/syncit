@@ -1,12 +1,12 @@
 //! The secret key of a remote vault (store.md, section 8): its phrase, and
-//! where it is found and saved: `Options.secret_key`, the OS keychain and
+//! where it is found and saved: `Context.secret_key`, the OS keychain and
 //! the user's `secrets.toml`. The phrase is never put in an error or a
 //! warning.
 
 use crate::crypt::{self, Key};
-use crate::output::{Message, Options, print_stdout, warn};
+use crate::output::{Context, Message, print_stdout, warn};
 use crate::vault::unique;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use bip39::{Language, Mnemonic};
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Write};
@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 /// Where a key that matched came from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Source {
-    Options,
+    Context,
     Keychain,
     /// The user's `secrets.toml`.
     Secrets,
@@ -58,13 +58,13 @@ fn no_key(url: &str) -> anyhow::Error {
 }
 
 /// The key for the remote at `url` whose `format` has `check`: the first
-/// candidate that matches, of `Options.secret_key`, the keychain, and the
+/// candidate that matches, of `Context.secret_key`, the keychain, and the
 /// user's `secrets.toml`.
-pub fn find(opts: &Options, url: &str, check: &str) -> Result<(Key, Source)> {
-    if let Some(phrase) = &opts.secret_key {
+pub fn find(ctx: &Context, url: &str, check: &str) -> Result<(Key, Source)> {
+    if let Some(phrase) = &ctx.secret_key {
         let key = parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
         if crypt::check(&key) == check {
-            return Ok((key, Source::Options));
+            return Ok((key, Source::Context));
         }
     }
     if let Some(phrase) = keychain::get(url)
@@ -73,7 +73,7 @@ pub fn find(opts: &Options, url: &str, check: &str) -> Result<(Key, Source)> {
     {
         return Ok((key, Source::Keychain));
     }
-    if let Some(phrase) = saved(opts, url)?
+    if let Some(phrase) = saved(ctx, url)?
         && let Ok(key) = parse_phrase(&phrase)
         && crypt::check(&key) == check
     {
@@ -98,8 +98,8 @@ pub fn prompt(url: &str, check: &str) -> Result<Key> {
 
 /// Keep a key that matched where later commands find it (store.md,
 /// section 8, "Saving a phrase").
-pub fn save(opts: &Options, url: &str, key: &Key, source: Source, save_key: bool) -> Result<()> {
-    if source == Source::Options {
+pub fn save(ctx: &Context, url: &str, key: &Key, source: Source, save_key: bool) -> Result<()> {
+    if source == Source::Context {
         return Ok(());
     }
     let words = phrase(key);
@@ -110,19 +110,19 @@ pub fn save(opts: &Options, url: &str, key: &Key, source: Source, save_key: bool
         let message = format!(
             "the key for {url} is not saved: set SYNCIT_SECRET_KEY for every command that uses this remote"
         );
-        warn(opts, message);
+        warn(ctx, message);
     };
     if source == Source::Secrets {
         return Ok(());
     }
-    let Some(file) = secrets_path(opts) else {
+    let Some(file) = secrets_path(ctx) else {
         unsaved();
         return Ok(());
     };
     if save_key || ask(&format!("Save the key to {}? [y/N] ", file.display())) {
-        add_saved(opts, url, &words)?;
+        add_saved(ctx, url, &words)?;
         let message = format!("saved the key for {url} in {}", file.display());
-        print_stdout(&Message::Info { message }, opts.json);
+        print_stdout(ctx, &Message::Info { message });
     } else {
         unsaved();
     }
@@ -141,13 +141,13 @@ fn ask(question: &str) -> bool {
 }
 
 /// The user's `secrets.toml`: a phrase for each remote URL.
-fn secrets_path(opts: &Options) -> Option<PathBuf> {
-    Some(opts.config_dir.as_ref()?.join("secrets.toml"))
+fn secrets_path(ctx: &Context) -> Option<PathBuf> {
+    Some(ctx.config_dir.as_ref()?.join("secrets.toml"))
 }
 
 /// The phrase saved for `url` in `secrets.toml`, if there is one.
-pub fn saved(opts: &Options, url: &str) -> Result<Option<Zeroizing<String>>> {
-    let Some(file) = secrets_path(opts) else {
+pub fn saved(ctx: &Context, url: &str) -> Result<Option<Zeroizing<String>>> {
+    let Some(file) = secrets_path(ctx) else {
         return Ok(None);
     };
     let doc = crate::remote::read_toml(&file, "secrets")?;
@@ -170,8 +170,8 @@ pub fn saved(opts: &Options, url: &str) -> Result<Option<Zeroizing<String>>> {
 /// Save `phrase` for `url` in `secrets.toml`, keeping everything else in the
 /// file, comments too. The file is replaced whole and readable by its owner
 /// only.
-pub fn add_saved(opts: &Options, url: &str, phrase: &str) -> Result<()> {
-    let file = secrets_path(opts).context("no folder for secrets.toml: set HOME")?;
+pub fn add_saved(ctx: &Context, url: &str, phrase: &str) -> Result<()> {
+    let file = secrets_path(ctx).context("no folder for secrets.toml: set HOME")?;
     let mut doc = crate::remote::read_toml(&file, "secrets")?;
     let remotes = doc
         .entry("remotes")
@@ -254,13 +254,14 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
-    /// Options with a phrase, whose syncit folder is `dir`.
-    fn opts(secret_key: Option<String>, dir: &Path) -> Options {
-        Options {
+    /// Context with a phrase, whose syncit folder is `dir`.
+    fn ctx(secret_key: Option<String>, dir: &Path) -> Context {
+        Context {
             json: false,
             dry_run: false,
             no_remove: false,
             secret_key,
+            bar: crate::output::bar(false),
             config_dir: Some(dir.to_path_buf()),
         }
     }
@@ -302,16 +303,16 @@ mod tests {
         let dir = tmp.path();
         let url = "file:///lookup-order";
         let (a, c) = (key(1), key(3));
-        let found = |opts: &Options, check: &str| find(opts, url, check);
+        let found = |ctx: &Context, check: &str| find(ctx, url, check);
 
-        add_saved(&opts(None, dir), url, &phrase(&c)).unwrap();
-        let given = opts(Some(phrase(&a).to_string()), dir);
-        assert_eq!(found(&given, &crypt::check(&a)).unwrap().1, Source::Options);
+        add_saved(&ctx(None, dir), url, &phrase(&c)).unwrap();
+        let given = ctx(Some(phrase(&a).to_string()), dir);
+        assert_eq!(found(&given, &crypt::check(&a)).unwrap().1, Source::Context);
         // One that does not match is passed over.
         let (k, source) = found(&given, &crypt::check(&c)).unwrap();
         assert_eq!((*k, source), (*c, Source::Secrets));
         assert_eq!(
-            found(&opts(None, dir), &crypt::check(&c)).unwrap().1,
+            found(&ctx(None, dir), &crypt::check(&c)).unwrap().1,
             Source::Secrets
         );
 
@@ -325,7 +326,7 @@ mod tests {
             // The keychain comes before secrets.toml.
             assert!(keychain::set(url, &phrase(&c)));
             assert_eq!(
-                found(&opts(None, dir), &crypt::check(&c)).unwrap().1,
+                found(&ctx(None, dir), &crypt::check(&c)).unwrap().1,
                 Source::Keychain
             );
         }
@@ -336,7 +337,7 @@ mod tests {
             format!("no key for {url}: set SYNCIT_SECRET_KEY, or run syncit remote add {url}")
         );
         // An invalid SYNCIT_SECRET_KEY is an error, not passed over.
-        let bad = opts(Some("not a phrase".into()), dir);
+        let bad = ctx(Some("not a phrase".into()), dir);
         assert!(found(&bad, &crypt::check(&c)).is_err());
     }
 
@@ -345,7 +346,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // The folder does not exist yet: saving makes it.
         let dir = tmp.path().join("syncit");
-        let o = opts(None, &dir);
+        let o = ctx(None, &dir);
         assert!(saved(&o, "s3://bucket/one").unwrap().is_none());
         let (one, two) = (phrase(&key(1)), phrase(&key(2)));
         add_saved(&o, "s3://bucket/one", &two).unwrap();

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use syncit::commands::{self, Setting};
-use syncit::output::{Message, Options, print_stderr, print_stdout};
+use syncit::output::{Context, Message, print_stderr, print_stdout};
 
 const NOTES: &str = "\
 Vaults:
@@ -23,7 +23,8 @@ Output:
   The last line counts: recorded (changes newly noticed, in either
   vault); added, updated, deleted, renamed (files the run changed, in
   either vault); conflicts, pending, skipped (what needs a look).
-  Results go to stdout, warnings and errors to stderr.
+  Results go to stdout, warnings and errors to stderr. A long run shows
+  its progress on stderr when that is a terminal, and never with --json.
   With --json every line is a JSON object with a \"type\" field.
 
 Exit codes:
@@ -430,11 +431,12 @@ fn main() {
         | Command::Pull { no_remove, .. } => no_remove,
         _ => false,
     };
-    let opts = &Options {
+    let ctx = &Context {
         json: cli.json,
         dry_run,
         no_remove,
         secret_key: std::env::var("SYNCIT_SECRET_KEY").ok(),
+        bar: syncit::output::bar(!cli.json),
         config_dir: syncit::output::config_dir(),
     };
     // Commands that run a sync return a summary, printed last.
@@ -444,26 +446,26 @@ fn main() {
             nickname,
             save_key,
         } if dir.contains("://") => {
-            commands::init_remote(opts, &dir, nickname, save_key).map(|_| None)
+            commands::init_remote(ctx, &dir, nickname, save_key).map(|_| None)
         }
         Command::Init {
             nickname: Some(_), ..
         } => Err(anyhow::anyhow!(
             "--nickname is for a remote vault; see `syncit config nickname`"
         )),
-        Command::Init { dir, .. } => commands::init(opts, Path::new(&dir)).map(|_| None),
+        Command::Init { dir, .. } => commands::init(ctx, Path::new(&dir)).map(|_| None),
         Command::Clone {
             src,
             dir,
             only,
             save_key,
-        } => commands::clone(opts, cwd, &src, &dir, &only, save_key).map(Some),
-        Command::Sync { vault, .. } => commands::sync(opts, cwd, &vault).map(Some),
-        Command::Push { vault, .. } => commands::push(opts, cwd, &vault).map(Some),
-        Command::Pull { vault, .. } => commands::pull(opts, cwd, &vault).map(Some),
-        Command::Snapshot => commands::snapshot(opts, cwd).map(Some),
+        } => commands::clone(ctx, cwd, &src, &dir, &only, save_key).map(Some),
+        Command::Sync { vault, .. } => commands::sync(ctx, cwd, &vault).map(Some),
+        Command::Push { vault, .. } => commands::push(ctx, cwd, &vault).map(Some),
+        Command::Pull { vault, .. } => commands::pull(ctx, cwd, &vault).map(Some),
+        Command::Snapshot => commands::snapshot(ctx, cwd).map(Some),
         Command::Status { paths, vs, all } => {
-            commands::status(opts, cwd, &paths, vs.as_deref(), all).map(|_| None)
+            commands::status(ctx, cwd, &paths, vs.as_deref(), all).map(|_| None)
         }
         Command::Get {
             paths,
@@ -472,32 +474,30 @@ fn main() {
             let paths: Option<Vec<String>> =
                 paths.iter().map(|p| p.to_str().map(String::from)).collect();
             match paths {
-                Some(paths) => commands::get_from(opts, cwd, &paths, &from).map(Some),
+                Some(paths) => commands::get_from(ctx, cwd, &paths, &from).map(Some),
                 None => Err(anyhow::anyhow!("a path is not UTF-8")),
             }
         }
-        Command::Get { paths, from: None } => commands::get(opts, cwd, &paths).map(Some),
-        Command::Move { paths, vault, .. } => {
-            commands::move_to(opts, cwd, &paths, &vault).map(Some)
-        }
-        Command::Cp { paths, dest, .. } => commands::cp(opts, cwd, &paths, &dest).map(Some),
+        Command::Get { paths, from: None } => commands::get(ctx, cwd, &paths).map(Some),
+        Command::Move { paths, vault, .. } => commands::move_to(ctx, cwd, &paths, &vault).map(Some),
+        Command::Cp { paths, dest, .. } => commands::cp(ctx, cwd, &paths, &dest).map(Some),
         Command::Drop {
             paths,
             check,
             force,
             ..
-        } => commands::drop(opts, cwd, &paths, check.as_deref(), force).map(Some),
-        Command::Blame { paths } => commands::blame(opts, cwd, &paths).map(|_| None),
-        Command::Log { paths } => commands::log(opts, cwd, &paths).map(|_| None),
+        } => commands::drop(ctx, cwd, &paths, check.as_deref(), force).map(Some),
+        Command::Blame { paths } => commands::blame(ctx, cwd, &paths).map(|_| None),
+        Command::Log { paths } => commands::log(ctx, cwd, &paths).map(|_| None),
         Command::Restore {
             path,
             hash,
             in_place,
-        } => commands::restore(opts, cwd, &path, &hash, in_place).map(|_| None),
+        } => commands::restore(ctx, cwd, &path, &hash, in_place).map(|_| None),
         Command::Compact { vault, .. } => {
-            commands::compact(opts, cwd, vault.as_deref()).map(|_| None)
+            commands::compact(ctx, cwd, vault.as_deref()).map(|_| None)
         }
-        Command::Remote { action: None } => commands::remotes(opts, cwd).map(|_| None),
+        Command::Remote { action: None } => commands::remotes(ctx, cwd).map(|_| None),
         Command::Remote {
             action:
                 Some(RemoteArg::Add {
@@ -505,29 +505,29 @@ fn main() {
                     nickname,
                     save_key,
                 }),
-        } => commands::remote_add(opts, cwd, &location, nickname, save_key).map(|_| None),
+        } => commands::remote_add(ctx, cwd, &location, nickname, save_key).map(|_| None),
         Command::Remote {
             action: Some(RemoteArg::Remove { nickname }),
-        } => commands::remote_remove(opts, cwd, &nickname).map(|_| None),
+        } => commands::remote_remove(ctx, cwd, &nickname).map(|_| None),
         Command::Config { vault, setting } => {
             let change = setting.map(|setting| match setting {
                 SettingArg::KeepHistory { value } => Setting::KeepHistory(value.0),
                 SettingArg::Autocompact { value } => Setting::Autocompact(value == "on"),
                 SettingArg::Nickname { value } => Setting::Nickname(value),
             });
-            commands::config(opts, cwd, vault.as_deref(), change).map(|_| None)
+            commands::config(ctx, cwd, vault.as_deref(), change).map(|_| None)
         }
     };
     match result {
         Ok(None) => {}
         Ok(Some(summary)) => {
             let code = summary.exit_code();
-            print_stdout(&Message::Summary(summary), opts.json);
+            print_stdout(ctx, &Message::Summary(summary));
             exit(code);
         }
         Err(e) => {
             let message = format!("{e:#}");
-            print_stderr(&Message::Error { message }, opts.json);
+            print_stderr(ctx, &Message::Error { message });
             exit(1);
         }
     }

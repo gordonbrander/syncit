@@ -1,7 +1,7 @@
 //! The log: a set of entries, and the read rules over it (CRDT.md).
 
 use crate::entry::{Entry, Id};
-use crate::output::{Options, warn};
+use crate::output::{Context, warn};
 use crate::segment;
 use crate::storage::Storage;
 use anyhow::{Result, bail};
@@ -59,7 +59,7 @@ impl Log {
     /// Read every segment in `storage`. A bad segment is an error when
     /// `strict` (this vault's own log) and is ignored with a warning otherwise
     /// (a peer's log, which is not trusted).
-    pub fn load(opts: &Options, storage: &dyn Storage, strict: bool) -> Result<Log> {
+    pub fn load(ctx: &Context, storage: &dyn Storage, strict: bool) -> Result<Log> {
         let mut log = Log::default();
         for name in storage.segment_names()? {
             let segment = storage
@@ -72,7 +72,7 @@ impl Log {
                     }
                 }
                 Err(e) if strict => bail!("corrupt segment {name}: {e:#}"),
-                Err(e) => warn(opts, format!("ignoring segment {name}: {e:#}")),
+                Err(e) => warn(ctx, format!("ignoring segment {name}: {e:#}")),
             }
         }
         Ok(log)

@@ -113,7 +113,7 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 | `src/vault.rs` | `Vault` holds `storage: Box<dyn Storage>`, `bare: bool` and a display `name`; opening by target |
 | `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.storage` |
 | `src/config.rs` | `remotes` |
-| `src/output.rs` | `Options.secret_key` |
+| `src/output.rs` | `Context.secret_key` |
 | `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--only` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
 
 ## 4. The storage trait
@@ -173,7 +173,7 @@ The remote implementation needs a scratch directory for plaintext in transit. It
 **URLs.**
 
 - Any URL `object_store::parse_url_opts` accepts: `file:///abs/dir`, `s3://bucket/prefix`, `gs://…`, `az://…`, and R2 `https://` URLs.
-- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They come from the user's `credentials.toml`, then the environment, which wins (`remote::credentials`). The file is in the user's syncit folder, `$XDG_CONFIG_HOME/syncit`, else `~/.config/syncit`; `main` finds it with `output::config_dir` and puts it in `Options.config_dir`, so tests never read the real one, except `cloud_remote`, which needs it. The file is a list of `[[remotes]]` entries, each a `url` prefix and its settings:
+- Credentials and endpoints are the settings `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP`, and the `GOOGLE_*` and `AZURE_*` equivalents. They come from the user's `credentials.toml`, then the environment, which wins (`remote::credentials`). The file is in the user's syncit folder, `$XDG_CONFIG_HOME/syncit`, else `~/.config/syncit`; `main` finds it with `output::config_dir` and puts it in `Context.config_dir`, so tests never read the real one, except `cloud_remote`, which needs it. The file is a list of `[[remotes]]` entries, each a `url` prefix and its settings:
 
   ```toml
   [[remotes]]
@@ -243,11 +243,11 @@ A remote vault created by `init` has `keep_history: null` (all) and `autocompact
 
 **The phrase.** `K` is always written as its BIP39 mnemonic: 24 English words, lowercase, single spaces. Use `Mnemonic::from_entropy`, and `parse_in(Language::English, …)` then `to_entropy`. Never `to_seed`. An unknown word is reported with its position; a wrong checksum is reported as such.
 
-**`Options.secret_key`.** `main` reads the environment variable `SYNCIT_SECRET_KEY`, which holds a phrase, into `Options.secret_key`. The library never reads the environment for it, so tests pass a phrase in `Options`. A value that is not a valid phrase is an error in any command that needs a key; it is never passed over in silence.
+**`Context.secret_key`.** `main` reads the environment variable `SYNCIT_SECRET_KEY`, which holds a phrase, into `Context.secret_key`. The library never reads the environment for it, so tests pass a phrase in `Context`. A value that is not a valid phrase is an error in any command that needs a key; it is never passed over in silence.
 
 **Finding the key for a URL.** Candidates, in order. A candidate is used only if its `check` equals the one in the remote's `format`:
 
-1. `Options.secret_key`.
+1. `Context.secret_key`.
 2. The keychain: service `syncit`, account = the URL, password = the phrase.
 3. The user's `secrets.toml`: the phrase under the remote's exact URL.
 
@@ -266,7 +266,7 @@ syncit writes it with `toml_edit`, so entries and comments the user added by han
 
 **Saving a phrase**, after `init <url>`, `remote add` or `clone` has a key that matched:
 
-- It came from `Options.secret_key`: save nothing.
+- It came from `Context.secret_key`: save nothing.
 - The keychain is usable (and the build has it): save it there. Already there: nothing to do.
 - It came from `secrets.toml`: it is already there.
 - Otherwise: with `--save-key`, write it to `secrets.toml`; on a terminal, ask `Save the key to <path>? [y/N]`; with neither, do not save, and say that `SYNCIT_SECRET_KEY` must be set for every command that uses this remote. This needs no vault, so `init <url>` run anywhere can save its key.
@@ -284,7 +284,7 @@ A folder that shares a remote's nickname is reached as `./name`. A URL may be us
 
 **`syncit init <url>`** makes a remote vault. The prefix must be reachable and empty.
 
-1. `K` is the key in `Options.secret_key` if set, otherwise new random bytes.
+1. `K` is the key in `Context.secret_key` if set, otherwise new random bytes.
 2. Write `format`, then `config`: `include: [""]`, `keep_history: null`, `autocompact: false`, `nickname` from `--nickname <name>`, default `origin`.
 3. If the key was generated, print it, then save it (section 8):
 
@@ -352,7 +352,7 @@ The rest is `get` as it is: include the prefixes, then pull.
 
 ## 12. Tests
 
-No test uses the real keychain or the network. Tests pass a phrase in `Options.secret_key`, which keeps the keychain out of it; the one keychain test installs `keyring_core::mock`. Tests of remote vaults are compiled only with `remote`, and the keychain part of `key_lookup_order` only with `keychain`. Remote vaults in tests are `file://` URLs of temporary directories. Reuse the helpers in `tests/stories.rs`.
+No test uses the real keychain or the network. Tests pass a phrase in `Context.secret_key`, which keeps the keychain out of it; the one keychain test installs `keyring_core::mock`. Tests of remote vaults are compiled only with `remote`, and the keychain part of `key_lookup_order` only with `keychain`. Remote vaults in tests are `file://` URLs of temporary directories. Reuse the helpers in `tests/stories.rs`.
 
 | Test | Checks |
 |---|---|
@@ -361,7 +361,7 @@ No test uses the real keychain or the network. Tests pass a phrase in `Options.s
 | `crypt_rejects` | wrong key, wrong name, wrong kind, a changed byte, truncation at a chunk boundary, a short nonce: each is an error and none panics |
 | `names_are_keyed` | names differ between keys and between kinds, are stable for one key, and are never the plaintext hash |
 | `phrase_round_trip` | 32 bytes to 24 words and back; a misspelt word is named by position; a swapped word is a checksum error |
-| `key_lookup_order` | `Options`, mock keychain, `secrets.toml`: the first whose check matches is used; one that does not match is passed over; none gives the documented error |
+| `key_lookup_order` | `Context`, mock keychain, `secrets.toml`: the first whose check matches is used; one that does not match is passed over; none gives the documented error |
 | `secrets_file` | mode 0600, in a folder saving makes; two remotes give two entries; saving again replaces; comments and other keys written by hand stay; a missing file gives no key; bad TOML, a `remotes` that is not a table and a phrase that is not a string are each `corrupt secrets` |
 | `credentials_match` | an entry's `url` applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; the entries that apply come from the shortest prefix to the longest, whatever their order in the file; `url` is not among the settings; a URL no entry covers gets none |
 | `credentials_errors` | a missing file gives no settings; bad TOML, a `remotes` that is not `[[remotes]]` entries, an entry with no `url` or a `url` that is not a string, a setting that is not a string, and two entries with the same `url` are each `corrupt credentials <path>`, naming the entry |

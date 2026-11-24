@@ -6,10 +6,10 @@ use crate::blobs::hash_file;
 use crate::config::Config;
 use crate::crypt::{self, Key};
 use crate::entry::{is_hash, sha256};
-use crate::output::Options;
+use crate::output::Context;
 use crate::storage::{Dir, Storage};
 use crate::vault::unique;
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use futures::TryStreamExt;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart};
@@ -109,8 +109,8 @@ fn matches(prefix: &str, url: &str) -> bool {
 /// Settings for the bucket at `url`: the `[[remotes]]` entries of the
 /// user's `credentials.toml` whose `url` is a prefix of it, from the
 /// shortest prefix to the longest. A later one wins.
-pub fn credentials(opts: &Options, url: &str) -> Result<Settings> {
-    let Some(dir) = &opts.config_dir else {
+pub fn credentials(ctx: &Context, url: &str) -> Result<Settings> {
+    let Some(dir) = &ctx.config_dir else {
         return Ok(vec![]);
     };
     let mut found: Vec<_> = sections(&dir.join("credentials.toml"))?
@@ -561,13 +561,14 @@ mod tests {
             .collect()
     }
 
-    /// Options whose syncit folder is `dir`.
-    fn opts(dir: &Path) -> Options {
-        Options {
+    /// Context whose syncit folder is `dir`.
+    fn ctx(dir: &Path) -> Context {
+        Context {
             json: false,
             dry_run: false,
             no_remove: false,
             secret_key: None,
+            bar: crate::output::bar(false),
             config_dir: Some(dir.to_path_buf()),
         }
     }
@@ -584,7 +585,7 @@ mod tests {
             "# by hand\n".to_string() + &text,
         )
         .unwrap();
-        let o = opts(tmp.path());
+        let o = ctx(tmp.path());
         let got = credentials(&o, "s3://b/x/y").unwrap();
         assert_eq!(got, pairs(&[("s", "s3://b"), ("s", "s3://b/x/")]));
         let got = credentials(&o, "s3://b").unwrap();
@@ -595,7 +596,7 @@ mod tests {
     #[test]
     fn credentials_errors() {
         let tmp = TempDir::new().unwrap();
-        let o = opts(tmp.path());
+        let o = ctx(tmp.path());
         assert!(credentials(&o, "s3://b").unwrap().is_empty());
         let file = tmp.path().join("credentials.toml");
         for (text, why) in [

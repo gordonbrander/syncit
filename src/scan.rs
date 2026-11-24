@@ -4,10 +4,10 @@ use crate::blobs::hash_file;
 use crate::dirstate::{Row, is_exec, mtime_ms};
 use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
-use crate::output::{Options, warn};
+use crate::output::{Context, Progress, warn};
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault};
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
@@ -49,17 +49,17 @@ pub fn moves(deleted: &[(String, String)], added: &[(String, String)]) -> Vec<(S
 
 /// Scan the vault. A dry scan writes nothing: the vault value is brought up
 /// to date in memory only.
-pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
+pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
     if v.bare {
         return Ok(Scan::default()); // no working folder
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let (mut files, mut odd) = (BTreeSet::new(), 0);
-    walk(opts, v, &v.root, "", dry, &mut files, &mut odd)?;
+    walk(ctx, v, &v.root, "", dry, &mut files, &mut odd)?;
     if odd > 0 {
         let root = v.root.display();
         warn(
-            opts,
+            ctx,
             format!("skipped {odd} symbolic links or special files in {root}"),
         );
     }
@@ -67,7 +67,9 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     let (mut dirstate, mut config, mut out) =
         (v.dirstate.clone(), v.config.clone(), Scan::default());
     let (mut excluded, mut added, mut deleted) = (vec![], vec![], vec![]);
+    let progress = Progress::new(&ctx.bar, "scanning", files.len());
     for path in &files {
+        progress.tick();
         // A file on disk is included, whether or not the vault knew it.
         if !config.includes(path) {
             excluded.push(path.clone());
@@ -157,6 +159,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
         out.changes.push((path.clone(), kind));
         out.entries.push(entry);
     }
+    drop(progress);
 
     let gone = |p: &&String| !files.contains(*p) && !v.skips(p);
     let gone: Vec<String> = dirstate.rows.keys().filter(gone).cloned().collect();
@@ -221,7 +224,7 @@ pub fn deleted_heads(log: &Log, path: &str) -> Option<Vec<Id>> {
 /// Collect the vault-relative paths of the regular files under `dir`.
 /// An unreadable directory is an error: its files must not read as deleted.
 fn walk(
-    opts: &Options,
+    ctx: &Context,
     v: &Vault,
     dir: &Path,
     prefix: &str,
@@ -233,7 +236,7 @@ fn walk(
         let item = item?;
         let Some(name) = item.file_name().to_str().map(String::from) else {
             warn(
-                opts,
+                ctx,
                 format!("skipped a name that is not UTF-8 in {}", dir.display()),
             );
             continue;
@@ -248,7 +251,7 @@ fn walk(
             if !prefix.is_empty() {
                 let (inner, outer) = (dir.display(), v.root.display());
                 warn(
-                    opts,
+                    ctx,
                     format!(
                         "{inner} is a vault inside this one; its files are synced as part of {outer}"
                     ),
@@ -260,7 +263,7 @@ fn walk(
             continue;
         }
         if kind.is_dir() {
-            walk(opts, v, &item.path(), &path, dry, files, odd)?;
+            walk(ctx, v, &item.path(), &path, dry, files, odd)?;
         } else if !kind.is_file() {
             *odd += 1;
         } else if !name.starts_with(TMP_PREFIX) {
