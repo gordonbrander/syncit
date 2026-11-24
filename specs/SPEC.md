@@ -706,7 +706,7 @@ Three rules:
 
 - **Code prints the moment something happens.** Nothing is collected for printing, so a long run shows its progress and an interrupted one has already said what it did.
 - **stdout is the result; stderr is warnings and errors.** A warning never changes the exit code.
-- **A long loop shows a progress bar on stderr**, only when stderr is a terminal and never with `--json`: `Scanning` (the scan), `Storing` (blobs put into a vault's storage) and `Writing` (materialise), each as `<label> [<bar>] <done> / <total> (<time left>)`, counting files. It is erased when the loop ends, so it is in no captured output.
+- **A long loop shows a progress bar on stderr**, only when stderr is a terminal and never with `--json`: `Scanning` (the scan), `Storing` (blobs put into a vault's storage) and `Writing` (materialise), each as `<label> <bar> <done> / <total>`, counting files. It is erased when the loop ends, so it is in no captured output.
 - **`--json`, a flag every command accepts, changes the form and not the stream.** Each line of either stream is then one JSON object with a `type` field (JSON Lines).
 
 How it is built:

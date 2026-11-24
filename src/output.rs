@@ -352,22 +352,22 @@ fn line<T: Display + Serialize>(value: &T, json: bool) -> String {
 }
 
 /// The bar for `Context`. Shown, it is drawn on stderr when that is a
-/// terminal: `Scanning [===>  ] 41,200 / 90,112 (2m)`. `main` shows it unless
+/// terminal: `Scanning ████░░░░ 41,200 / 90,112`. `main` shows it unless
 /// `--json`; tests do not. It starts idle, drawing nothing.
 pub fn bar(shown: bool) -> ProgressBar {
     if !shown {
         return ProgressBar::hidden();
     }
-    let template = "{msg} [{bar:20}] {human_pos} / {human_len} ({eta})";
+    let template = "{msg} {bar:20} {human_pos} / {human_len}";
     let style = ProgressStyle::with_template(template).expect("the template is valid");
-    let bar = ProgressBar::new(0).with_style(style.progress_chars("=> "));
+    let bar = ProgressBar::new(0).with_style(style.progress_chars("█░"));
     bar.finish_and_clear();
     bar
 }
 
 /// One long loop on the bar. Dropping it erases the bar and leaves it idle.
-// ponytail: counts files, so one huge file stalls the bar and skews the time
-// left; count bytes if that misleads.
+// ponytail: counts files, so one huge file stalls the bar; count bytes if
+// that misleads.
 pub struct Progress(ProgressBar);
 
 impl Progress {
