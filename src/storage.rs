@@ -22,6 +22,11 @@ pub trait Storage {
     fn write_segment(&self, name: &str, bytes: &[u8]) -> Result<()>;
 
     fn has_blob(&self, hash: &str) -> bool;
+    /// Which of `hashes` are not stored.
+    fn missing(&self, hashes: &BTreeSet<String>) -> BTreeSet<String> {
+        let absent = hashes.iter().filter(|hash| !self.has_blob(hash));
+        absent.cloned().collect()
+    }
     /// Copy the blob to `dest`, verifying its hash. False if it is absent
     /// or wrong; `dest` is then removed.
     fn get_blob(&self, hash: &str, dest: &Path) -> io::Result<bool>;
@@ -90,6 +95,22 @@ impl Storage for Dir {
         self.blob(hash).is_file()
     }
 
+    /// One read of the folder, not a `stat` for each hash. A hash the
+    /// listing does not show is looked at again, so the answer is `has_blob`'s.
+    fn missing(&self, hashes: &BTreeSet<String>) -> BTreeSet<String> {
+        let stored: BTreeSet<String> = fs::read_dir(self.dot().join("blobs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|file| file.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|file| file.file_name().to_string_lossy().into_owned())
+            .collect();
+        let absent = hashes
+            .iter()
+            .filter(|hash| !stored.contains(*hash) && !self.has_blob(hash));
+        absent.cloned().collect()
+    }
+
     fn get_blob(&self, hash: &str, dest: &Path) -> io::Result<bool> {
         copy_verified(&self.blob(hash), dest, hash)
     }
@@ -124,5 +145,28 @@ impl Storage for Dir {
             }
         }
         Ok((found.len(), found.iter().map(|(_, size)| size).sum()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_blobs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = Dir::new(tmp.path());
+        let (a, b) = (sha256(b"a"), sha256(b"b"));
+        let both = BTreeSet::from([a.clone(), b.clone()]);
+        assert_eq!(dir.missing(&both), both, "no blobs folder yet");
+        let src = tmp.path().join("src");
+        fs::write(&src, "a").unwrap();
+        dir.put_blob(&a, &src).unwrap();
+        assert_eq!(dir.missing(&both), BTreeSet::from([b.clone()]));
+        dir.drop_blobs_except(&BTreeSet::new(), false).unwrap();
+        assert_eq!(dir.missing(&both), both);
+        // A folder is not a blob, as `has_blob` says.
+        fs::create_dir(dir.blob(&b)).unwrap();
+        assert_eq!(dir.missing(&both), both);
     }
 }
