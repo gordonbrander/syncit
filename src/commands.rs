@@ -478,8 +478,8 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
                         .received_segments
                         .insert(name.clone());
                 }
-                for e in segment.entries {
-                    v.log.add(e, &segment.nickname);
+                for (id, e) in segment.entries {
+                    v.log.insert(id, e, &segment.nickname);
                 }
             }
             Err(e) => v.event(opts, sum, "rejected", "", &format!("segment {name}: {e:#}")),
@@ -496,19 +496,19 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
 fn absorb(v: &mut Vault, from: &Vault) {
     for (id, e) in &from.log.entries {
         for nickname in &from.log.authors[id] {
-            v.log.add(e.clone(), nickname);
+            v.log.insert(id.clone(), e.clone(), nickname);
         }
     }
 }
 
 /// The copies of the open conflict at `path`, as a run names them; None if
 /// the path has no conflict.
-fn conflict_copies(v: &Vault, path: &str) -> Option<String> {
+fn conflict_copies(path: &str, state: &PathState) -> Option<String> {
     let PathState::Resolved {
         losers,
         lost_delete,
         ..
-    } = v.log.resolve(path)
+    } = state
     else {
         return None;
     };
@@ -516,7 +516,7 @@ fn conflict_copies(v: &Vault, path: &str) -> Option<String> {
         return None;
     }
     let mut what: Vec<String> = losers.iter().map(|l| copy_name(path, &l.hash)).collect();
-    if lost_delete {
+    if *lost_delete {
         what.push("deleted in another vault".to_string());
     }
     Some(what.join(", "))
@@ -529,7 +529,7 @@ fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
         if !v.config.includes(path) {
             continue;
         }
-        let Some(message) = conflict_copies(v, path) else {
+        let Some(message) = conflict_copies(path, &v.log.resolve(path)) else {
             continue;
         };
         if !seen.insert(path.clone()) {
@@ -692,12 +692,13 @@ pub fn status(
     }
     let mut files: Vec<State> = vec![];
     for path in v.log.paths.keys() {
-        let winner = match v.log.resolve(path) {
+        let resolved = v.log.resolve(path);
+        let winner = match &resolved {
             PathState::Absent => continue,
             PathState::Incomplete => None,
-            PathState::Resolved { winner, .. } => Some(v.log.entries[&winner].hash.as_ref()),
+            PathState::Resolved { winner, .. } => Some(v.log.entries[winner].hash.as_ref()),
         };
-        let copies = conflict_copies(&v, path);
+        let copies = conflict_copies(path, &resolved);
         let of = |v: &Vault, changes| state(v, path, winner, copies.is_some(), changes);
         let (a, b) = (of(&v, &ours), peer.as_ref().map(|peer| of(peer, &theirs)));
         // A file still here whose removal is known is behind a vault on the

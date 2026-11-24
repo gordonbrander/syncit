@@ -27,7 +27,7 @@ impl Write for HashWriter {
 pub fn hash_file(file: &Path) -> io::Result<String> {
     let mut hasher = HashWriter(Sha256::new());
     io::copy(&mut File::open(file)?, &mut hasher)?;
-    Ok(hex::encode(hasher.0.finalize()))
+    Ok(base16ct::lower::encode_string(&hasher.0.finalize()))
 }
 
 /// Copy `src` to `dest` while hashing. On a wrong hash or an unreadable
@@ -48,7 +48,7 @@ pub(crate) fn copy_verified(src: &Path, dest: &Path, hash: &str) -> io::Result<b
             Err(_) => break false,
         }
     };
-    if read_all && hex::encode(hasher.finalize()) == hash {
+    if read_all && base16ct::lower::encode_string(&hasher.finalize()) == hash {
         return Ok(true);
     }
     fs::remove_file(dest)?;
@@ -131,15 +131,13 @@ pub fn available(v: &Vault, peer: Option<&Vault>, hash: &str) -> bool {
 /// a dry run stores nothing. A bare vault's dirstate is derived afresh.
 pub fn retain(opts: &Options, v: &mut Vault, peer: Option<&Vault>) -> Result<()> {
     let keep = v.log.keep(v.config.keep_history, |path| v.takes(path));
-    let missing = keep.iter().filter(|hash| !v.storage.has_blob(hash));
     if opts.dry_run && v.bare {
-        let sending = missing.filter(|hash| available(v, peer, hash));
-        let sending: Vec<String> = sending.cloned().collect();
+        let mut sending = v.storage.missing(&keep);
+        sending.retain(|hash| available(v, peer, hash));
         v.traffic.borrow_mut().sent_files.extend(sending);
     } else if !opts.dry_run && (v.bare || v.config.keep_history != Some(0)) {
         fs::create_dir_all(&v.tmp)?;
-        let missing: Vec<&String> = missing.collect();
-        for hash in missing {
+        for hash in &v.storage.missing(&keep) {
             let tmp = v.tmp.join(unique());
             if fetch(v, peer, hash, &tmp)? {
                 v.storage.put_blob(hash, &tmp)?;
