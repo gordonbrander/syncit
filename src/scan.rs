@@ -67,7 +67,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
     let (mut dirstate, mut config, mut out) =
         (v.dirstate.clone(), v.config.clone(), Scan::default());
     let (mut excluded, mut added, mut deleted) = (vec![], vec![], vec![]);
-    let progress = Progress::new(&ctx.bar, "Scanning", files.len());
+    let progress = Progress::new(&ctx.bar, "scanning", files.len());
     for path in &files {
         progress.tick();
         // A file on disk is included, whether or not the vault knew it.

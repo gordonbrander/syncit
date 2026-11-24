@@ -138,7 +138,7 @@ pub fn retain(ctx: &Context, v: &mut Vault, peer: Option<&Vault>) -> Result<()> 
     } else if !ctx.dry_run && (v.bare || v.config.keep_history != Some(0)) {
         fs::create_dir_all(&v.tmp)?;
         let missing = v.storage.missing(&keep);
-        let progress = Progress::new(&ctx.bar, "Storing", missing.len());
+        let progress = Progress::new(&ctx.bar, "storing", missing.len());
         for hash in &missing {
             progress.tick();
             let tmp = v.tmp.join(unique());

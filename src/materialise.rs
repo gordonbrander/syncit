@@ -108,7 +108,7 @@ pub fn materialise(
     }
     // A path that fails a safety check or hits a filesystem error is left as
     // it was, and the run goes on.
-    let progress = Progress::new(&ctx.bar, "Writing", states.len());
+    let progress = Progress::new(&ctx.bar, "writing", states.len());
     for (path, state) in states {
         progress.tick();
         if let Err(e) = one(ctx, v, peer, kept, &path, state, &mut pass, sum) {

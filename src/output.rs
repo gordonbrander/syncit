@@ -352,13 +352,13 @@ fn line<T: Display + Serialize>(value: &T, json: bool) -> String {
 }
 
 /// The bar for `Context`. Shown, it is drawn on stderr when that is a
-/// terminal: `Scanning ████░░░░ 41,200 / 90,112`. `main` shows it unless
+/// terminal: `████░░░░ scanning 41,200 / 90,112`. `main` shows it unless
 /// `--json`; tests do not. It starts idle, drawing nothing.
 pub fn bar(shown: bool) -> ProgressBar {
     if !shown {
         return ProgressBar::hidden();
     }
-    let template = "{msg} {bar:20} {human_pos} / {human_len}";
+    let template = "{bar:20} {msg} {human_pos} / {human_len}";
     let style = ProgressStyle::with_template(template).expect("the template is valid");
     let bar = ProgressBar::new(0).with_style(style.progress_chars("█░"));
     bar.finish_and_clear();
@@ -434,7 +434,7 @@ mod tests {
                 bar: bar(shown),
                 config_dir: None,
             };
-            let progress = Progress::new(&ctx.bar, "Scanning", 3);
+            let progress = Progress::new(&ctx.bar, "scanning", 3);
             progress.tick();
             progress.tick();
             assert_eq!(progress.0.position(), 2);
