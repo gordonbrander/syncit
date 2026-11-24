@@ -1,6 +1,6 @@
 //! Segments: an immutable JSON Lines file of entries, named by its hash. No I/O.
 
-use crate::entry::{Entry, sha256};
+use crate::entry::{Entry, Id, sha256};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -19,11 +19,12 @@ impl Header {
     }
 }
 
-/// A decoded segment: its entries, and the nickname of the vault that wrote it.
+/// A decoded segment: its entries, each with its id, and the nickname of the
+/// vault that wrote it.
 #[derive(Debug)]
 pub struct Segment {
     pub nickname: String,
-    pub entries: Vec<Entry>,
+    pub entries: Vec<(Id, Entry)>,
 }
 
 /// A nickname is a label, printed as it is: 1 to 64 bytes, with no whitespace
@@ -93,10 +94,10 @@ mod tests {
             entries: back,
         } = decode(&name, &bytes).unwrap();
         assert_eq!(nickname, "notes");
-        let paths: Vec<&str> = back.iter().map(|e| e.path.as_str()).collect();
+        let paths: Vec<&str> = back.iter().map(|(_, e)| e.path.as_str()).collect();
         assert_eq!(paths, ["a", "a/z", "b"]);
-        for e in &entries {
-            assert!(back.contains(e));
+        for e in entries {
+            assert!(back.contains(&(e.id(), e)));
         }
     }
 

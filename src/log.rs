@@ -39,7 +39,12 @@ pub struct Loser {
 impl Log {
     /// Add an entry found in a segment written by the vault `nickname`.
     pub fn add(&mut self, entry: Entry, nickname: &str) {
-        let id = entry.id();
+        self.insert(entry.id(), entry, nickname);
+    }
+
+    /// The same, for an entry whose id is already in hand. `id` must be
+    /// `entry.id()`.
+    pub fn insert(&mut self, id: Id, entry: Entry, nickname: &str) {
         self.authors
             .entry(id.clone())
             .or_default()
@@ -61,7 +66,11 @@ impl Log {
                 .read_segment(&name)
                 .and_then(|bytes| segment::decode(&name, &bytes));
             match segment {
-                Ok(s) => s.entries.into_iter().for_each(|e| log.add(e, &s.nickname)),
+                Ok(s) => {
+                    for (id, e) in s.entries {
+                        log.insert(id, e, &s.nickname);
+                    }
+                }
                 Err(e) if strict => bail!("corrupt segment {name}: {e:#}"),
                 Err(e) => warn(opts, format!("ignoring segment {name}: {e:#}")),
             }
@@ -72,14 +81,28 @@ impl Log {
     /// The entries of a path, leaving out invalid ones: those with a parent
     /// that belongs to another path. In id order.
     pub fn valid(&self, path: &str) -> Vec<(&Id, &Entry)> {
-        let other_path = |p: &Id| self.entries.get(p).is_some_and(|e| e.path != path);
-        self.paths
-            .get(path)
-            .into_iter()
-            .flatten()
-            .map(|id| (id, &self.entries[id]))
-            .filter(|(_, e)| !e.parents.iter().any(other_path))
-            .collect()
+        self.read(path).0
+    }
+
+    /// The valid entries of a path, and whether its history is complete: no
+    /// entry of the path, valid or not, names a parent that is not in the
+    /// log. One pass, so that each parent is looked up once.
+    fn read(&self, path: &str) -> (Vec<(&Id, &Entry)>, bool) {
+        let (mut valid, mut complete) = (vec![], true);
+        for id in self.paths.get(path).into_iter().flatten() {
+            let entry = &self.entries[id];
+            let mut same_path = true;
+            for parent in &entry.parents {
+                match self.entries.get(parent) {
+                    Some(parent) => same_path &= parent.path == path,
+                    None => complete = false,
+                }
+            }
+            if same_path {
+                valid.push((id, entry));
+            }
+        }
+        (valid, complete)
     }
 
     /// The one lowest common ancestor of two entries of a path, if it is a
@@ -150,15 +173,10 @@ impl Log {
     }
 
     pub fn resolve(&self, path: &str) -> PathState {
-        let ids = self.paths.get(path).into_iter().flatten();
-        let missing = |p: &Id| !self.entries.contains_key(p);
-        if ids
-            .clone()
-            .any(|id| self.entries[id].parents.iter().any(missing))
-        {
+        let (valid, complete) = self.read(path);
+        if !complete {
             return PathState::Incomplete;
         }
-        let valid = self.valid(path);
         let superseded: BTreeSet<&Id> = valid.iter().flat_map(|(_, e)| &e.parents).collect();
         let heads: Vec<(&Id, &Entry)> = valid
             .into_iter()
@@ -472,7 +490,9 @@ mod tests {
                 for chunk in entries.chunks(size) {
                     let (name, bytes) = segment::encode("v", chunk);
                     let entries = segment::decode(&name, &bytes).unwrap().entries;
-                    entries.into_iter().for_each(|e| log.add(e, "v"));
+                    entries
+                        .into_iter()
+                        .for_each(|(id, e)| log.insert(id, e, "v"));
                 }
                 assert_eq!(states(&log), reference, "segments of {size}, turn {turn}");
             }

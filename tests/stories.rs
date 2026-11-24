@@ -2208,7 +2208,8 @@ mod remote {
         let (r, origin) = remote(&tmp, "r");
         configure_remote(&origin, |c| c.nickname = "originvault".into());
         cmd::push(o, &a, &origin).unwrap();
-        let mut hashes: BTreeSet<String> = log(&a).entries.keys().cloned().collect();
+        let mut hashes: BTreeSet<String> =
+            log(&a).entries.keys().map(|id| id.to_string()).collect();
         hashes.extend(log(&a).entries.values().filter_map(|e| e.hash.clone()));
         hashes.extend(names(&a.join(".syncit/log")));
         assert!(hashes.len() > 4, "{hashes:?}");
