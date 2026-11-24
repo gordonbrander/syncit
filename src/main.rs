@@ -76,8 +76,8 @@ enum Command {
     /// Initialize a vault in a directory (or create a remote vault at a URL)
     ///
     /// With a URL, creates an encrypted remote vault at that location, which must be empty,
-    /// and prints its 24-word secret key once. The key is the only way to read the remote
-    /// from another computer. If SYNCIT_SECRET_KEY is set, that key is used and nothing is printed.
+    /// and prints its 24-word seed phrase once. The phrase is the only way to read the remote
+    /// from another computer. If SYNCIT_SECRET_KEY is set, that phrase is used and nothing is printed.
     ///
     /// Environment: SYNCIT_SECRET_KEY supplies a remote vault's 24-word seed phrase
     /// when you can't get it from the OS keychain, or type it into the terminal.
@@ -95,7 +95,7 @@ enum Command {
     /// Clone (copy) a vault
     ///
     /// Makes a new vault in DIR, pulls SRC into it, and remembers SRC as a remote.
-    /// A URL needs the remote's 24-word key: clone asks for it at a terminal.
+    /// A URL needs the remote's 24-word seed phrase: clone asks for it at a terminal.
     ///
     /// Environment: SYNCIT_SECRET_KEY supplies a remote vault's 24-word seed phrase
     /// when you can't get it from the OS keychain, or type it into the terminal.
@@ -342,7 +342,7 @@ For every version of a file and when it was made, see `syncit log`.")]
 enum RemoteArg {
     /// Remember a vault by nickname (URL or vault directory)
     ///
-    /// A URL needs the remote's 24-word key. It is asked for at a terminal the first time,
+    /// A URL needs the remote's 24-word seed phrase. It is asked for at a terminal the first time,
     /// then kept in the system keychain.
     ///
     /// Environment: SYNCIT_SECRET_KEY supplies a remote vault's 24-word seed phrase
