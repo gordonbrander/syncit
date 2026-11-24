@@ -1344,6 +1344,31 @@ fn status_smudges_same_tick_edit() {
 }
 
 #[test]
+fn noop_sync_leaves_dirstate() {
+    use std::os::unix::fs::MetadataExt;
+    let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("d/g.txt", "g")]);
+    cmd::sync(&O, &a, &b).unwrap();
+    // A save replaces the file by a rename: another inode, or if the
+    // filesystem hands the old one out again, another change time.
+    let inode = |v: &Path| {
+        let meta = v.join(".syncit/dirstate").metadata().unwrap();
+        (meta.ino(), meta.ctime(), meta.ctime_nsec())
+    };
+    let (ia, ib) = (inode(&a), inode(&b));
+    assert_eq!(cmd::sync(&O, &a, &b).unwrap(), Summary::default());
+    assert_eq!((inode(&a), inode(&b)), (ia, ib));
+    assert_eq!(cmd::snapshot(&O, &a).unwrap().recorded, 0);
+    assert_eq!(inode(&a), ia);
+    // A change is saved on both sides: recorded in one, written in the other.
+    put(&a, "f.txt", "v2", 1);
+    cmd::sync(&O, &a, &b).unwrap();
+    assert!(inode(&a) != ia && inode(&b) != ib);
+    let row = |v: &Path| Dirstate::load(v).unwrap().rows["f.txt"].clone();
+    assert_eq!(row(&b).hash, sha256(b"v2"));
+    assert_eq!(row(&a).base, row(&b).base);
+}
+
+#[test]
 fn interrupted_before_dirstate() {
     let (_tmp, a) = vault(&[("f1.txt", "v1")]);
     cmd::snapshot(&O, &a).unwrap();

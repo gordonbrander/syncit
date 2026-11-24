@@ -231,7 +231,13 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
     v.config = config;
     dirstate.scanned = now;
     if !dry {
-        dirstate.save(&v.root)?;
+        // A scan that found the folder as the dirstate has it writes
+        // nothing; the file keeps its older `scanned`, which is only more
+        // cautious. `learned`: some row is the same but newly trusted.
+        let same = dirstate.rows == v.dirstate.rows && dirstate.deleted == v.dirstate.deleted;
+        if !same || learned {
+            dirstate.save(&v.root)?;
+        }
     } else if learned || !smudged.is_empty() {
         // `v.dirstate` is still the one the scan began with.
         let mut cache = std::mem::take(&mut v.dirstate);

@@ -31,7 +31,7 @@ pub struct Row {
     pub base: Vec<Id>, // the entries the file was derived from; sorted
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct Dirstate {
     pub scanned: i64, // when the most recent scan started, dry or not, in milliseconds
     pub rows: BTreeMap<String, Row>,

@@ -93,6 +93,9 @@ pub fn materialise(
     if v.bare {
         return Ok(()); // no working folder
     }
+    // To save the dirstate only if this changes it. Compared, not tracked:
+    // a change made anywhere below cannot then go unsaved.
+    let before = v.dirstate.clone();
     let states: Vec<(String, PathState)> = (v.log.paths.keys())
         .map(|p| (p.clone(), v.log.resolve(p)))
         .collect();
@@ -137,7 +140,7 @@ pub fn materialise(
             None => v.event(ctx, sum, kind, path, ""),
         }
     }
-    if ctx.dry_run {
+    if ctx.dry_run || v.dirstate == before {
         return Ok(());
     }
     v.dirstate.save(&v.root)
