@@ -1,0 +1,12 @@
+{
+  "name": "syncit",
+  "owner": { "name": "Gordon Brander" },
+  "description": "Agent skills for syncit",
+  "plugins": [
+    {
+      "name": "syncit",
+      "source": "./",
+      "description": "Teaches agents to use the syncit CLI"
+    }
+  ]
+}
