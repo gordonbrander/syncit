@@ -58,7 +58,7 @@ syncit cp scans notes.txt /Volumes/Backup/Archive
 A notes.txt
 A scans/new.pdf
 M scans/receipt.pdf
-recorded 0, added 2, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
+recorded 0, added 2, updated 1, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
 The last argument is a folder in the vault, which need not exist yet. Each file or folder you name lands in it under its own name, as with `cp -R`. Name `.` to copy the contents of the folder you are in.
@@ -91,6 +91,7 @@ Each line is a mark, the file, and the name of the mark:
 | `✓` | current | File up to date |
 | `✎` | modified | Changed here, not yet snapshotted |
 | `+` | new | New here, not yet snapshotted |
+| `→` | renamed | Moved here, not yet snapshotted; the old path is shown before the arrow, as in `→  notes/ -> docs/  renamed  12 files` |
 | `✗` | removed | Gone from this folder |
 | `◐` | behind | Our copy is out-of-date. Sync to update. |
 | `○` | missing | File not present (not yet synced) |
@@ -140,7 +141,7 @@ dry run: nothing is changed
 <- M notes.txt
 <- D old.txt
 -> A todo.txt
-recorded 3, added 1, updated 1, deleted 1, conflicts 0, pending 0, skipped 0
+recorded 3, added 1, updated 1, deleted 1, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
 `push`, `pull`, `move`, `drop` and `cp` take `--dry-run` too. For `move` and `drop` it shows which files would be removed here, or the error if they would refuse.
@@ -156,7 +157,7 @@ syncit sync --no-remove /Volumes/Backup/Documents
 ```
 <- A old.txt (kept)
 -> A old.txt
-recorded 2, added 2, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
+recorded 2, added 2, updated 0, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
 The deletion is undone, not postponed: later syncs leave the file alone. `push` and `pull` take `--no-remove` too; since they write to one folder only, the file comes back to the other at its next sync.
@@ -169,9 +170,9 @@ Every line about a file has a letter, then the file's path in its vault. When a 
 |---|---|
 | `A` | added |
 | `M` | modified |
-| `D` | deleted |
+| `D` | deleted; `D path (moved)` or `D path (dropped)` when `move` or `drop` removed it from this folder |
+| `R` | renamed: `R old/path -> new/path` |
 | `C` | a conflict copy was written |
-| `R` | removed from this folder by `move` or `drop` |
 | `U` | a conflict is open |
 | `!` | needs a look; the reason follows in parentheses |
 
@@ -201,7 +202,7 @@ There are no wildcards. Ignored files are never sent, never overwritten and neve
 - **It won't overwrite work in progress.** If a file changes while a sync is running, that file is skipped and reported, and handled on the next run.
 - **Folders, or a remote vault.** Another vault is a folder reachable as a path on this machine (an internal disk, an external drive, a mounted network share) or a [remote vault](remotes.md) in cloud storage.
 - **Not synced:** symbolic links, empty folders, and file permissions other than whether a file is executable.
-- **Renames** are seen as a delete plus a new file, so a renamed file is copied again.
+- **Renames** are recognised by content, as git does, and the content is copied from the old file, not sent again. A file renamed and edited at once is shown as a delete plus a new file.
 - **A vault inside a vault.** If you drag one vault into another, its files are synced as ordinary files of the outer vault, and syncit prints a warning. The two cannot be synced with each other.
 - **One at a time.** Running two syncit commands on the same vault at once fails with "vault is in use".
 
@@ -223,7 +224,7 @@ syncit --json push /Volumes/Backup/Documents
 
 ```
 {"type":"event","kind":"updated","vault":"/Volumes/Backup/Documents","path":"notes.txt","note":""}
-{"type":"summary","recorded":1,"added":0,"updated":1,"deleted":0,"conflicts":0,"pending":0,"skipped":0,"incomplete":0,"rejected":0}
+{"type":"summary","recorded":1,"added":0,"updated":1,"deleted":0,"renamed":0,"conflicts":0,"pending":0,"skipped":0,"incomplete":0,"rejected":0}
 ```
 
 The types are `event`, `conflict`, `summary`, `setting`, `blame`, `version`, `state`, `remote` and `info` on standard output, and `warning` and `error` on standard error. A run that completes ends with one `summary`.

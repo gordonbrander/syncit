@@ -32,7 +32,7 @@ If `syncit --version` fails, syncit is not installed: point the user to the inst
    - Before `sync`, `push` or `pull`, run `syncit status`. It is instant and changes nothing. If it lists any `✗ removed` file, dry-run first.
    - Also dry-run when: these two vaults have never exchanged files (two folders that were each `init`ed; a `clone` already counts as the first exchange); the user asked what will happen; a drive or sub-folder might not be mounted; or the vaults have not synced in a long time.
    - Otherwise a sync the user asked for needs no dry run.
-   - Show the user the dry-run output. If it has `D` (deleted) or `R` (removed here) lines the user did not ask for, stop and ask before the real run.
+   - Show the user the dry-run output. If it has `D` (deleted, or removed here by `move`/`drop`) lines the user did not ask for, stop and ask before the real run.
 2. **Never use `rm` to free space.** Deleting a file is a real deletion that reaches every vault on the next sync. To remove files from this vault only, use `syncit move` (see [references/partial.md](references/partial.md)).
 3. **Ask the user before** `drop --force`, `compact`, lowering `keep-history`, or `--no-remove`. The first three discard data for good. `--no-remove` puts deleted files back for good.
 4. **Read the exit code.** `0` is done. `1` is failed. `2` means the run finished but something needs a look: a conflict, or a file that was skipped or is pending. Tell the user what the `U` and `!` lines say; do not report a `2` as a clean sync.

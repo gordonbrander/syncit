@@ -211,6 +211,65 @@ fn story_a3_move() {
 }
 
 #[test]
+fn renames_are_shown() {
+    let (_tmp, a, b) = pair(&[
+        ("notes/x.txt", "x"),
+        ("notes/y.txt", "y"),
+        ("z.txt", "z"),
+        ("gone.txt", "g"),
+    ]);
+    fs::rename(b.join("notes"), b.join("docs")).unwrap();
+    fs::rename(b.join("z.txt"), b.join("a.txt")).unwrap();
+    fs::remove_file(b.join("gone.txt")).unwrap();
+    put(&b, "c.txt", "c", 1);
+    let shown: Vec<_> = status(&b).iter().map(|s| (s.ours, s.shown())).collect();
+    assert_eq!(
+        shown,
+        [
+            ("renamed", "z.txt -> a.txt".into()),
+            ("new", "c.txt".into()),
+            ("renamed", "notes/ -> docs/".into()),
+            ("removed", "gone.txt".into()),
+        ]
+    );
+    let report = cmd::sync(O, &b, &a).unwrap();
+    assert_eq!(report.exit_code(), 0);
+    let counts = (report.renamed, report.added, report.deleted);
+    assert_eq!(counts, (3, 1, 1));
+    let renamed = |from: &str, to: &str| {
+        let is = |e: &&Event| e.kind == "renamed" && e.path == to;
+        report
+            .events
+            .iter()
+            .find(is)
+            .and_then(|e| e.from.as_deref())
+            == Some(from)
+    };
+    assert!(renamed("z.txt", "a.txt") && renamed("notes/x.txt", "docs/x.txt"));
+    assert_eq!(tree(&a), tree(&b));
+}
+
+/// A file renamed in another vault is written from the old file here before
+/// that is removed, so it needs no other source: here, none is given.
+#[test]
+fn rename_needs_no_source() {
+    let (_tmp, a, b) = pair(&[("a.txt", "content")]);
+    no_history(&[&a, &b]);
+    // `a.txt` sorts first, so it would be removed before `b.txt` is written.
+    fs::rename(b.join("a.txt"), b.join("b.txt")).unwrap();
+    cmd::snapshot(O, &b).unwrap();
+    let mut report = Summary::default();
+    let (mut va, vb) = (
+        Vault::open(O, &a, true).unwrap(),
+        Vault::open(O, &b, true).unwrap(),
+    );
+    cmd::receive(O, &mut va, &vb, &mut report).unwrap();
+    materialise(O, &mut va, None, false, &mut report).unwrap();
+    assert_eq!((report.exit_code(), report.renamed), (0, 1));
+    assert!(is(&a, "b.txt", "content") && !a.join("a.txt").exists());
+}
+
+#[test]
 fn story_a4_clone_subfolder() {
     let (tmp, a) = vault(&[
         ("foo/bar/x.txt", "x"),
@@ -627,7 +686,7 @@ fn story_e1_rerun() {
     assert_eq!((first.recorded, first.exit_code()), (2, 0));
     assert_eq!(
         first.to_string(),
-        "recorded 2, added 1, updated 1, deleted 0, conflicts 0, pending 0, skipped 0"
+        "recorded 2, added 1, updated 1, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0"
     );
     let (segments, files) = (names(&a.join(".syncit/log")), tree(&a));
     let second = cmd::sync(O, &b, &a).unwrap();
@@ -1712,6 +1771,7 @@ fn status_states() {
         ours,
         theirs,
         conflict: None,
+        from: None,
     };
     let list = |dir: &Path, paths: &[PathBuf], peer| cmd::status(O, dir, paths, peer, true);
     // One vault: nothing needs anything. Of every file, a folder in one

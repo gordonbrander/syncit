@@ -37,7 +37,7 @@ syncit get /Volumes/Backup/Archive/music
 
 ```
 -> A music/m.mp3
-recorded 0, added 1, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
+recorded 0, added 1, updated 0, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
 It lands at the same place here, `~/Archive/music`, and is synced from then on. `get` also brings in anything else that changed in the archive, as `pull` does.
@@ -65,10 +65,10 @@ syncit move music photos/2024/raw /Volumes/Backup/Archive
 <- M music/m.mp3
 -> R music/m.mp3
 -> R photos/2024/raw/1.dng
-recorded 1, added 0, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
+recorded 1, added 0, updated 1, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
-`move` sends your changes there as `push` does, including edits you haven't synced yet. It then checks that every file arrived, and only then removes them here (the `R` lines). They stay in the archive, and later syncs neither bring them back nor delete them. `syncit get` brings them back.
+`move` sends your changes there as `push` does, including edits you haven't synced yet. It then checks that every file arrived, and only then removes them here (the `D … (moved)` lines). They stay in the archive, and later syncs neither bring them back nor delete them. `syncit get` brings them back.
 
 > **Deleting is not moving.** If you delete a file with Finder or `rm`, that is a real deletion, and the next sync deletes it from the other folder too. `move` removes it *only here*.
 
@@ -90,7 +90,7 @@ syncit drop --check /Volumes/Backup/Archive music
 
 ```
 -> R music/m.mp3
-recorded 0, added 0, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
+recorded 0, added 0, updated 0, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
 `drop` first records any unsaved changes, then removes a file only if its current version is in the vault you named. If something has not been synced there yet, nothing is dropped and the files are listed; sync and try again. Without `--check`, `drop` goes ahead only for files whose versions this vault keeps in its [history](history.md):

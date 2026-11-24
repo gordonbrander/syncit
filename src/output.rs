@@ -37,6 +37,9 @@ pub struct Event {
     pub vault: String,
     pub path: String,
     pub note: String,
+    /// For a rename, the path the file had before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     /// Text form only: `->` for our vault and `<-` for theirs in a run with
     /// a peer, empty in a command on one vault.
     #[serde(skip)]
@@ -75,6 +78,10 @@ pub struct State {
     /// The conflict copies, when a vault's state is `conflict`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// When our state is `renamed`, the path the file had before; a folder's
+    /// ends in `/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 /// The mark of a state of `status`: one mark for each.
@@ -83,6 +90,7 @@ fn mark(state: &str) -> &'static str {
         "current" => "✓",
         "modified" => "✎",
         "new" => "+",
+        "renamed" => "→",
         "removed" => "✗",
         "behind" => "◐",
         "missing" => "○",
@@ -94,13 +102,21 @@ fn mark(state: &str) -> &'static str {
 }
 
 impl State {
+    /// The path as the text form shows it: `from -> path` for a rename.
+    pub fn shown(&self) -> String {
+        match &self.from {
+            Some(from) => format!("{from} -> {}", self.path),
+            None => self.path.clone(),
+        }
+    }
+
     /// The text form: the marks, the path padded to `width` characters, each
     /// vault's state as a word, then the number of files in a folder or the
     /// conflict copies.
     pub fn row(&self, width: usize) -> String {
         let states = [Some(self.ours), self.theirs];
         let marks: Vec<&str> = states.iter().flatten().map(|s| mark(s)).collect();
-        let mut row = format!("{}  {:<width$}", marks.join(" "), self.path);
+        let mut row = format!("{}  {:<width$}", marks.join(" "), self.shown());
         for state in states.iter().flatten() {
             row += &format!("  {state:<10}");
         }
@@ -187,6 +203,7 @@ impl Display for Message {
                 kind,
                 path,
                 note,
+                from,
                 side,
                 ..
             }) => {
@@ -195,12 +212,21 @@ impl Display for Message {
                 let letter = match *kind {
                     "added" => "A",
                     "updated" => "M",
-                    "deleted" => "D",
+                    "deleted" | "moved" | "dropped" => "D",
                     "copied" => "C",
-                    "moved" | "dropped" => "R",
+                    "renamed" => "R",
                     _ => "!",
                 };
-                write!(f, "{}", head(side, letter, path))?;
+                let shown = match from {
+                    Some(from) => format!("{from} -> {path}"),
+                    None => path.clone(),
+                };
+                write!(f, "{}", head(side, letter, &shown))?;
+                // Removed here by `move` or `drop`: which one, and why.
+                let note = match (*kind, note.is_empty()) {
+                    ("moved" | "dropped", true) => *kind,
+                    _ => note.as_str(),
+                };
                 match (letter, note.is_empty()) {
                     ("!", true) => write!(f, " ({kind})"),
                     ("!", false) => write!(f, " ({kind}: {note})"),
@@ -257,6 +283,7 @@ pub struct Summary {
     pub added: usize,
     pub updated: usize,
     pub deleted: usize,
+    pub renamed: usize,
     pub conflicts: usize,
     pub pending: usize,
     pub skipped: usize,
@@ -279,6 +306,7 @@ impl Summary {
             "added" => self.added += 1,
             "updated" => self.updated += 1,
             "deleted" => self.deleted += 1,
+            "renamed" => self.renamed += 1,
             "pending" => self.pending += 1,
             "skipped" => self.skipped += 1,
             "incomplete" => self.incomplete += 1,
@@ -297,11 +325,12 @@ impl Display for Summary {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "recorded {}, added {}, updated {}, deleted {}, conflicts {}, pending {}, skipped {}",
+            "recorded {}, added {}, updated {}, deleted {}, renamed {}, conflicts {}, pending {}, skipped {}",
             self.recorded,
             self.added,
             self.updated,
             self.deleted,
+            self.renamed,
             self.conflicts,
             self.pending,
             self.skipped
@@ -331,7 +360,7 @@ pub fn print_stderr<T: Display + Serialize>(value: &T, json: bool) {
 // ponytail: the width is counted in characters, so wide ones (CJK) put the
 // columns out of line; use the unicode-width crate if that matters.
 pub fn print_states(lines: &[State], json: bool) {
-    let width = lines.iter().map(|h| h.path.chars().count()).max();
+    let width = lines.iter().map(|h| h.shown().chars().count()).max();
     for h in lines {
         if json {
             print_stdout(&Message::State(h.clone()), true);
@@ -356,6 +385,7 @@ mod tests {
             vault: "/v".into(),
             path: "a/f.txt".into(),
             note: note.into(),
+            from: None,
             side: "",
         };
         let message = |kind, note| Message::Event(event(kind, note));
@@ -369,14 +399,28 @@ mod tests {
             )
         );
         for (kind, text) in [
-            ("added", "A"),
-            ("deleted", "D"),
-            ("copied", "C"),
-            ("moved", "R"),
-            ("dropped", "R"),
+            ("added", "A a/f.txt"),
+            ("deleted", "D a/f.txt"),
+            ("copied", "C a/f.txt"),
+            ("moved", "D a/f.txt (moved)"),
+            ("dropped", "D a/f.txt (dropped)"),
         ] {
-            assert_eq!(line(&message(kind, ""), false), format!("{text} a/f.txt"));
+            assert_eq!(line(&message(kind, ""), false), text);
         }
+        // A rename names both paths, as `git status --short` does.
+        let renamed = Message::Event(Event {
+            from: Some("old/f.txt".into()),
+            side: "<-",
+            ..event("renamed", "")
+        });
+        assert_eq!(
+            both(&renamed),
+            (
+                "<- R old/f.txt -> a/f.txt".into(),
+                r#"{"type":"event","kind":"renamed","vault":"/v","path":"a/f.txt","note":"","from":"old/f.txt"}"#
+                    .into()
+            )
+        );
         assert_eq!(line(&message("pending", ""), false), "! a/f.txt (pending)");
         assert_eq!(
             line(&message("skipped", "changed"), false),
@@ -472,6 +516,7 @@ mod tests {
             ours,
             theirs,
             conflict: conflict.map(String::from),
+            from: None,
         };
         let message = |h: &State| Message::State(h.clone());
         assert_eq!(
@@ -511,6 +556,18 @@ mod tests {
         ] {
             assert_eq!(file_state("f", 1, state, None, None).row(4), text);
         }
+        let renamed = State {
+            from: Some("notes/".into()),
+            ..file_state("docs/", 3, "renamed", None, None)
+        };
+        assert_eq!(
+            both(&message(&renamed)),
+            (
+                "→  notes/ -> docs/  renamed     3 files".into(),
+                r#"{"type":"state","path":"docs/","files":3,"ours":"renamed","from":"notes/"}"#
+                    .into()
+            )
+        );
         assert_eq!(
             file_state("f", 1, "behind", Some("removed"), None).row(4),
             "◐ ✗  f     behind      removed"
@@ -540,7 +597,7 @@ mod tests {
         let (text, json) = both(&Message::Summary(summary));
         assert_eq!(
             text,
-            "recorded 2, added 1, updated 0, deleted 0, conflicts 0, pending 0, skipped 1"
+            "recorded 2, added 1, updated 0, deleted 0, renamed 0, conflicts 0, pending 0, skipped 1"
         );
         assert!(
             json.starts_with(r#"{"type":"summary","recorded":2,"added":1,"#),

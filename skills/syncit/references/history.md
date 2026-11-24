@@ -32,7 +32,7 @@ The restored file is a new change: the next sync puts it back in the other vault
 
 There is no single command for this. `restore` takes one file, and there is no "undo". Do it file by file:
 
-1. Find what the sync changed. Its output is the best record: `M` (modified), `D` (deleted) and `A` (added) lines, with `->` for files changed in this vault. If the output is gone, `syncit log <folder>` lists versions of everything under it, newest first.
+1. Find what the sync changed. Its output is the best record: `M` (modified), `D` (deleted), `A` (added) and `R` (renamed: `R old -> new`) lines, with `->` for files changed in this vault. If the output is gone, `syncit log <folder>` lists versions of everything under it, newest first.
 2. For each modified or deleted file, find the version to go back to with `syncit log <file>`. It is the one below the current line.
 3. Check that it is restorable (no `(no content)` mark), then `syncit restore --in-place <file> <hash>`.
 4. Files the sync *added* that the user does not want: delete them. That deletion will spread on the next sync, which is what undoing an addition means; confirm with the user.

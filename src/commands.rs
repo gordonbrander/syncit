@@ -631,20 +631,31 @@ fn settled(line: &State) -> bool {
 /// in the same state is one line; any other is listed child by child. A
 /// conflict is always a line of its own: it names its copies.
 fn collapse(dir: &str, files: &[State], top: bool, out: &mut Vec<State>) {
-    let key = |f: &State| (f.ours, f.theirs, f.conflict.is_some());
-    let same = files
-        .iter()
-        .all(|f| key(f) == (files[0].ours, files[0].theirs, false));
+    let skip = if dir.is_empty() { 0 } else { dir.len() + 1 };
+    // A folder of files renamed from one folder, keeping their names below
+    // it, is that folder renamed.
+    fn from_dir(f: &State, skip: usize) -> Option<Option<&str>> {
+        let from = f.from.as_deref()?;
+        Some(
+            from.strip_suffix(&f.path[skip..])
+                .filter(|d| d.ends_with('/')),
+        )
+    }
+    let keys: Vec<_> = (files.iter())
+        .map(|f| (f.ours, f.theirs, f.conflict.is_some(), from_dir(f, skip)))
+        .collect();
+    let first = keys[0];
+    let same = !first.2 && first.3 != Some(None) && keys.iter().all(|k| *k == first);
     if !top && same && files.len() > 1 {
         out.push(State {
             path: format!("{dir}/"),
             files: files.len(),
+            from: first.3.flatten().map(String::from),
             ..files[0].clone()
         });
         return;
     }
     // A child is the next name in the path, with its `/` if it is a folder.
-    let skip = if dir.is_empty() { 0 } else { dir.len() + 1 };
     let child = |f: &State| {
         let rest = &f.path[skip..];
         rest.find('/').map_or(rest.len(), |i| i + 1) + skip
@@ -684,7 +695,8 @@ pub fn status(
     let mut peer = peer.map(|path| other(opts, &mut v, path)).transpose()?;
     // Dry scans, which say what no scan has recorded; then one log for both
     // vaults, so that each is compared with the same winner.
-    let ours: BTreeMap<_, _> = scan(opts, &mut v, true)?.changes.into_iter().collect();
+    let scanned = scan(opts, &mut v, true)?;
+    let ours: BTreeMap<_, _> = scanned.changes.into_iter().collect();
     let mut theirs = BTreeMap::new();
     if let Some(peer) = &mut peer {
         theirs = scan(opts, peer, true)?.changes.into_iter().collect();
@@ -714,6 +726,7 @@ pub fn status(
             ours: leftover(a, b),
             theirs: b.map(|b| leftover(b, Some(a))),
             conflict: None,
+            from: None,
         };
         // A deleted path is listed only while a vault has something to do.
         if winner == Some(None) && settled(&line) {
@@ -723,6 +736,24 @@ pub fn status(
             line.conflict = copies;
         }
         files.push(line);
+    }
+    // A file removed here and its content new here is one file renamed, if
+    // the other vault sees the two alike and the paths asked about take both.
+    for (from, to) in &scanned.moves {
+        let at = |files: &[State], p: &str| files.binary_search_by(|f| f.path.as_str().cmp(p));
+        let (Ok(i), Ok(j)) = (at(&files, from), at(&files, to)) else {
+            continue;
+        };
+        let (gone, new) = (&files[i], &files[j]);
+        let scoped = |s: &String| prefix_matches(s, from) == prefix_matches(s, to);
+        if (gone.ours, new.ours) == ("removed", "new")
+            && gone.theirs == new.theirs
+            && scopes.iter().all(scoped)
+        {
+            files[j].ours = "renamed";
+            files[j].from = Some(from.clone());
+            files.remove(i);
+        }
     }
     let mut found = vec![];
     for prefix in &scopes {

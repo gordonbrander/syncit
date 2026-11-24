@@ -15,13 +15,14 @@ Vaults:
 Output:
   -> marks a file in this vault, <- a file in the other vault.
     A  added       M  modified       D  deleted
+    R  renamed: R <old path> -> <new path>
     C  copy written (a conflict copy, or a restored version)
-    R  removed here by move or drop
     U  conflict still open
     !  needs a look; the reason follows in brackets
+  A D line ending (moved) or (dropped) was removed here by move or drop.
   The last line counts: recorded (changes newly noticed, in either
-  vault); added, updated, deleted (files the run changed, in either
-  vault); conflicts, pending, skipped (what needs a look).
+  vault); added, updated, deleted, renamed (files the run changed, in
+  either vault); conflicts, pending, skipped (what needs a look).
   Results go to stdout, warnings and errors to stderr.
   With --json every line is a JSON object with a \"type\" field.
 
@@ -252,6 +253,8 @@ Marks:
   ✓  current     here and up to date
   ✎  modified    changed here, not yet recorded
   +  new         new here, not yet recorded
+  →  renamed     moved here from the path before the arrow, not yet
+                 recorded
   ✗  removed     gone from this vault
   ◐  behind      an out-of-date copy is here; sync updates it, or removes
                  it if the other vault shows ✗
