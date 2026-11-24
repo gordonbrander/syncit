@@ -1,7 +1,8 @@
 //! `.syncit/dirstate`: this vault's position in the log, which the log cannot
 //! record because it is the same in every vault. It says which version of
 //! each file this vault has on disk, and which deletions it has seen. It is
-//! not a copy of anything: only the size and mtime in a row are a cache.
+//! not a copy of anything: only the size and mtime in a row are a cache,
+//! which `status` keeps fresh as `git status` does the index's.
 
 use crate::blobs::hash_file;
 use crate::entry::Id;
@@ -17,6 +18,12 @@ use std::path::Path;
 /// edit made in the same timestamp tick, so the file is hashed again.
 pub const TICK_MARGIN_MS: i64 = 2000;
 
+/// The size in a row that no file matches, so its file is always hashed.
+/// `status` gives it to a row whose file looks unchanged by size and mtime
+/// but is not, as git zeroes the size of a racily clean index entry: the
+/// row then stays distrusted when `scanned` moves on.
+pub const SMUDGED: u64 = u64::MAX;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Row {
     pub size: u64,
@@ -28,7 +35,7 @@ pub struct Row {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Dirstate {
-    pub scanned: i64, // when the most recent scan started, in milliseconds
+    pub scanned: i64, // when the most recent scan started, dry or not, in milliseconds
     pub rows: BTreeMap<String, Row>,
     /// Paths this vault has seen deleted, each with its base: the heads, all
     /// tombstones, that the absence of a file here reflects. A path is in at

@@ -10,7 +10,7 @@ use crate::materialise::{copy_name, materialise, no_symlinked_parent, prune, wri
 use crate::output::{
     Context, Event, Message, State, Summary, Version, print_states, print_stdout, warn,
 };
-use crate::scan::{deleted_heads, scan};
+use crate::scan::{Scan, deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
 use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
 use anyhow::{Context as _, Result, bail, ensure};
@@ -667,7 +667,8 @@ fn collapse(dir: &str, files: &[State], top: bool, out: &mut Vec<State>) {
 /// with `peer` in that vault too: what a scan would record, what a sync
 /// would bring or remove, and what is waiting for the user. Only the lines
 /// that need something, unless `all`. Folders in one state are one line.
-/// Writes nothing. Returns what it printed.
+/// Records nothing; it saves only what its scans learned of files that have
+/// not changed (`Scan::cache`). Returns what it printed.
 pub fn status(
     ctx: &Context,
     cwd: &Path,
@@ -689,11 +690,21 @@ pub fn status(
     let mut peer = peer.map(|path| other(ctx, &mut v, path)).transpose()?;
     // Dry scans, which say what no scan has recorded; then one log for both
     // vaults, so that each is compared with the same winner.
-    let scanned = scan(ctx, &mut v, true)?;
+    // Each vault was just opened, so its scan began with the dirstate on
+    // disk and may save what it learned. The save is a cache write and may
+    // fail, as on read-only media, without failing `status`.
+    let dry_scan = |v: &mut Vault| -> Result<Scan> {
+        let scanned = scan(ctx, v, true)?;
+        if let Some(cache) = &scanned.cache {
+            let _ = cache.save(&v.root);
+        }
+        Ok(scanned)
+    };
+    let scanned = dry_scan(&mut v)?;
     let ours: BTreeMap<_, _> = scanned.changes.into_iter().collect();
     let mut theirs = BTreeMap::new();
     if let Some(peer) = &mut peer {
-        theirs = scan(ctx, peer, true)?.changes.into_iter().collect();
+        theirs = dry_scan(peer)?.changes.into_iter().collect();
         absorb(&mut v, peer);
     }
     let mut files: Vec<State> = vec![];

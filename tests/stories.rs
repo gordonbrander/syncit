@@ -1288,6 +1288,62 @@ fn same_tick_edit() {
 }
 
 #[test]
+fn status_keeps_stat_cache() {
+    let (_tmp, a) = vault(&[("f.txt", "one"), ("g.txt", "g")]);
+    cmd::snapshot(&O, &a).unwrap();
+    let before = Dirstate::load(&a).unwrap();
+    // The same content with another mtime: hashed, and found the same.
+    put(&a, "f.txt", "one", 5);
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(status(&a).is_empty());
+    let after = Dirstate::load(&a).unwrap();
+    assert_eq!(after.rows["f.txt"].mtime, 1_700_000_005_000);
+    assert_eq!(after.rows["f.txt"].base, before.rows["f.txt"].base);
+    assert_eq!(after.rows["g.txt"], before.rows["g.txt"]);
+    assert!(after.scanned > before.scanned);
+    // Nothing more to learn, so nothing is written; and nothing to record.
+    let saved = fs::read(a.join(".syncit/dirstate")).unwrap();
+    assert!(status(&a).is_empty());
+    assert_eq!(fs::read(a.join(".syncit/dirstate")).unwrap(), saved);
+    assert_eq!(cmd::snapshot(&O, &a).unwrap().recorded, 0);
+    // A new file and a removed one are not the cache's business.
+    put(&a, "new.txt", "n", 0);
+    fs::remove_file(a.join("g.txt")).unwrap();
+    put(&a, "f.txt", "one", 6);
+    status(&a);
+    let after = Dirstate::load(&a).unwrap();
+    assert!(after.rows.contains_key("g.txt") && !after.rows.contains_key("new.txt"));
+    assert!(after.deleted.is_empty());
+    assert_eq!(cmd::snapshot(&O, &a).unwrap().recorded, 2);
+}
+
+#[test]
+fn status_smudges_same_tick_edit() {
+    let tmp = TempDir::new().unwrap();
+    let a = tmp.path();
+    fs::write(a.join("f.txt"), "one").unwrap();
+    cmd::init(&O, a).unwrap();
+    cmd::snapshot(&O, a).unwrap();
+    let scanned = Dirstate::load(a).unwrap().scanned;
+    // Same size, same mtime, different content, right after the scan.
+    let mtime = a.join("f.txt").metadata().unwrap().modified().unwrap();
+    fs::write(a.join("f.txt"), "two").unwrap();
+    let file = File::options().write(true).open(a.join("f.txt")).unwrap();
+    file.set_modified(mtime).unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(has(&status(a), "modified", "f.txt"));
+    // `scanned` has moved on, and the row can no longer pass for the file.
+    let smudged = Dirstate::load(a).unwrap();
+    assert!(smudged.scanned > scanned);
+    assert_eq!(smudged.rows["f.txt"].size, syncit::dirstate::SMUDGED);
+    assert_eq!(smudged.rows["f.txt"].hash, sha256(b"one"));
+    assert!(has(&status(a), "modified", "f.txt"));
+    assert_eq!(cmd::snapshot(&O, a).unwrap().recorded, 1);
+    assert_eq!(Dirstate::load(a).unwrap().rows["f.txt"].size, 3);
+    assert_eq!(cmd::snapshot(&O, a).unwrap().recorded, 0);
+}
+
+#[test]
 fn interrupted_before_dirstate() {
     let (_tmp, a) = vault(&[("f1.txt", "v1")]);
     cmd::snapshot(&O, &a).unwrap();

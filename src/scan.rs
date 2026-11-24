@@ -1,7 +1,7 @@
 //! Scan: compare the working folder with the stat dirstate and write entries.
 
 use crate::blobs::hash_file;
-use crate::dirstate::{Row, is_exec, mtime_ms};
+use crate::dirstate::{Dirstate, Row, SMUDGED, TICK_MARGIN_MS, is_exec, mtime_ms};
 use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
 use crate::output::{Context, Progress, warn};
@@ -23,6 +23,14 @@ pub struct Scan {
     pub skipped: Vec<String>,
     /// Deletions and new files that are one file moved: `(from, to)`.
     pub moves: Vec<(String, String)>,
+    /// From a dry scan that learned something about files it recorded
+    /// nothing for: the dirstate as it was before the scan, with the size and
+    /// mtime of each row whose file was hashed and found the same, with
+    /// each row smudged whose file looks the same and is not, and with
+    /// `scanned` moved on. Nothing in it is a record of a change. For
+    /// `status` to save, if the dirstate the scan began with is the one on
+    /// disk.
+    pub cache: Option<Dirstate>,
 }
 
 /// Pair deleted and added files, each `(path, hash)`, into moves `(from,
@@ -67,6 +75,9 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
     let (mut dirstate, mut config, mut out) =
         (v.dirstate.clone(), v.config.clone(), Scan::default());
     let (mut excluded, mut added, mut deleted) = (vec![], vec![], vec![]);
+    // For `Scan::cache`: rows to refresh, rows to smudge, and whether a
+    // refresh changes what the next scan hashes.
+    let (mut refreshed, mut smudged, mut learned) = (vec![], vec![], false);
     let progress = Progress::new(&ctx.bar, "scanning", files.len());
     for path in &files {
         progress.tick();
@@ -76,24 +87,39 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         }
         let file = v.root.join(path);
         let row = dirstate.rows.get(path).cloned();
-        if let (Some(row), Ok(meta)) = (&row, file.symlink_metadata())
-            && dirstate.unchanged(row, &meta)
+        let meta = file.symlink_metadata().ok();
+        if let (Some(row), Some(meta)) = (&row, &meta)
+            && dirstate.unchanged(row, meta)
         {
             continue;
         }
+        // The file has its row's size and mtime, and is hashed only because
+        // it may have been edited in the tick it was last hashed in.
+        let looks_clean = matches!((&row, &meta), (Some(row), Some(meta))
+            if meta.len() == row.size && mtime_ms(meta) == row.mtime);
         let Ok(Some((size, mtime, exec, hash))) = hash_stable(&file) else {
+            if looks_clean {
+                smudged.push(path.clone());
+            }
             out.skipped.push(path.clone());
             continue;
         };
         v.hint(&hash, file);
         let (parents, kind) = match row {
             Some(row) if row.hash == hash && row.exec == exec => {
+                learned |= (size, mtime) != (row.size, row.mtime) || mtime < now - TICK_MARGIN_MS;
+                refreshed.push((path.clone(), size, mtime));
                 dirstate
                     .rows
                     .insert(path.clone(), Row { size, mtime, ..row });
                 continue;
             }
-            Some(row) => (row.base, "modified"),
+            Some(row) => {
+                if looks_clean {
+                    smudged.push(path.clone());
+                }
+                (row.base, "modified")
+            }
             None => {
                 if let Some(base) = dirstate.deleted.remove(path) {
                     // Re-created where this vault saw a deletion: the new
@@ -205,6 +231,21 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
     dirstate.scanned = now;
     if !dry {
         dirstate.save(&v.root)?;
+    } else if learned || !smudged.is_empty() {
+        // `v.dirstate` is still the one the scan began with.
+        let mut cache = std::mem::take(&mut v.dirstate);
+        for (path, size, mtime) in refreshed {
+            if let Some(row) = cache.rows.get_mut(&path) {
+                (row.size, row.mtime) = (size, mtime);
+            }
+        }
+        for path in smudged {
+            if let Some(row) = cache.rows.get_mut(&path) {
+                row.size = SMUDGED;
+            }
+        }
+        cache.scanned = now;
+        out.cache = Some(cache);
     }
     v.dirstate = dirstate;
     Ok(out)
