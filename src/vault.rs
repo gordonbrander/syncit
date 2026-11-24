@@ -245,7 +245,7 @@ impl Vault {
                 && stored(self, hash)
             {
                 let row = crate::dirstate::Row {
-                    size: 0,
+                    size: None,
                     mtime: e.mtime,
                     exec: e.exec,
                     hash: hash.clone(),

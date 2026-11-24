@@ -1335,11 +1335,11 @@ fn status_smudges_same_tick_edit() {
     // `scanned` has moved on, and the row can no longer pass for the file.
     let smudged = Dirstate::load(a).unwrap();
     assert!(smudged.scanned > scanned);
-    assert_eq!(smudged.rows["f.txt"].size, syncit::dirstate::SMUDGED);
+    assert_eq!(smudged.rows["f.txt"].size, None);
     assert_eq!(smudged.rows["f.txt"].hash, sha256(b"one"));
     assert!(has(&status(a), "modified", "f.txt"));
     assert_eq!(cmd::snapshot(&O, a).unwrap().recorded, 1);
-    assert_eq!(Dirstate::load(a).unwrap().rows["f.txt"].size, 3);
+    assert_eq!(Dirstate::load(a).unwrap().rows["f.txt"].size, Some(3));
     assert_eq!(cmd::snapshot(&O, a).unwrap().recorded, 0);
 }
 

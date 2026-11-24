@@ -216,11 +216,11 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 ```
 
 - `scanned`: when the most recent scan started, in milliseconds. 0 before the first scan. A scan by `status` counts (section 7, "The stat cache").
-- `rows`: one per file this vault had on disk at the last scan. `mtime` is the file's mtime as the filesystem reported it, in milliseconds (floor; negative before 1970). `exec` is whether the owner may execute it (`mode & 0o100`), the only permission that is recorded.
+- `rows`: one per file this vault had on disk at the last scan. `size` is the file's size in bytes, or `null` when it is not known, as in a row `status` has smudged (section 7) and a row of a bare vault. `mtime` is the file's mtime as the filesystem reported it, in milliseconds (floor; negative before 1970). `exec` is whether the owner may execute it (`mode & 0o100`), the only permission that is recorded.
 - `deleted`: one per path this vault has seen deleted, with its base: the heads, all tombstones, that the absence of a file here reflects. A path is in at most one of `rows` and `deleted`. A dirstate written before this field existed has none, and loads as if it were empty.
 - A missing dirstate file is an empty dirstate. That is the "lost dirstate" case and must work (`CRDT.md`, "Writing an entry", third row).
 
-**The unchanged test.** A file is unchanged against its row if its size, mtime and executable bit equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash; it is the row's version only if its executable bit also equals the row's. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise, `move` and `drop`. A row whose `size` is `SMUDGED` (the largest 64-bit number, which no file has) never passes it: its file is always hashed.
+**The unchanged test.** A file is unchanged against its row if its size, mtime and executable bit equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash; it is the row's version only if its executable bit also equals the row's. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise, `move` and `drop`. A row whose `size` is `null` (not known) never passes it: its file is always hashed.
 
 ### Segments
 
@@ -326,7 +326,7 @@ The segment is written before the dirstate is saved. If the run stops between th
 **The stat cache.** A dry scan hashes every file that fails the unchanged test, and `status` would hash the same files again each time if that were thrown away. So, as `git status` does with its index, a dry scan hands back the dirstate it began with, changed in three ways only, and `status` saves it:
 
 - **Refreshed.** A row whose file was hashed and has the row's hash and executable bit takes the file's size and mtime.
-- **Smudged.** A row whose file has the row's size and mtime, but another hash or executable bit, or could not be read without changing, gets the size `SMUDGED`. Git zeroes the cached size of such an index entry for the same reason.
+- **Smudged.** A row whose file has the row's size and mtime, but another hash or executable bit, or could not be read without changing, gets the size `null`. Git zeroes the cached size of such an index entry for the same reason.
 - **`scanned`** becomes the start of this scan.
 
 No row is added or removed, no base and no deletion record changes: nothing in it records a change, and the next scan writes the entries it would have written anyway. Moving `scanned` on is sound because every row is then one of: passing the test before and still older than `scanned`; hashed in this scan and found the same; failing the test on size or mtime; or smudged. It is handed back only if it differs in more than `scanned` and rows that are still too recent to trust, so a vault with nothing to learn is not rewritten. Only `status` saves it, for each vault it scans, because each was just opened and so began with the dirstate on disk; a `--dry-run` writes nothing. A save that fails is ignored.

@@ -219,7 +219,7 @@ fn one(
         safe(v, p)?;
         let hash = sha256(text.as_bytes());
         let (size, mtime) = if ctx.dry_run {
-            (0, entry.mtime) // in memory only
+            (None, entry.mtime) // in memory only
         } else {
             let fill = |tmp: &Path| fs::write(tmp, &text).map(|_| true);
             let tmp = stage(v, p, entry.mtime, entry.exec, fill)?.context("nothing staged")?;
@@ -271,7 +271,7 @@ fn one(
                 v.event(ctx, sum, "pending", p, UNAVAILABLE);
                 return Ok(());
             }
-            (0, w.mtime) // in memory only
+            (None, w.mtime) // in memory only
         } else {
             let Some(tmp) = stage(v, p, w.mtime, w.exec, |tmp| fetch(v, peer, &h, tmp))? else {
                 v.event(ctx, sum, "pending", p, UNAVAILABLE);
@@ -481,7 +481,7 @@ fn stage(
 }
 
 /// Rename a staged file onto `p`. Returns its size and mtime as stat reports.
-fn place(v: &mut Vault, tmp: &Path, p: &str, h: &str) -> Result<(u64, i64)> {
+fn place(v: &mut Vault, tmp: &Path, p: &str, h: &str) -> Result<(Option<u64>, i64)> {
     let file = v.root.join(p);
     if let Err(e) = fs::rename(tmp, &file) {
         let _ = fs::remove_file(tmp);
@@ -489,7 +489,7 @@ fn place(v: &mut Vault, tmp: &Path, p: &str, h: &str) -> Result<(u64, i64)> {
     }
     let meta = file.symlink_metadata()?;
     v.hint(h, file);
-    Ok((meta.len(), mtime_ms(&meta)))
+    Ok((Some(meta.len()), mtime_ms(&meta)))
 }
 
 /// Write content `h` at `p`, dated now, for `restore`, executable or not. A file already there

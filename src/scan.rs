@@ -1,7 +1,7 @@
 //! Scan: compare the working folder with the stat dirstate and write entries.
 
 use crate::blobs::hash_file;
-use crate::dirstate::{Dirstate, Row, SMUDGED, TICK_MARGIN_MS, is_exec, mtime_ms};
+use crate::dirstate::{Dirstate, Row, TICK_MARGIN_MS, is_exec, mtime_ms};
 use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
 use crate::output::{Context, Progress, warn};
@@ -25,8 +25,8 @@ pub struct Scan {
     pub moves: Vec<(String, String)>,
     /// From a dry scan that learned something about files it recorded
     /// nothing for: the dirstate as it was before the scan, with the size and
-    /// mtime of each row whose file was hashed and found the same, with
-    /// each row smudged whose file looks the same and is not, and with
+    /// mtime of each row whose file was hashed and found the same, with no
+    /// size in each row whose file looks the same and is not, and with
     /// `scanned` moved on. Nothing in it is a record of a change. For
     /// `status` to save, if the dirstate the scan began with is the one on
     /// disk.
@@ -96,7 +96,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         // The file has its row's size and mtime, and is hashed only because
         // it may have been edited in the tick it was last hashed in.
         let looks_clean = matches!((&row, &meta), (Some(row), Some(meta))
-            if meta.len() == row.size && mtime_ms(meta) == row.mtime);
+            if Some(meta.len()) == row.size && mtime_ms(meta) == row.mtime);
         let Ok(Some((size, mtime, exec, hash))) = hash_stable(&file) else {
             if looks_clean {
                 smudged.push(path.clone());
@@ -105,6 +105,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
             continue;
         };
         v.hint(&hash, file);
+        let size = Some(size);
         let (parents, kind) = match row {
             Some(row) if row.hash == hash && row.exec == exec => {
                 learned |= (size, mtime) != (row.size, row.mtime) || mtime < now - TICK_MARGIN_MS;
@@ -241,7 +242,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         }
         for path in smudged {
             if let Some(row) = cache.rows.get_mut(&path) {
-                row.size = SMUDGED;
+                row.size = None;
             }
         }
         cache.scanned = now;

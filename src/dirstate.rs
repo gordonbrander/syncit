@@ -18,15 +18,13 @@ use std::path::Path;
 /// edit made in the same timestamp tick, so the file is hashed again.
 pub const TICK_MARGIN_MS: i64 = 2000;
 
-/// The size in a row that no file matches, so its file is always hashed.
-/// `status` gives it to a row whose file looks unchanged by size and mtime
-/// but is not, as git zeroes the size of a racily clean index entry: the
-/// row then stays distrusted when `scanned` moves on.
-pub const SMUDGED: u64 = u64::MAX;
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Row {
-    pub size: u64,
+    /// None: not known, so the file is always hashed. `status` leaves it so
+    /// in a row whose file looks unchanged by size and mtime but is not, as
+    /// git zeroes the size of a racily clean index entry: the row then
+    /// stays distrusted when `scanned` moves on.
+    pub size: Option<u64>,
     pub mtime: i64,
     pub exec: bool,
     pub hash: String,
@@ -77,7 +75,7 @@ impl Dirstate {
     /// The unchanged test: may a file with this metadata be taken as the
     /// row's version without hashing it?
     pub fn unchanged(&self, row: &Row, meta: &Metadata) -> bool {
-        meta.len() == row.size
+        Some(meta.len()) == row.size
             && mtime_ms(meta) == row.mtime
             && is_exec(meta) == row.exec
             && row.mtime < self.scanned - TICK_MARGIN_MS
