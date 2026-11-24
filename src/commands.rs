@@ -361,6 +361,9 @@ fn exchange(
             ),
         );
     }
+    // The size of each log when its vault last retained, which was in
+    // `record`. A log only grows, so the size says whether it has changed.
+    let (mut retained_a, mut retained_b) = (a.log.entries.len(), b.log.entries.len());
     if to_b {
         receive(ctx, b, a, sum)?;
     }
@@ -368,11 +371,11 @@ fn exchange(
         receive(ctx, a, b, sum)?;
     }
     if ctx.no_remove {
-        if to_b {
-            keep(ctx, b, a, sum)?;
+        if to_b && keep(ctx, b, a, sum)? {
+            retained_b = b.log.entries.len();
         }
-        if to_a {
-            keep(ctx, a, b, sum)?;
+        if to_a && keep(ctx, a, b, sum)? {
+            retained_a = a.log.entries.len();
         }
         // Each receiver takes the other's re-creations, so one run converges.
         // ponytail: a corrupt segment is reported as rejected a second time
@@ -385,11 +388,12 @@ fn exchange(
         }
     }
     // Both retain before either materialises, so that a version is saved
-    // before it is replaced.
-    if to_b {
+    // before it is replaced. A vault whose log is as it was when it last
+    // retained has nothing new to keep.
+    if to_b && b.log.entries.len() != retained_b {
         retain(ctx, b, Some(&*a))?;
     }
-    if to_a {
+    if to_a && a.log.entries.len() != retained_a {
         retain(ctx, a, Some(&*b))?;
     }
     // A merge replaces two versions. It is made only if a vault receiving in
@@ -417,8 +421,9 @@ fn exchange(
 
 /// `--no-remove`: a file here whose path the log says is deleted is kept, and
 /// recorded as re-created, as if the user had put it back. Its row becomes a
-/// deletion record of the tombstones, and the scan writes the entry.
-fn keep(ctx: &Context, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result<()> {
+/// deletion record of the tombstones, and the scan writes the entry. Returns
+/// whether it kept any, and so recorded and retained.
+fn keep(ctx: &Context, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result<bool> {
     let rows: Vec<String> = v.dirstate.rows.keys().cloned().collect();
     let mut kept = false;
     for path in rows {
@@ -436,7 +441,7 @@ fn keep(ctx: &Context, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result
     if kept {
         record(ctx, v, Some(peer), sum)?;
     }
-    Ok(())
+    Ok(kept)
 }
 
 /// Scan, then retain blobs for what the scan recorded.

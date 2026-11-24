@@ -316,7 +316,7 @@ A file entry's `mtime` is the file's mtime in milliseconds, and its `exec` is th
 ### Finishing
 
 1. If there are new entries, write them as one segment into `.syncit/log/`. No entries, no segment.
-2. Set `scanned = now` and save the dirstate.
+2. Set `scanned = now`, and save the dirstate if the scan changed it: a row or a deletion record differs, or a row was hashed, found the same and is now old enough to trust. Otherwise the file is left as it is, with its older `scanned`, which only makes the unchanged test more cautious.
 3. Retain blobs (section 8).
 
 The segment is written before the dirstate is saved. If the run stops between the two, the next scan sees the same difference and writes an entry with the same path, hash, mtime and parents, which is the same entry. For a deletion it writes a second tombstone beside the first, which is harmless: two tombstone heads are the same version.
@@ -367,7 +367,7 @@ A vault retains blobs unless `keep_history` is `0`; then it never writes to `.sy
 - A vault collects only what it keeps. A peer that keeps more, or has not compacted, does not fill it up again.
 - A partial vault does not gather the content of paths it excludes.
 
-A retaining vault calls `retain()` after every scan, and again after segments are exchanged and before anything is materialised, so that a version is saved before it is replaced.
+A retaining vault calls `retain()` after every scan, and again after segments are exchanged and before anything is materialised, so that a version is saved before it is replaced. The second call is left out if the vault's log has not grown since the first: it would keep the same versions. A version that only the other vault's scan made available, as after that vault lost its dirstate, is then fetched at the next run.
 
 ### Compaction
 
@@ -489,7 +489,7 @@ Limits, accepted:
 
 ### Finishing
 
-Save the dirstate once, after all paths.
+Save the dirstate once, after all paths, if materialise changed it.
 
 ## 10. A run with a peer
 
@@ -499,7 +499,7 @@ Save the dirstate once, after all paths.
 2. Scan the local vault, then the peer (section 7). Both scan in every mode, so each vault's changes are recorded from its own dirstate.
 3. Exchange segments: each receiver takes every segment in the other vault's `log/` whose name it lacks. A segment is read, validated as in `CRDT.md`, and only then written into `log/`. A segment that fails is not stored, is reported as `rejected`, and does not stop the run.
 4. Each receiver reloads its log.
-5. Each retaining receiver calls `retain()`. This happens for both before either materialises.
+5. Each retaining receiver whose log grew in step 3 calls `retain()`. This happens for both before either materialises.
 6. Each receiver materialises with the other vault as blob source: the peer first, then the local vault.
 7. Collect conflicts from each receiver's log, for paths it includes, and report each once: for the local vault if it is open there, otherwise for the peer.
 8. Each vault with `autocompact` on compacts (section 8, "Compaction"). Last, so that no step of the run reads a blob that was just dropped. It prints nothing.
