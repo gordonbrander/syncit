@@ -27,7 +27,7 @@ impl Write for HashWriter {
 pub fn hash_file(file: &Path) -> io::Result<String> {
     let mut hasher = HashWriter(Sha256::new());
     io::copy(&mut File::open(file)?, &mut hasher)?;
-    Ok(hex::encode(hasher.0.finalize()))
+    Ok(base16ct::lower::encode_string(&hasher.0.finalize()))
 }
 
 /// Copy `src` to `dest` while hashing. On a wrong hash or an unreadable
@@ -48,7 +48,7 @@ pub(crate) fn copy_verified(src: &Path, dest: &Path, hash: &str) -> io::Result<b
             Err(_) => break false,
         }
     };
-    if read_all && hex::encode(hasher.finalize()) == hash {
+    if read_all && base16ct::lower::encode_string(&hasher.finalize()) == hash {
         return Ok(true);
     }
     fs::remove_file(dest)?;

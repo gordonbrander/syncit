@@ -32,12 +32,12 @@ fn derive(key: &Key, info: &str) -> Key {
 
 /// The value in `format` that tells a right key from a wrong one.
 pub fn check(key: &Key) -> String {
-    hex::encode(derive(key, "syncit check").as_slice())
+    base16ct::lower::encode_string(derive(key, "syncit check").as_slice())
 }
 
 /// The object name of a segment or blob (`kind` is `log` or `blobs`).
 pub fn name(key: &Key, kind: &str, hash: &str) -> String {
-    hex::encode(derive(key, &format!("syncit name {kind} {hash}")).as_slice())
+    base16ct::lower::encode_string(derive(key, &format!("syncit name {kind} {hash}")).as_slice())
 }
 
 /// The key an object named `name` is encrypted with.

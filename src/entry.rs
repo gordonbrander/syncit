@@ -21,8 +21,7 @@ impl Id {
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut text = [0; 64];
-        hex::encode_to_slice(self.0, &mut text).expect("64 is twice 32");
-        f.write_str(std::str::from_utf8(&text).expect("hex is ASCII"))
+        f.write_str(base16ct::lower::encode_str(&self.0, &mut text).expect("64 is twice 32"))
     }
 }
 
@@ -36,18 +35,10 @@ impl FromStr for Id {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Id> {
-        // Stricter than the hex crate, which takes uppercase too.
-        let digit = |c: u8| match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            _ => None,
-        };
-        ensure!(s.len() == 64, "malformed id");
+        // base16ct takes lowercase only, but decodes a short id to fewer bytes.
         let mut id = [0; 32];
-        for (byte, [high, low]) in id.iter_mut().zip(s.as_bytes().as_chunks::<2>().0) {
-            let (high, low) = digit(*high).zip(digit(*low)).context("malformed id")?;
-            *byte = high << 4 | low;
-        }
+        let decoded = base16ct::lower::decode(s, &mut id).ok();
+        ensure!(decoded.is_some_and(|d| d.len() == 32), "malformed id");
         Ok(Id(id))
     }
 }
@@ -89,7 +80,7 @@ pub struct Entry {
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    base16ct::lower::encode_string(&Sha256::digest(bytes))
 }
 
 pub fn is_hash(s: &str) -> bool {
