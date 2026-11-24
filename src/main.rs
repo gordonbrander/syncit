@@ -36,11 +36,7 @@ Files:
   .syncitignore  at the vault root: one name or path per line that is
                  not to be synced; no wildcards
   ~/.config/syncit/credentials.toml
-                 credentials for remote vaults
-
-Environment:
-  SYNCIT_SECRET_KEY  a remote vault's 24-word key, for use where there
-                     is no keychain or no terminal to type it at";
+                 credentials for remote vaults";
 
 const SYNC_NOTES: &str = "\
 Changes made here since the last run are recorded first, then exchanged.
@@ -82,6 +78,9 @@ enum Command {
     /// With a URL, creates an encrypted remote vault at that location, which must be empty,
     /// and prints its 24-word secret key once. The key is the only way to read the remote
     /// from another computer. If SYNCIT_SECRET_KEY is set, that key is used and nothing is printed.
+    ///
+    /// Environment: SYNCIT_SECRET_KEY holds a remote vault's 24-word key, for use where there
+    /// is no keychain or no terminal to type it at. Set it for every command that uses the remote.
     Init {
         /// Directory path (or URL such as s3://bucket/prefix)
         #[arg(default_value = ".")]
@@ -97,7 +96,9 @@ enum Command {
     ///
     /// Makes a new vault in DIR, pulls SRC into it, and remembers SRC as a remote.
     /// A URL needs the remote's 24-word key: clone asks for it at a terminal.
-    /// Where there is no terminal, set SYNCIT_SECRET_KEY.
+    ///
+    /// Environment: SYNCIT_SECRET_KEY holds a remote vault's 24-word key, for use where there
+    /// is no keychain or no terminal to type it at. Set it for every command that uses the remote.
     Clone {
         /// Vault or URL
         ///
@@ -342,7 +343,10 @@ enum RemoteArg {
     /// Remember a vault by nickname (URL or vault directory)
     ///
     /// A URL needs the remote's 24-word key. It is asked for at a terminal the first time,
-    /// then kept in the system keychain. Where there is no terminal, set SYNCIT_SECRET_KEY.
+    /// then kept in the system keychain.
+    ///
+    /// Environment: SYNCIT_SECRET_KEY holds a remote vault's 24-word key, for use where there
+    /// is no keychain or no terminal to type it at. Set it for every command that uses the remote.
     Add {
         /// A vault directory, or a remote vault's URL
         location: String,

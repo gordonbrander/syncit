@@ -19,7 +19,7 @@ syncit syncs folders with each other. This skill covers how to run it for a user
 The CLI describes itself. Before using a command for the first time in a session, read its help:
 
 ```sh
-syncit --help            # commands, vault forms, output letters, exit codes, files, environment
+syncit --help            # commands, vault forms, output letters, exit codes, files
 syncit <command> --help  # arguments, what it changes, when it refuses
 ```
 
