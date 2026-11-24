@@ -371,11 +371,11 @@ pub fn bar(shown: bool) -> ProgressBar {
 pub struct Progress(ProgressBar);
 
 impl Progress {
-    pub fn new(ctx: &Context, label: &'static str, total: usize) -> Progress {
-        ctx.bar.set_length(total as u64);
-        ctx.bar.set_message(label);
-        ctx.bar.reset();
-        Progress(ctx.bar.clone())
+    pub fn new(bar: &ProgressBar, label: &'static str, total: usize) -> Progress {
+        bar.set_length(total as u64);
+        bar.set_message(label);
+        bar.reset();
+        Progress(bar.clone())
     }
 
     /// One more done.
@@ -434,7 +434,7 @@ mod tests {
                 bar: bar(shown),
                 config_dir: None,
             };
-            let progress = Progress::new(&ctx, "Scanning", 3);
+            let progress = Progress::new(&ctx.bar, "Scanning", 3);
             progress.tick();
             progress.tick();
             assert_eq!(progress.0.position(), 2);

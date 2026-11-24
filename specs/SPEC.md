@@ -714,7 +714,7 @@ How it is built:
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
 - `print_stdout(value, ctx)` and `print_stderr(value, ctx)` print any value that has both forms, in the form `ctx.json` picks, above the progress bar if one is up.
 - `Context` holds the process-wide settings (`json`, and `dry_run` and `no_remove` of section 10) and the progress bar, and is passed to everything that can print or write.
-- `Context` holds the one progress bar of the process (the `indicatif` crate), made by `bar(shown)`: `main` shows it unless `--json`, tests do not. `Progress::new(ctx, label, total)` starts a loop on it, `tick()` counts one, and dropping it erases the bar and leaves it idle.
+- `Context` holds the one progress bar of the process (the `indicatif` crate), made by `bar(shown)`: `main` shows it unless `--json`, tests do not. `Progress::new(&ctx.bar, label, total)` starts a loop on it, `tick()` counts one, and dropping it erases the bar and leaves it idle.
 - What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages
