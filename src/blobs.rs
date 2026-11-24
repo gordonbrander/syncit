@@ -1,7 +1,7 @@
 //! Blobs: file contents addressed by SHA-256, and where to find them.
 
 use crate::entry::sha256;
-use crate::output::{Options, Progress};
+use crate::output::{Context, Progress};
 use crate::vault::{Vault, unique};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -129,16 +129,16 @@ pub fn available(v: &Vault, peer: Option<&Vault>, hash: &str) -> bool {
 /// vault does not gather the content of files it has chosen not to have. A
 /// vault with a working folder that keeps no history collects nothing, and
 /// a dry run stores nothing. A bare vault's dirstate is derived afresh.
-pub fn retain(opts: &Options, v: &mut Vault, peer: Option<&Vault>) -> Result<()> {
+pub fn retain(ctx: &Context, v: &mut Vault, peer: Option<&Vault>) -> Result<()> {
     let keep = v.log.keep(v.config.keep_history, |path| v.takes(path));
-    if opts.dry_run && v.bare {
+    if ctx.dry_run && v.bare {
         let mut sending = v.storage.missing(&keep);
         sending.retain(|hash| available(v, peer, hash));
         v.traffic.borrow_mut().sent_files.extend(sending);
-    } else if !opts.dry_run && (v.bare || v.config.keep_history != Some(0)) {
+    } else if !ctx.dry_run && (v.bare || v.config.keep_history != Some(0)) {
         fs::create_dir_all(&v.tmp)?;
         let missing = v.storage.missing(&keep);
-        let progress = Progress::new(opts, "Storing", missing.len());
+        let progress = Progress::new(ctx, "Storing", missing.len());
         for hash in &missing {
             progress.tick();
             let tmp = v.tmp.join(unique());
@@ -151,7 +151,7 @@ pub fn retain(opts: &Options, v: &mut Vault, peer: Option<&Vault>) -> Result<()>
         }
     }
     if v.bare {
-        match opts.dry_run {
+        match ctx.dry_run {
             true => v.derive(|v, hash| v.storage.has_blob(hash) || available(v, peer, hash)),
             false => v.derive(|v, hash| v.storage.has_blob(hash)),
         }
@@ -164,7 +164,7 @@ pub fn retain(opts: &Options, v: &mut Vault, peer: Option<&Vault>) -> Result<()>
 /// version is never among them: a file removed with `drop` may have its only
 /// copy here. The log is not touched. Returns how many were removed and
 /// their bytes; a dry run removes nothing and returns the same.
-pub fn compact(opts: &Options, v: &Vault) -> Result<(usize, u64)> {
+pub fn compact(ctx: &Context, v: &Vault) -> Result<(usize, u64)> {
     let keep = v.log.keep(v.config.keep_history, |_| true);
-    v.storage.drop_blobs_except(&keep, opts.dry_run)
+    v.storage.drop_blobs_except(&keep, ctx.dry_run)
 }

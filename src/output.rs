@@ -6,9 +6,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::fmt::{self, Display};
 
-/// Settings for the whole process, passed to everything.
+/// What everything that prints or writes is passed: the settings of the
+/// whole process, and its progress bar.
 #[derive(Clone)]
-pub struct Options {
+pub struct Context {
     /// Print JSON Lines instead of text.
     pub json: bool,
     /// Run in full but write nothing to either vault.
@@ -350,7 +351,7 @@ fn line<T: Display + Serialize>(value: &T, json: bool) -> String {
     }
 }
 
-/// The bar for `Options`. Shown, it is drawn on stderr when that is a
+/// The bar for `Context`. Shown, it is drawn on stderr when that is a
 /// terminal: `Scanning [===>  ] 41,200 / 90,112 (2m)`. `main` shows it unless
 /// `--json`; tests do not. It starts idle, drawing nothing.
 pub fn bar(shown: bool) -> ProgressBar {
@@ -370,11 +371,11 @@ pub fn bar(shown: bool) -> ProgressBar {
 pub struct Progress(ProgressBar);
 
 impl Progress {
-    pub fn new(opts: &Options, label: &'static str, total: usize) -> Progress {
-        opts.bar.set_length(total as u64);
-        opts.bar.set_message(label);
-        opts.bar.reset();
-        Progress(opts.bar.clone())
+    pub fn new(ctx: &Context, label: &'static str, total: usize) -> Progress {
+        ctx.bar.set_length(total as u64);
+        ctx.bar.set_message(label);
+        ctx.bar.reset();
+        Progress(ctx.bar.clone())
     }
 
     /// One more done.
@@ -390,32 +391,32 @@ impl Drop for Progress {
 }
 
 /// Results.
-pub fn print_stdout<T: Display + Serialize>(value: &T, opts: &Options) {
-    opts.bar.suspend(|| println!("{}", line(value, opts.json)));
+pub fn print_stdout<T: Display + Serialize>(value: &T, ctx: &Context) {
+    ctx.bar.suspend(|| println!("{}", line(value, ctx.json)));
 }
 
 /// Warnings and errors.
-pub fn print_stderr<T: Display + Serialize>(value: &T, opts: &Options) {
-    opts.bar.suspend(|| eprintln!("{}", line(value, opts.json)));
+pub fn print_stderr<T: Display + Serialize>(value: &T, ctx: &Context) {
+    ctx.bar.suspend(|| eprintln!("{}", line(value, ctx.json)));
 }
 
 /// The lines of `status`, with the paths padded to one width.
 // ponytail: the width is counted in characters, so wide ones (CJK) put the
 // columns out of line; use the unicode-width crate if that matters.
-pub fn print_states(lines: &[State], opts: &Options) {
+pub fn print_states(lines: &[State], ctx: &Context) {
     let width = lines.iter().map(|h| h.shown().chars().count()).max();
     for h in lines {
-        if opts.json {
-            print_stdout(&Message::State(h.clone()), opts);
+        if ctx.json {
+            print_stdout(&Message::State(h.clone()), ctx);
         } else {
-            opts.bar
+            ctx.bar
                 .suspend(|| println!("{}", h.row(width.unwrap_or(0))));
         }
     }
 }
 
-pub fn warn(opts: &Options, message: String) {
-    print_stderr(&Message::Warning { message }, opts);
+pub fn warn(ctx: &Context, message: String) {
+    print_stderr(&Message::Warning { message }, ctx);
 }
 
 #[cfg(test)]
@@ -425,7 +426,7 @@ mod tests {
     #[test]
     fn progress_counts() {
         for shown in [false, true] {
-            let opts = Options {
+            let ctx = Context {
                 json: false,
                 dry_run: false,
                 no_remove: false,
@@ -433,7 +434,7 @@ mod tests {
                 bar: bar(shown),
                 config_dir: None,
             };
-            let progress = Progress::new(&opts, "Scanning", 3);
+            let progress = Progress::new(&ctx, "Scanning", 3);
             progress.tick();
             progress.tick();
             assert_eq!(progress.0.position(), 2);

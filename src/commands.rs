@@ -8,12 +8,12 @@ use crate::entry::valid_path;
 use crate::log::PathState;
 use crate::materialise::{copy_name, materialise, no_symlinked_parent, prune, write_now};
 use crate::output::{
-    Event, Message, Options, State, Summary, Version, print_states, print_stdout, warn,
+    Context, Event, Message, State, Summary, Version, print_states, print_stdout, warn,
 };
 use crate::scan::{deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
 use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -43,7 +43,7 @@ fn create(dir: &Path, include: Vec<String>) -> Result<Config> {
     Ok(config)
 }
 
-pub fn init(opts: &Options, dir: &Path) -> Result<()> {
+pub fn init(ctx: &Context, dir: &Path) -> Result<()> {
     ensure!(
         !dir.join(".syncit").exists(),
         "{} is already a vault",
@@ -55,7 +55,7 @@ pub fn init(opts: &Options, dir: &Path) -> Result<()> {
         resolve_path(dir)?.display(),
         config.nickname
     );
-    print_stdout(&Message::Info { message }, opts);
+    print_stdout(&Message::Info { message }, ctx);
     Ok(())
 }
 
@@ -69,7 +69,7 @@ fn no_remote() -> anyhow::Error {
 /// the phrase it printed, if it generated the key.
 #[cfg(feature = "remote")]
 pub fn init_remote(
-    opts: &Options,
+    ctx: &Context,
     url: &str,
     nickname: Option<String>,
     save_key: bool,
@@ -81,9 +81,9 @@ pub fn init_remote(
         valid_nickname(&nickname),
         "a nickname is 1 to 64 bytes, with no spaces or control characters"
     );
-    let bucket = Bucket::new(url, credentials(opts, url)?)?;
+    let bucket = Bucket::new(url, credentials(ctx, url)?)?;
     ensure!(bucket.is_empty()?, "{url} is not empty");
-    let (key, generated) = match &opts.secret_key {
+    let (key, generated) = match &ctx.secret_key {
         Some(phrase) => (
             keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?,
             false,
@@ -97,7 +97,7 @@ pub fn init_remote(
     };
     bucket.create(&key, &config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
-    print_stdout(&Message::Info { message }, opts);
+    print_stdout(&Message::Info { message }, ctx);
     if !generated {
         return Ok(None);
     }
@@ -106,14 +106,14 @@ pub fn init_remote(
         "Secret key for {url}:\n\n  {}\n\nWrite these words down and keep them safe. They are the only way to\nread this vault from another computer, and they are not shown again.",
         *words
     );
-    print_stdout(&Message::Info { message }, opts);
-    keys::save(opts, url, &key, keys::Source::New, save_key)?;
+    print_stdout(&Message::Info { message }, ctx);
+    keys::save(ctx, url, &key, keys::Source::New, save_key)?;
     Ok(Some(words.to_string()))
 }
 
 #[cfg(not(feature = "remote"))]
 pub fn init_remote(
-    _opts: &Options,
+    _opts: &Context,
     _url: &str,
     _nickname: Option<String>,
     _save_key: bool,
@@ -135,7 +135,7 @@ fn vault_paths(paths: &[String]) -> Result<()> {
 /// a vault's root, and it includes exactly those paths. The source is
 /// remembered in `remotes`, then pulled.
 pub fn clone(
-    opts: &Options,
+    ctx: &Context,
     cwd: &Path,
     src: &Path,
     dir: &Path,
@@ -143,7 +143,7 @@ pub fn clone(
     save_key: bool,
 ) -> Result<Summary> {
     vault_paths(only)?;
-    let local = Vault::open(opts, cwd, true).ok();
+    let local = Vault::open(ctx, cwd, true).ok();
     let src = &resolve(local.as_ref(), src);
     std::mem::drop(local); // it may be the source, which is locked
     let (source, include) = match url(src) {
@@ -174,24 +174,24 @@ pub fn clone(
     create(dir, include)?;
     let location = source.to_str().context("the source is not UTF-8")?;
     let added =
-        Vault::open(opts, dir, true).and_then(|mut v| add(opts, &mut v, location, None, save_key));
+        Vault::open(ctx, dir, true).and_then(|mut v| add(ctx, &mut v, location, None, save_key));
     if let Err(e) = added {
         let _ = fs::remove_dir_all(dir.join(".syncit"));
         return Err(e);
     }
-    run(opts, dir, &source, Mode::Pull)
+    run(ctx, dir, &source, Mode::Pull)
 }
 
-pub fn sync(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
-    run(opts, cwd, peer, Mode::Sync)
+pub fn sync(ctx: &Context, cwd: &Path, peer: &Path) -> Result<Summary> {
+    run(ctx, cwd, peer, Mode::Sync)
 }
 
-pub fn push(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
-    run(opts, cwd, peer, Mode::Push)
+pub fn push(ctx: &Context, cwd: &Path, peer: &Path) -> Result<Summary> {
+    run(ctx, cwd, peer, Mode::Push)
 }
 
-pub fn pull(opts: &Options, cwd: &Path, peer: &Path) -> Result<Summary> {
-    run(opts, cwd, peer, Mode::Pull)
+pub fn pull(ctx: &Context, cwd: &Path, peer: &Path) -> Result<Summary> {
+    run(ctx, cwd, peer, Mode::Pull)
 }
 
 /// Whether the folders are the same or one contains the other. Such vaults
@@ -214,21 +214,21 @@ fn resolve(local: Option<&Vault>, target: &Path) -> PathBuf {
 }
 
 /// Open the vault a target names, for a command run in `local`.
-fn open_target(opts: &Options, local: Option<&Vault>, target: &Path) -> Result<Vault> {
+fn open_target(ctx: &Context, local: Option<&Vault>, target: &Path) -> Result<Vault> {
     match url(target) {
         #[cfg(feature = "remote")]
-        Some(url) => Vault::open_url(opts, url, local),
+        Some(url) => Vault::open_url(ctx, url, local),
         #[cfg(not(feature = "remote"))]
         Some(_) => {
             let _ = local;
             Err(no_remote())
         }
-        None => Vault::open(opts, target, false),
+        None => Vault::open(ctx, target, false),
     }
 }
 
 /// Open another vault for a run with `v`.
-fn other(opts: &Options, v: &mut Vault, target: &Path) -> Result<Vault> {
+fn other(ctx: &Context, v: &mut Vault, target: &Path) -> Result<Vault> {
     let target = &resolve(Some(v), target);
     if url(target).is_none() {
         ensure!(
@@ -241,14 +241,14 @@ fn other(opts: &Options, v: &mut Vault, target: &Path) -> Result<Vault> {
             "cannot sync a vault with itself or with a vault inside it"
         );
     }
-    let mut peer = open_target(opts, Some(v), target)?;
+    let mut peer = open_target(ctx, Some(v), target)?;
     (v.side, peer.side) = ("->", "<-");
     Ok(peer)
 }
 
 /// After a run, one line for each vault that is remote: what was sent to
 /// it and received from it.
-fn report(opts: &Options, vaults: [&Vault; 2]) {
+fn report(ctx: &Context, vaults: [&Vault; 2]) {
     for v in vaults.into_iter().filter(|v| v.bare) {
         let t = v.traffic.borrow();
         let lines = [
@@ -265,48 +265,48 @@ fn report(opts: &Options, vaults: [&Vault; 2]) {
             if files.is_empty() && segments.is_empty() {
                 continue;
             }
-            let verb = if opts.dry_run {
+            let verb = if ctx.dry_run {
                 format!("would {verb}")
             } else {
                 done.into()
             };
             let (f, s) = (files.len(), segments.len());
             let message = format!("{verb} {f} files, {s} segments {to} {}", v.name);
-            print_stdout(&Message::Info { message }, opts);
+            print_stdout(&Message::Info { message }, ctx);
         }
     }
 }
 
 /// A run with a peer (SPEC.md section 10). `a` is the local vault.
-fn run(opts: &Options, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
-    let mut a = Vault::open(opts, cwd, true)?;
-    let mut b = other(opts, &mut a, peer)?;
+fn run(ctx: &Context, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
+    let mut a = Vault::open(ctx, cwd, true)?;
+    let mut b = other(ctx, &mut a, peer)?;
     let mut sum = Summary::default();
-    announce(opts);
-    record(opts, &mut a, Some(&b), &mut sum)?;
-    record(opts, &mut b, Some(&a), &mut sum)?;
-    exchange(opts, &mut a, &mut b, mode, &mut sum)?;
-    autocompact(opts, &a)?;
-    autocompact(opts, &b)?;
-    report(opts, [&a, &b]);
+    announce(ctx);
+    record(ctx, &mut a, Some(&b), &mut sum)?;
+    record(ctx, &mut b, Some(&a), &mut sum)?;
+    exchange(ctx, &mut a, &mut b, mode, &mut sum)?;
+    autocompact(ctx, &a)?;
+    autocompact(ctx, &b)?;
+    report(ctx, [&a, &b]);
     Ok(sum)
 }
 
 /// At the end of a run, drop the stored versions the vault's `keep_history`
 /// no longer covers, if it compacts by itself. After materialise and never
 /// before, so that a run cannot drop a version it is about to read.
-fn autocompact(opts: &Options, v: &Vault) -> Result<()> {
+fn autocompact(ctx: &Context, v: &Vault) -> Result<()> {
     if v.config.autocompact {
-        blobs::compact(opts, v)?;
+        blobs::compact(ctx, v)?;
     }
     Ok(())
 }
 
 /// Say that this is a dry run, if it is.
-fn announce(opts: &Options) {
-    if opts.dry_run {
+fn announce(ctx: &Context) {
+    if ctx.dry_run {
         let message = "dry run: nothing is changed".to_string();
-        print_stdout(&Message::Info { message }, opts);
+        print_stdout(&Message::Info { message }, ctx);
     }
 }
 
@@ -329,7 +329,7 @@ pub fn ignored(from: &Vault, to: &Vault) -> Vec<String> {
 
 /// The part of a run after both vaults are scanned.
 fn exchange(
-    opts: &Options,
+    ctx: &Context,
     a: &mut Vault,
     b: &mut Vault,
     mode: Mode,
@@ -352,7 +352,7 @@ fn exchange(
             names.push(format!("and {} more", tops.len() - 5));
         }
         warn(
-            opts,
+            ctx,
             format!(
                 "{} {verb} {} files ({}); they were not copied",
                 b.name,
@@ -362,35 +362,35 @@ fn exchange(
         );
     }
     if to_b {
-        receive(opts, b, a, sum)?;
+        receive(ctx, b, a, sum)?;
     }
     if to_a {
-        receive(opts, a, b, sum)?;
+        receive(ctx, a, b, sum)?;
     }
-    if opts.no_remove {
+    if ctx.no_remove {
         if to_b {
-            keep(opts, b, a, sum)?;
+            keep(ctx, b, a, sum)?;
         }
         if to_a {
-            keep(opts, a, b, sum)?;
+            keep(ctx, a, b, sum)?;
         }
         // Each receiver takes the other's re-creations, so one run converges.
         // ponytail: a corrupt segment is reported as rejected a second time
         // here; have `receive` remember what it rejected if that matters.
         if to_b {
-            receive(opts, b, a, sum)?;
+            receive(ctx, b, a, sum)?;
         }
         if to_a {
-            receive(opts, a, b, sum)?;
+            receive(ctx, a, b, sum)?;
         }
     }
     // Both retain before either materialises, so that a version is saved
     // before it is replaced.
     if to_b {
-        retain(opts, b, Some(&*a))?;
+        retain(ctx, b, Some(&*a))?;
     }
     if to_a {
-        retain(opts, a, Some(&*b))?;
+        retain(ctx, a, Some(&*b))?;
     }
     // A merge replaces two versions. It is made only if a vault receiving in
     // this run keeps history: its `retain` above then has them, so they can
@@ -398,18 +398,18 @@ fn exchange(
     let keeps = |v: &Vault| v.config.keep_history != Some(0);
     let kept = (to_a && keeps(a)) || (to_b && keeps(b));
     if to_b {
-        materialise(opts, b, Some(a), kept, sum)?;
+        materialise(ctx, b, Some(a), kept, sum)?;
     }
     if to_a {
-        materialise(opts, a, Some(b), kept, sum)?;
+        materialise(ctx, a, Some(b), kept, sum)?;
     }
     // A conflict open in both vaults is reported once, for the local one.
     let mut seen = BTreeSet::new();
     if to_a {
-        conflicts(opts, a, &mut seen);
+        conflicts(ctx, a, &mut seen);
     }
     if to_b {
-        conflicts(opts, b, &mut seen);
+        conflicts(ctx, b, &mut seen);
     }
     sum.conflicts += seen.len();
     Ok(())
@@ -418,7 +418,7 @@ fn exchange(
 /// `--no-remove`: a file here whose path the log says is deleted is kept, and
 /// recorded as re-created, as if the user had put it back. Its row becomes a
 /// deletion record of the tombstones, and the scan writes the entry.
-fn keep(opts: &Options, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result<()> {
+fn keep(ctx: &Context, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result<()> {
     let rows: Vec<String> = v.dirstate.rows.keys().cloned().collect();
     let mut kept = false;
     for path in rows {
@@ -430,34 +430,28 @@ fn keep(opts: &Options, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Resul
         };
         v.dirstate.rows.remove(&path);
         v.dirstate.deleted.insert(path.clone(), heads);
-        v.event(opts, sum, "added", &path, "kept");
+        v.event(ctx, sum, "added", &path, "kept");
         kept = true;
     }
     if kept {
-        record(opts, v, Some(peer), sum)?;
+        record(ctx, v, Some(peer), sum)?;
     }
     Ok(())
 }
 
 /// Scan, then retain blobs for what the scan recorded.
-fn record(opts: &Options, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary) -> Result<()> {
-    let scanned = scan(opts, v, opts.dry_run)?;
+fn record(ctx: &Context, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary) -> Result<()> {
+    let scanned = scan(ctx, v, ctx.dry_run)?;
     sum.recorded += scanned.entries.len();
     for path in &scanned.skipped {
-        v.event(
-            opts,
-            sum,
-            "skipped",
-            path,
-            "changed while it was being read",
-        );
+        v.event(ctx, sum, "skipped", path, "changed while it was being read");
     }
-    retain(opts, v, peer)
+    retain(ctx, v, peer)
 }
 
 /// Take every segment the other vault has and this one lacks. A segment is
 /// validated before it is stored; one that fails is reported and left out.
-pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -> Result<()> {
+pub fn receive(ctx: &Context, v: &mut Vault, from: &Vault, sum: &mut Summary) -> Result<()> {
     let have = v.storage.segment_names()?;
     for name in from.storage.segment_names()? {
         if have.contains(&name) {
@@ -466,7 +460,7 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
         let read = from.storage.read_segment(&name);
         match read.and_then(|bytes| Ok((segment::decode(&name, &bytes)?, bytes))) {
             Ok((segment, bytes)) => {
-                if !opts.dry_run {
+                if !ctx.dry_run {
                     v.storage.write_segment(&name, &bytes)?;
                 }
                 if v.bare {
@@ -482,11 +476,11 @@ pub fn receive(opts: &Options, v: &mut Vault, from: &Vault, sum: &mut Summary) -
                     v.log.insert(id, e, &segment.nickname);
                 }
             }
-            Err(e) => v.event(opts, sum, "rejected", "", &format!("segment {name}: {e:#}")),
+            Err(e) => v.event(ctx, sum, "rejected", "", &format!("segment {name}: {e:#}")),
         }
     }
     // What a dry scan of `from` recorded is in its memory, not in a segment.
-    if opts.dry_run {
+    if ctx.dry_run {
         absorb(v, from);
     }
     Ok(())
@@ -524,7 +518,7 @@ fn conflict_copies(path: &str, state: &PathState) -> Option<String> {
 
 /// Print each open conflict among the paths this vault includes that
 /// is not in `seen`, and add it there.
-fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
+fn conflicts(ctx: &Context, v: &Vault, seen: &mut BTreeSet<String>) {
     for path in v.log.paths.keys() {
         if !v.config.includes(path) {
             continue;
@@ -541,15 +535,15 @@ fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
             message,
             side: v.side,
         };
-        print_stdout(&conflict, opts);
+        print_stdout(&conflict, ctx);
     }
 }
 
-pub fn snapshot(opts: &Options, cwd: &Path) -> Result<Summary> {
-    let mut v = Vault::open(opts, cwd, true)?;
+pub fn snapshot(ctx: &Context, cwd: &Path) -> Result<Summary> {
+    let mut v = Vault::open(ctx, cwd, true)?;
     let mut sum = Summary::default();
-    record(opts, &mut v, None, &mut sum)?;
-    autocompact(opts, &v)?;
+    record(ctx, &mut v, None, &mut sum)?;
+    autocompact(ctx, &v)?;
     Ok(sum)
 }
 
@@ -570,15 +564,15 @@ fn versions(n: usize) -> String {
 /// Drop from `.syncit/blobs/` the versions older than the vault's
 /// `keep_history` keeps. The log stays whole: only content goes. Returns how
 /// many were dropped, or with `--dry-run` would be, and their bytes.
-pub fn compact(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<(usize, u64)> {
-    let v = open_vault(opts, cwd, vault)?;
-    announce(opts);
-    let (n, bytes) = blobs::compact(opts, &v)?;
+pub fn compact(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<(usize, u64)> {
+    let v = open_vault(ctx, cwd, vault)?;
+    announce(ctx);
+    let (n, bytes) = blobs::compact(ctx, &v)?;
     let message = match n {
         0 => "nothing to drop".to_string(),
         _ => format!("dropped {} ({})", versions(n), size(bytes)),
     };
-    print_stdout(&Message::Info { message }, opts);
+    print_stdout(&Message::Info { message }, ctx);
     Ok((n, bytes))
 }
 
@@ -675,31 +669,31 @@ fn collapse(dir: &str, files: &[State], top: bool, out: &mut Vec<State>) {
 /// that need something, unless `all`. Folders in one state are one line.
 /// Writes nothing. Returns what it printed.
 pub fn status(
-    opts: &Options,
+    ctx: &Context,
     cwd: &Path,
     paths: &[PathBuf],
     peer: Option<&Path>,
     all: bool,
 ) -> Result<Vec<State>> {
-    let opts = &Options {
+    let ctx = &Context {
         dry_run: true,
         no_remove: false,
-        ..opts.clone()
+        ..ctx.clone()
     };
-    let mut v = Vault::open(opts, cwd, true)?;
+    let mut v = Vault::open(ctx, cwd, true)?;
     let mut scopes = prefixes(&v.root, cwd, paths)
         .context("paths are in this vault; to compare with another, add `--vs <vault>`")?;
     if scopes.is_empty() {
         scopes.push(String::new());
     }
-    let mut peer = peer.map(|path| other(opts, &mut v, path)).transpose()?;
+    let mut peer = peer.map(|path| other(ctx, &mut v, path)).transpose()?;
     // Dry scans, which say what no scan has recorded; then one log for both
     // vaults, so that each is compared with the same winner.
-    let scanned = scan(opts, &mut v, true)?;
+    let scanned = scan(ctx, &mut v, true)?;
     let ours: BTreeMap<_, _> = scanned.changes.into_iter().collect();
     let mut theirs = BTreeMap::new();
     if let Some(peer) = &mut peer {
-        theirs = scan(opts, peer, true)?.changes.into_iter().collect();
+        theirs = scan(ctx, peer, true)?.changes.into_iter().collect();
         absorb(&mut v, peer);
     }
     let mut files: Vec<State> = vec![];
@@ -776,7 +770,7 @@ pub fn status(
     for line in &mut found {
         (line.ours, line.theirs) = (word(line.ours), line.theirs.map(word));
     }
-    print_states(&found, opts);
+    print_states(&found, ctx);
     Ok(found)
 }
 
@@ -797,7 +791,7 @@ fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
 /// Add paths of another vault to this one. Each path lies inside that vault,
 /// whose root is found by walking up, as `clone` does. The paths become
 /// included here, and a pull from that vault fetches them.
-pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
+pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
     let first = paths.first().context("no path given")?;
     let source = find_root(&cwd.join(first))?;
     for path in paths {
@@ -809,7 +803,7 @@ pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
         );
     }
     {
-        let mut v = Vault::open(opts, cwd, true)?;
+        let mut v = Vault::open(ctx, cwd, true)?;
         ensure!(
             !nested(&source, &v.root),
             "{} is in this vault: give a path in the vault to get it from",
@@ -817,7 +811,7 @@ pub fn get(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
         );
         include(&mut v, prefixes(&source, cwd, paths)?)?;
     }
-    run(opts, cwd, &source, Mode::Pull)
+    run(ctx, cwd, &source, Mode::Pull)
 }
 
 /// Include `prefixes` in the vault, and save its config.
@@ -832,11 +826,11 @@ fn include(v: &mut Vault, prefixes: Vec<String>) -> Result<()> {
 
 /// `get --from`: add paths of the vault `from`, a target, each given from
 /// that vault's root. This is the form that reaches a remote vault.
-pub fn get_from(opts: &Options, cwd: &Path, paths: &[String], from: &Path) -> Result<Summary> {
+pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Result<Summary> {
     ensure!(!paths.is_empty(), "no path given");
     vault_paths(paths)?;
     {
-        let mut v = Vault::open(opts, cwd, true)?;
+        let mut v = Vault::open(ctx, cwd, true)?;
         let target = resolve(Some(&v), from);
         if url(&target).is_none() {
             ensure!(
@@ -846,35 +840,35 @@ pub fn get_from(opts: &Options, cwd: &Path, paths: &[String], from: &Path) -> Re
         }
         include(&mut v, paths.to_vec())?;
     }
-    run(opts, cwd, from, Mode::Pull)
+    run(ctx, cwd, from, Mode::Pull)
 }
 
 /// The vault a command acts on: the one `vault` names if given (`--vault`),
 /// otherwise the one here. A remote needs no local vault.
-fn open_vault(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<Vault> {
+fn open_vault(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<Vault> {
     let Some(target) = vault else {
-        return Vault::open(opts, cwd, true);
+        return Vault::open(ctx, cwd, true);
     };
-    let local = Vault::open(opts, cwd, true).ok();
+    let local = Vault::open(ctx, cwd, true).ok();
     let target = resolve(local.as_ref(), target);
     match url(&target) {
-        Some(_) => open_target(opts, local.as_ref(), &target),
+        Some(_) => open_target(ctx, local.as_ref(), &target),
         None => {
             std::mem::drop(local); // it may be the target, which is locked
-            Vault::open(opts, &target, true)
+            Vault::open(ctx, &target, true)
         }
     }
 }
 
 /// List the remotes this vault remembers. Returns them, as printed.
-pub fn remotes(opts: &Options, cwd: &Path) -> Result<Vec<(String, String)>> {
-    let v = Vault::open(opts, cwd, true)?;
+pub fn remotes(ctx: &Context, cwd: &Path) -> Result<Vec<(String, String)>> {
+    let v = Vault::open(ctx, cwd, true)?;
     for (nickname, location) in &v.config.remotes {
         let message = Message::Remote {
             nickname: nickname.clone(),
             location: location.clone(),
         };
-        print_stdout(&message, opts);
+        print_stdout(&message, ctx);
     }
     Ok(v.config.remotes.into_iter().collect())
 }
@@ -882,25 +876,25 @@ pub fn remotes(opts: &Options, cwd: &Path) -> Result<Vec<(String, String)>> {
 /// Remember the vault at `location`, a URL or a path, under `nickname` or its
 /// own nickname. Returns the nickname.
 pub fn remote_add(
-    opts: &Options,
+    ctx: &Context,
     cwd: &Path,
     location: &str,
     nickname: Option<String>,
     save_key: bool,
 ) -> Result<String> {
-    let mut v = Vault::open(opts, cwd, true)?;
-    add(opts, &mut v, location, nickname, save_key)
+    let mut v = Vault::open(ctx, cwd, true)?;
+    add(ctx, &mut v, location, nickname, save_key)
 }
 
 fn add(
-    opts: &Options,
+    ctx: &Context,
     v: &mut Vault,
     location: &str,
     nickname: Option<String>,
     save_key: bool,
 ) -> Result<String> {
     let (location, config, found) = if location.contains("://") {
-        let (config, found) = find_remote(opts, location)?;
+        let (config, found) = find_remote(ctx, location)?;
         (location.to_string(), config, Some(found))
     } else {
         let root = resolve_path(Path::new(location))?;
@@ -922,24 +916,24 @@ fn add(
         "{nickname} is already a remote here: pass --nickname <nickname>"
     );
     if let Some(found) = found {
-        save_found(opts, &location, found, save_key)?;
+        save_found(ctx, &location, found, save_key)?;
     }
     v.config.remotes.insert(nickname.clone(), location.clone());
     v.storage.save_config(&v.config)?;
     let message = format!("remote {nickname}: {location}");
-    print_stdout(&Message::Info { message }, opts);
+    print_stdout(&Message::Info { message }, ctx);
     Ok(nickname)
 }
 
 /// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
 /// other vaults on this machine may use them.
-pub fn remote_remove(opts: &Options, cwd: &Path, nickname: &str) -> Result<()> {
-    let mut v = Vault::open(opts, cwd, true)?;
+pub fn remote_remove(ctx: &Context, cwd: &Path, nickname: &str) -> Result<()> {
+    let mut v = Vault::open(ctx, cwd, true)?;
     let location = v.config.remotes.remove(nickname);
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
     v.storage.save_config(&v.config)?;
     let message = format!("removed remote {nickname}: {location}");
-    print_stdout(&Message::Info { message }, opts);
+    print_stdout(&Message::Info { message }, ctx);
     Ok(())
 }
 
@@ -952,16 +946,16 @@ type Found = ();
 /// The config of the remote at `url`, and its key: found (store.md,
 /// section 8), or else asked for on a terminal.
 #[cfg(feature = "remote")]
-fn find_remote(opts: &Options, url: &str) -> Result<(Config, Found)> {
+fn find_remote(ctx: &Context, url: &str) -> Result<(Config, Found)> {
     use crate::keys::{self, Source};
     use std::io::IsTerminal;
-    if let Some(phrase) = &opts.secret_key {
+    if let Some(phrase) = &ctx.secret_key {
         keys::parse_phrase(phrase).context("SYNCIT_SECRET_KEY")?;
     }
-    let settings = crate::remote::credentials(opts, url)?;
+    let settings = crate::remote::credentials(ctx, url)?;
     let bucket = crate::remote::Bucket::new(url, settings)?;
     let check = bucket.check()?;
-    let found = match keys::find(opts, url, &check) {
+    let found = match keys::find(ctx, url, &check) {
         Ok(found) => found,
         Err(e) if !std::io::stdin().is_terminal() => return Err(e),
         Err(_) => (keys::prompt(url, &check)?, Source::New),
@@ -970,30 +964,30 @@ fn find_remote(opts: &Options, url: &str) -> Result<(Config, Found)> {
 }
 
 #[cfg(not(feature = "remote"))]
-fn find_remote(_opts: &Options, _url: &str) -> Result<(Config, Found)> {
+fn find_remote(_opts: &Context, _url: &str) -> Result<(Config, Found)> {
     Err(no_remote())
 }
 
 #[cfg(feature = "remote")]
-fn save_found(opts: &Options, url: &str, found: Found, save: bool) -> Result<()> {
-    crate::keys::save(opts, url, &found.0, found.1, save)
+fn save_found(ctx: &Context, url: &str, found: Found, save: bool) -> Result<()> {
+    crate::keys::save(ctx, url, &found.0, found.1, save)
 }
 
 #[cfg(not(feature = "remote"))]
-fn save_found(_: &Options, _: &str, _: Found, _: bool) -> Result<()> {
+fn save_found(_: &Context, _: &str, _: Found, _: bool) -> Result<()> {
     Ok(())
 }
 
 /// Move files to another vault: push to it, confirm each file arrived, then
 /// exclude them here. Nothing is removed unless every file is confirmed.
-pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> Result<Summary> {
-    let mut v = Vault::open(opts, cwd, true)?;
+pub fn move_to(ctx: &Context, cwd: &Path, paths: &[PathBuf], target: &Path) -> Result<Summary> {
+    let mut v = Vault::open(ctx, cwd, true)?;
     let prefixes = prefixes(&v.root, cwd, paths)?;
-    let mut t = other(opts, &mut v, target)?;
+    let mut t = other(ctx, &mut v, target)?;
     let mut sum = Summary::default();
-    announce(opts);
-    record(opts, &mut v, Some(&t), &mut sum)?;
-    record(opts, &mut t, Some(&v), &mut sum)?;
+    announce(ctx);
+    record(ctx, &mut v, Some(&t), &mut sum)?;
+    record(ctx, &mut t, Some(&v), &mut sum)?;
 
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
     let present: Vec<String> = v.dirstate.rows.keys().filter(under).cloned().collect();
@@ -1013,7 +1007,7 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
         );
     }
 
-    exchange(opts, &mut v, &mut t, Mode::Push, &mut sum)?;
+    exchange(ctx, &mut v, &mut t, Mode::Push, &mut sum)?;
     let arrived = |p: &&String| {
         t.dirstate.rows.get(*p).map(|row| &row.hash) == Some(&v.dirstate.rows[*p].hash)
     };
@@ -1035,8 +1029,8 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
         missing.join(", ")
     );
 
-    remove_here(opts, &mut v, prefixes, present, "moved", &mut sum)?;
-    report(opts, [&v, &t]);
+    remove_here(ctx, &mut v, prefixes, present, "moved", &mut sum)?;
+    report(ctx, [&v, &t]);
     Ok(sum)
 }
 
@@ -1044,22 +1038,22 @@ pub fn move_to(opts: &Options, cwd: &Path, paths: &[PathBuf], target: &Path) -> 
 /// and remove their files from this vault only. Unless `force`, every file's
 /// content must be in this vault's history or in the vault named by `check`.
 pub fn drop(
-    opts: &Options,
+    ctx: &Context,
     cwd: &Path,
     paths: &[PathBuf],
     check: Option<&Path>,
     force: bool,
 ) -> Result<Summary> {
-    let mut v = Vault::open(opts, cwd, true)?;
+    let mut v = Vault::open(ctx, cwd, true)?;
     let prefixes = prefixes(&v.root, cwd, paths)?;
-    let mut check = check.map(|path| other(opts, &mut v, path)).transpose()?;
+    let mut check = check.map(|path| other(ctx, &mut v, path)).transpose()?;
     let mut sum = Summary::default();
-    announce(opts);
+    announce(ctx);
     // Unrecorded changes are recorded before anything is removed, and the
     // checked vault is scanned so that its rows say what it has now.
-    record(opts, &mut v, check.as_ref(), &mut sum)?;
+    record(ctx, &mut v, check.as_ref(), &mut sum)?;
     if let Some(c) = &mut check {
-        record(opts, c, Some(&v), &mut sum)?;
+        record(ctx, c, Some(&v), &mut sum)?;
     }
 
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
@@ -1087,14 +1081,14 @@ pub fn drop(
             sole.join(", ")
         );
     }
-    remove_here(opts, &mut v, prefixes, present, "dropped", &mut sum)?;
+    remove_here(ctx, &mut v, prefixes, present, "dropped", &mut sum)?;
     Ok(sum)
 }
 
 /// Exclude `prefixes` and remove the `present` files under them from this
 /// vault only, reporting each as `kind`. No deletion is recorded.
 fn remove_here(
-    opts: &Options,
+    ctx: &Context,
     v: &mut Vault,
     prefixes: Vec<String>,
     present: Vec<String>,
@@ -1106,7 +1100,7 @@ fn remove_here(
         v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
         v.config.exclude.push(prefix);
     }
-    if !opts.dry_run {
+    if !ctx.dry_run {
         v.storage.save_config(&v.config)?;
     }
     // Rows go before files: a file with no row gets one again at the next
@@ -1115,20 +1109,20 @@ fn remove_here(
         .into_iter()
         .filter_map(|path| v.dirstate.rows.remove_entry(&path))
         .collect();
-    if !opts.dry_run {
+    if !ctx.dry_run {
         v.dirstate.save(&v.root)?;
     }
     for (path, row) in rows {
         let file = v.root.join(&path);
         if !v.dirstate.matches(&row, &file) {
-            v.event(opts, sum, "skipped", &path, "changed since it was scanned");
+            v.event(ctx, sum, "skipped", &path, "changed since it was scanned");
             continue;
         }
-        if !opts.dry_run {
+        if !ctx.dry_run {
             fs::remove_file(&file)?;
             prune(&v.root, &file);
         }
-        v.event(opts, sum, kind, &path, "");
+        v.event(ctx, sum, kind, &path, "");
     }
     Ok(())
 }
@@ -1138,14 +1132,14 @@ fn remove_here(
 /// source with no name of its own (`.`) lands as its contents. A file the
 /// vault lacks is added, one that differs is replaced, and nothing is
 /// deleted. The copies are not recorded: they are edits for the next scan.
-pub fn cp(opts: &Options, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Result<Summary> {
+pub fn cp(ctx: &Context, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Result<Summary> {
     let dest = resolve_path(&cwd.join(dest))?;
-    let mut v = Vault::open(opts, &dest, true)?;
+    let mut v = Vault::open(ctx, &dest, true)?;
     let into = relative(&v.root, &dest)?;
     let mut sum = Summary::default();
-    announce(opts);
+    announce(ctx);
     // What is about to be replaced is recorded first, as `restore` does.
-    record(opts, &mut v, None, &mut sum)?;
+    record(ctx, &mut v, None, &mut sum)?;
 
     let (mut files, mut odd, mut ignored) = (vec![], 0, 0);
     for src in sources {
@@ -1175,7 +1169,7 @@ pub fn cp(opts: &Options, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Resul
             Some(theirs) if theirs == ours => continue,
             Some(_) => "updated",
         };
-        if !opts.dry_run {
+        if !ctx.dry_run {
             no_symlinked_parent(&v, &path)?;
             let dir = file.parent().context("no parent folder")?;
             fs::create_dir_all(dir)?;
@@ -1186,18 +1180,18 @@ pub fn cp(opts: &Options, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Resul
             File::open(&tmp)?.set_modified(SystemTime::now())?;
             fs::rename(&tmp, &file).with_context(|| format!("cannot write {}", file.display()))?;
         }
-        v.event(opts, &mut sum, kind, &path, "");
+        v.event(ctx, &mut sum, kind, &path, "");
     }
     if odd > 0 {
         warn(
-            opts,
+            ctx,
             format!("skipped {odd} symbolic links or special files"),
         );
     }
     if ignored > 0 {
         let root = v.root.display();
         warn(
-            opts,
+            ctx,
             format!("{root} ignores {ignored} files; they were not copied"),
         );
     }
@@ -1248,8 +1242,8 @@ fn collect(
 /// Which vaults recorded the current version of each file under `paths`, or
 /// of every file if there are none. Reads the log only: a change no scan has
 /// recorded is nobody's yet. Returns what it printed, as (path, nicknames).
-pub fn blame(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(String, Vec<String>)>> {
-    let v = Vault::open(opts, cwd, true)?;
+pub fn blame(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(String, Vec<String>)>> {
+    let v = Vault::open(ctx, cwd, true)?;
     let mut prefixes = prefixes(&v.root, cwd, paths)?;
     if prefixes.is_empty() {
         prefixes.push(String::new());
@@ -1270,7 +1264,7 @@ pub fn blame(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(Strin
             path: path.clone(),
             nicknames: nicknames.clone(),
         };
-        print_stdout(&blame, opts);
+        print_stdout(&blame, ctx);
         found.push((path.clone(), nicknames));
     }
     Ok(found)
@@ -1279,8 +1273,8 @@ pub fn blame(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(Strin
 /// The recorded history of each file under `paths`, or of every file if
 /// there are none: per path, newest first by mtime. Reads the log only.
 /// Returns what it printed.
-pub fn log(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>> {
-    let v = Vault::open(opts, cwd, true)?;
+pub fn log(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>> {
+    let v = Vault::open(ctx, cwd, true)?;
     let mut prefixes = prefixes(&v.root, cwd, paths)?;
     if prefixes.is_empty() {
         prefixes.push(String::new());
@@ -1306,7 +1300,7 @@ pub fn log(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>
                 current: winner.as_ref() == Some(id),
                 available: e.hash.as_ref().is_some_and(|h| available(&v, None, h)),
             };
-            print_stdout(&Message::Version(version.clone()), opts);
+            print_stdout(&Message::Version(version.clone()), ctx);
             found.push(version);
         }
     }
@@ -1321,17 +1315,17 @@ pub fn log(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>
 /// folder is scanned first so that no unrecorded edit is lost, and again
 /// afterwards so that the restored version is recorded like any other edit.
 pub fn restore(
-    opts: &Options,
+    ctx: &Context,
     cwd: &Path,
     path: &Path,
     hash: &str,
     in_place: bool,
 ) -> Result<String> {
-    let mut v = Vault::open(opts, cwd, true)?;
+    let mut v = Vault::open(ctx, cwd, true)?;
     let p = relative(&v.root, &resolve_path(&cwd.join(path))?)?;
     let mut sum = Summary::default();
     if in_place {
-        record(opts, &mut v, None, &mut sum)?;
+        record(ctx, &mut v, None, &mut sum)?;
     }
     let versions = v.log.valid(&p).into_iter();
     let hashes: BTreeSet<String> = versions
@@ -1352,7 +1346,7 @@ pub fn restore(
     };
     let already = |what: &str| {
         let message = format!("{dest} {what}");
-        print_stdout(&Message::Info { message }, opts);
+        print_stdout(&Message::Info { message }, ctx);
     };
     if in_place {
         if present.as_ref() == Some(&h) {
@@ -1391,14 +1385,14 @@ pub fn restore(
         "the content of that version is not in this vault; see `syncit config keep-history`"
     );
     if in_place {
-        record(opts, &mut v, None, &mut sum)?;
+        record(ctx, &mut v, None, &mut sum)?;
     }
     let kind = match (in_place, present) {
         (false, _) => "copied",
         (true, Some(_)) => "updated",
         (true, None) => "added",
     };
-    v.event(opts, &mut sum, kind, &dest, "");
+    v.event(ctx, &mut sum, kind, &dest, "");
     Ok(dest)
 }
 
@@ -1413,12 +1407,12 @@ pub enum Setting {
 /// Print this vault's settings, after changing one if asked. Returns the
 /// config as it now is.
 pub fn config(
-    opts: &Options,
+    ctx: &Context,
     cwd: &Path,
     vault: Option<&Path>,
     change: Option<Setting>,
 ) -> Result<Config> {
-    let mut v = open_vault(opts, cwd, vault)?;
+    let mut v = open_vault(ctx, cwd, vault)?;
     let changed = change.is_some();
     match change {
         Some(Setting::KeepHistory(depth)) => v.config.keep_history = depth,
@@ -1444,7 +1438,7 @@ pub fn config(
         ("nickname", v.config.nickname.clone()),
     ];
     for (name, value) in settings {
-        print_stdout(&Message::Setting { name, value }, opts);
+        print_stdout(&Message::Setting { name, value }, ctx);
     }
     // Say what a change is about to cost, at the moment it is made.
     let keep = v.log.keep(v.config.keep_history, |_| true);
@@ -1458,7 +1452,7 @@ pub fn config(
             "keep-history no longer covers {} stored here; {by} what it does not cover",
             versions(beyond)
         );
-        print_stdout(&Message::Info { message }, opts);
+        print_stdout(&Message::Info { message }, ctx);
     }
     Ok(v.config)
 }

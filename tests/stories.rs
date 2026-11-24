@@ -7,9 +7,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use syncit::commands::{self as cmd, Setting};
-use syncit::output::{Event, Options, State, Summary};
+use syncit::output::{Context, Event, State, Summary};
 
-static O: LazyLock<Options> = LazyLock::new(|| Options {
+static O: LazyLock<Context> = LazyLock::new(|| Context {
     json: false,
     dry_run: false,
     no_remove: false,
@@ -598,7 +598,7 @@ fn history_depth() {
 
 #[test]
 fn compact_command() {
-    let dry = &Options {
+    let dry = &Context {
         json: false,
         dry_run: true,
         no_remove: false,
@@ -717,7 +717,7 @@ fn edit_beats_delete() {
 
 #[test]
 fn no_remove_keeps_deleted() {
-    let keep = |dry_run| Options {
+    let keep = |dry_run| Context {
         json: false,
         dry_run,
         no_remove: true,
@@ -1892,7 +1892,7 @@ fn all(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
 
 #[test]
 fn dry_run_matches_real_run() {
-    let dry = &Options {
+    let dry = &Context {
         json: false,
         dry_run: true,
         no_remove: false,
@@ -1900,7 +1900,7 @@ fn dry_run_matches_real_run() {
         bar: syncit::output::bar(false),
         config_dir: None,
     };
-    type Run = fn(&Options, &Path, &Path) -> anyhow::Result<Summary>;
+    type Run = fn(&Context, &Path, &Path) -> anyhow::Result<Summary>;
     for run in [cmd::sync as Run, cmd::push, cmd::pull] {
         let files = [
             ("notes.txt", "base"),
@@ -1967,7 +1967,7 @@ fn dry_run_matches_real_run() {
 
 #[test]
 fn cp_from_plain_folder() {
-    let dry = &Options {
+    let dry = &Context {
         json: false,
         dry_run: true,
         no_remove: false,
@@ -2046,9 +2046,9 @@ mod remote {
     use syncit::remote::{Bucket, Remote};
     use syncit::storage::Storage;
 
-    /// Options with a phrase. Every remote test starts here, so that the
+    /// Context with a phrase. Every remote test starts here, so that the
     /// keychain is the mock one, never the machine's.
-    fn opts(phrase: Option<&str>) -> Options {
+    fn ctx(phrase: Option<&str>) -> Context {
         #[cfg(feature = "keychain")]
         {
             static MOCK: std::sync::Once = std::sync::Once::new();
@@ -2056,7 +2056,7 @@ mod remote {
                 keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap())
             });
         }
-        Options {
+        Context {
             json: false,
             dry_run: false,
             no_remove: false,
@@ -2081,7 +2081,7 @@ mod remote {
     fn init_remote() {
         let tmp = TempDir::new().unwrap();
         let r = place(&tmp, "r");
-        let words = cmd::init_remote(&opts(None), &url(&r), None, false).unwrap();
+        let words = cmd::init_remote(&ctx(None), &url(&r), None, false).unwrap();
         let words = words.expect("a generated key is printed");
         assert_eq!(words.split(' ').count(), 24);
         assert_eq!(
@@ -2110,7 +2110,7 @@ mod remote {
         );
 
         // Given a key, it prints none.
-        let given = opts(Some(&words));
+        let given = ctx(Some(&words));
         let s = place(&tmp, "s");
         let printed = cmd::init_remote(&given, &url(&s), Some("box".into()), false);
         assert_eq!(printed.unwrap(), None);
@@ -2140,9 +2140,9 @@ mod remote {
         keys::phrase(&zeroize::Zeroizing::new([7u8; 32])).to_string()
     }
 
-    /// Options with the test phrase.
-    fn o() -> Options {
-        opts(Some(&phrase()))
+    /// Context with the test phrase.
+    fn o() -> Context {
+        ctx(Some(&phrase()))
     }
 
     /// A remote vault in the folder `name` of `tmp`: the folder, and the URL
@@ -2207,7 +2207,7 @@ mod remote {
             .unwrap()
             .as_nanos();
         let url = format!("{}/syncit-test-{unique}", base.trim_end_matches('/'));
-        let o = Options {
+        let o = Context {
             bar: syncit::output::bar(false),
             config_dir: syncit::output::config_dir(),
             ..o()
@@ -2217,7 +2217,7 @@ mod remote {
     }
 
     /// Story C.2 through the remote vault `origin`, made in or for `tmp`.
-    fn story_c2(o: &Options, tmp: TempDir, origin: &Path) {
+    fn story_c2(o: &Context, tmp: TempDir, origin: &Path) {
         let a = place(&tmp, "a");
         for (path, content) in [("notes.txt", "from a"), ("d/shared.txt", "base")] {
             put(&a, path, content, 0);
@@ -2413,7 +2413,7 @@ mod remote {
     #[test]
     fn dry_run_remote() {
         let o = &o();
-        let dry = &Options {
+        let dry = &Context {
             dry_run: true,
             ..o.clone()
         };
@@ -2538,9 +2538,9 @@ mod remote {
         // A wrong phrase is refused, and the config is unchanged.
         let before = Config::load(&a).unwrap();
         let other = keys::phrase(&zeroize::Zeroizing::new([8u8; 32])).to_string();
-        let err = cmd::remote_add(&opts(Some(&other)), &a, url, Some("x".into()), false);
+        let err = cmd::remote_add(&ctx(Some(&other)), &a, url, Some("x".into()), false);
         assert!(err.unwrap_err().to_string().starts_with("no key for "));
-        let err = cmd::remote_add(&opts(Some("not words")), &a, url, Some("x".into()), false);
+        let err = cmd::remote_add(&ctx(Some("not words")), &a, url, Some("x".into()), false);
         assert!(err.is_err());
         assert_eq!(Config::load(&a).unwrap(), before);
         // Not a vault.
@@ -2553,10 +2553,10 @@ mod remote {
         // clone, run in a vault, finds it too.
         let (_s, second) = remote(&tmp, "s");
         let second = second.to_str().unwrap();
-        let saved = &Options {
+        let saved = &Context {
             bar: syncit::output::bar(false),
             config_dir: Some(tmp.path().join("config")),
-            ..opts(None)
+            ..ctx(None)
         };
         keys::add_saved(saved, second, &phrase()).unwrap();
         let added = cmd::remote_add(saved, &a, second, Some("two".into()), false);

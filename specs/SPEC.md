@@ -123,7 +123,7 @@ Suggested layout. Merge or split if it reads better, but keep the pure parts fre
 | `materialise` | the per-path procedure, merging text, conflict copies, setting base | yes |
 | `vault` | `Vault` (root, config, dirstate, log, lock), finding the root | yes |
 | `commands` | one function per command; a command that runs a sync returns a `Summary` | yes |
-| `output` | `Options`, the `Message` types with their text and JSON forms, `print_stdout`, `print_stderr`, `Progress`, `Summary` | no |
+| `output` | `Context`, the `Message` types with their text and JSON forms, `print_stdout`, `print_stderr`, `Progress`, `Summary` | no |
 | `main` | argument parsing, printing the `Summary` and errors, exit code | yes |
 
 Remote vaults add `storage`, `remote`, `crypt` and `keys`, and put every read and write of a vault's log, blobs and config behind one trait (`store.md`, sections 3 and 4).
@@ -502,7 +502,7 @@ Scanning precedes exchange, so entries are written from what each vault had befo
 
 ### Dry run
 
-`sync`, `push`, `pull`, `move`, `drop` and `cp` take `--dry-run`. It is the same procedure with every write to either vault left out; the vault values in memory are updated as usual, so each step sees what the real run would see and prints the same lines. `Options.dry_run` carries the flag.
+`sync`, `push`, `pull`, `move`, `drop` and `cp` take `--dry-run`. It is the same procedure with every write to either vault left out; the vault values in memory are updated as usual, so each step sees what the real run would see and prints the same lines. `Context.dry_run` carries the flag.
 
 - Scan: dry mode (section 7).
 - Exchange: a segment is validated and its entries added to the receiver's log in memory, not stored. What the other vault's dry scan recorded exists only in its memory, so the receiver also takes every entry of the other vault's in-memory log.
@@ -516,7 +516,7 @@ The output is the line `dry run: nothing is changed` (an `info` message), then e
 
 ### No remove
 
-`sync`, `push` and `pull` take `--no-remove`: no receiver removes a file because it was deleted. A file a receiver still has is kept, and recorded as re-created, so the deletion is undone in every vault. `Options.no_remove` carries the flag. Between steps 4 and 5:
+`sync`, `push` and `pull` take `--no-remove`: no receiver removes a file because it was deleted. A file a receiver still has is kept, and recorded as re-created, so the deletion is undone in every vault. `Context.no_remove` carries the flag. Between steps 4 and 5:
 
 1. In each receiver, for every path it takes that has a row and whose winner is a tombstone: replace the row with a deletion record whose base is the heads, and report `added` with the note `kept`. This is the state of a vault whose user put the file back.
 2. Scan each receiver that kept something (section 7, "File, deletion record"): the file gets an entry whose parents are the tombstones.
@@ -712,9 +712,9 @@ Three rules:
 How it is built:
 
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
-- `print_stdout(value, opts)` and `print_stderr(value, opts)` print any value that has both forms, in the form `opts.json` picks, above the progress bar if one is up.
-- `Options` holds the one progress bar of the process (the `indicatif` crate), made by `bar(shown)`: `main` shows it unless `--json`, tests do not. `Progress::new(opts, label, total)` starts a loop on it, `tick()` counts one, and dropping it erases the bar and leaves it idle.
-- `Options` holds the process-wide settings (`json`, and `dry_run` and `no_remove` of section 10) and the progress bar, and is passed to everything that can print or write.
+- `print_stdout(value, ctx)` and `print_stderr(value, ctx)` print any value that has both forms, in the form `ctx.json` picks, above the progress bar if one is up.
+- `Context` holds the process-wide settings (`json`, and `dry_run` and `no_remove` of section 10) and the progress bar, and is passed to everything that can print or write.
+- `Context` holds the one progress bar of the process (the `indicatif` crate), made by `bar(shown)`: `main` shows it unless `--json`, tests do not. `Progress::new(ctx, label, total)` starts a loop on it, `tick()` counts one, and dropping it erases the bar and leaves it idle.
 - What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages
