@@ -79,8 +79,8 @@ enum Command {
     /// and prints its 24-word secret key once. The key is the only way to read the remote
     /// from another computer. If SYNCIT_SECRET_KEY is set, that key is used and nothing is printed.
     ///
-    /// Environment: SYNCIT_SECRET_KEY holds a remote vault's 24-word key, for use where there
-    /// is no keychain or no terminal to type it at. Set it for every command that uses the remote.
+    /// Environment: SYNCIT_SECRET_KEY supplies a remote vault's 24-word seed phrase
+    /// when you can't get it from the OS keychain, or type it into the terminal.
     Init {
         /// Directory path (or URL such as s3://bucket/prefix)
         #[arg(default_value = ".")]
@@ -97,8 +97,8 @@ enum Command {
     /// Makes a new vault in DIR, pulls SRC into it, and remembers SRC as a remote.
     /// A URL needs the remote's 24-word key: clone asks for it at a terminal.
     ///
-    /// Environment: SYNCIT_SECRET_KEY holds a remote vault's 24-word key, for use where there
-    /// is no keychain or no terminal to type it at. Set it for every command that uses the remote.
+    /// Environment: SYNCIT_SECRET_KEY supplies a remote vault's 24-word seed phrase
+    /// when you can't get it from the OS keychain, or type it into the terminal.
     Clone {
         /// Vault or URL
         ///
@@ -345,8 +345,8 @@ enum RemoteArg {
     /// A URL needs the remote's 24-word key. It is asked for at a terminal the first time,
     /// then kept in the system keychain.
     ///
-    /// Environment: SYNCIT_SECRET_KEY holds a remote vault's 24-word key, for use where there
-    /// is no keychain or no terminal to type it at. Set it for every command that uses the remote.
+    /// Environment: SYNCIT_SECRET_KEY supplies a remote vault's 24-word seed phrase
+    /// when you can't get it from the OS keychain, or type it into the terminal.
     Add {
         /// A vault directory, or a remote vault's URL
         location: String,
