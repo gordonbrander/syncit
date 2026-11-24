@@ -55,7 +55,7 @@ pub fn init(ctx: &Context, dir: &Path) -> Result<()> {
         resolve_path(dir)?.display(),
         config.nickname
     );
-    print_stdout(&Message::Info { message }, ctx);
+    print_stdout(ctx, &Message::Info { message });
     Ok(())
 }
 
@@ -97,7 +97,7 @@ pub fn init_remote(
     };
     bucket.create(&key, &config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
-    print_stdout(&Message::Info { message }, ctx);
+    print_stdout(ctx, &Message::Info { message });
     if !generated {
         return Ok(None);
     }
@@ -106,7 +106,7 @@ pub fn init_remote(
         "Secret key for {url}:\n\n  {}\n\nWrite these words down and keep them safe. They are the only way to\nread this vault from another computer, and they are not shown again.",
         *words
     );
-    print_stdout(&Message::Info { message }, ctx);
+    print_stdout(ctx, &Message::Info { message });
     keys::save(ctx, url, &key, keys::Source::New, save_key)?;
     Ok(Some(words.to_string()))
 }
@@ -272,7 +272,7 @@ fn report(ctx: &Context, vaults: [&Vault; 2]) {
             };
             let (f, s) = (files.len(), segments.len());
             let message = format!("{verb} {f} files, {s} segments {to} {}", v.name);
-            print_stdout(&Message::Info { message }, ctx);
+            print_stdout(ctx, &Message::Info { message });
         }
     }
 }
@@ -306,7 +306,7 @@ fn autocompact(ctx: &Context, v: &Vault) -> Result<()> {
 fn announce(ctx: &Context) {
     if ctx.dry_run {
         let message = "dry run: nothing is changed".to_string();
-        print_stdout(&Message::Info { message }, ctx);
+        print_stdout(ctx, &Message::Info { message });
     }
 }
 
@@ -535,7 +535,7 @@ fn conflicts(ctx: &Context, v: &Vault, seen: &mut BTreeSet<String>) {
             message,
             side: v.side,
         };
-        print_stdout(&conflict, ctx);
+        print_stdout(ctx, &conflict);
     }
 }
 
@@ -572,7 +572,7 @@ pub fn compact(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<(usize
         0 => "nothing to drop".to_string(),
         _ => format!("dropped {} ({})", versions(n), size(bytes)),
     };
-    print_stdout(&Message::Info { message }, ctx);
+    print_stdout(ctx, &Message::Info { message });
     Ok((n, bytes))
 }
 
@@ -770,7 +770,7 @@ pub fn status(
     for line in &mut found {
         (line.ours, line.theirs) = (word(line.ours), line.theirs.map(word));
     }
-    print_states(&found, ctx);
+    print_states(ctx, &found);
     Ok(found)
 }
 
@@ -868,7 +868,7 @@ pub fn remotes(ctx: &Context, cwd: &Path) -> Result<Vec<(String, String)>> {
             nickname: nickname.clone(),
             location: location.clone(),
         };
-        print_stdout(&message, ctx);
+        print_stdout(ctx, &message);
     }
     Ok(v.config.remotes.into_iter().collect())
 }
@@ -921,7 +921,7 @@ fn add(
     v.config.remotes.insert(nickname.clone(), location.clone());
     v.storage.save_config(&v.config)?;
     let message = format!("remote {nickname}: {location}");
-    print_stdout(&Message::Info { message }, ctx);
+    print_stdout(ctx, &Message::Info { message });
     Ok(nickname)
 }
 
@@ -933,7 +933,7 @@ pub fn remote_remove(ctx: &Context, cwd: &Path, nickname: &str) -> Result<()> {
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
     v.storage.save_config(&v.config)?;
     let message = format!("removed remote {nickname}: {location}");
-    print_stdout(&Message::Info { message }, ctx);
+    print_stdout(ctx, &Message::Info { message });
     Ok(())
 }
 
@@ -1264,7 +1264,7 @@ pub fn blame(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(String
             path: path.clone(),
             nicknames: nicknames.clone(),
         };
-        print_stdout(&blame, ctx);
+        print_stdout(ctx, &blame);
         found.push((path.clone(), nicknames));
     }
     Ok(found)
@@ -1300,7 +1300,7 @@ pub fn log(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>>
                 current: winner.as_ref() == Some(id),
                 available: e.hash.as_ref().is_some_and(|h| available(&v, None, h)),
             };
-            print_stdout(&Message::Version(version.clone()), ctx);
+            print_stdout(ctx, &Message::Version(version.clone()));
             found.push(version);
         }
     }
@@ -1346,7 +1346,7 @@ pub fn restore(
     };
     let already = |what: &str| {
         let message = format!("{dest} {what}");
-        print_stdout(&Message::Info { message }, ctx);
+        print_stdout(ctx, &Message::Info { message });
     };
     if in_place {
         if present.as_ref() == Some(&h) {
@@ -1438,7 +1438,7 @@ pub fn config(
         ("nickname", v.config.nickname.clone()),
     ];
     for (name, value) in settings {
-        print_stdout(&Message::Setting { name, value }, ctx);
+        print_stdout(ctx, &Message::Setting { name, value });
     }
     // Say what a change is about to cost, at the moment it is made.
     let keep = v.log.keep(v.config.keep_history, |_| true);
@@ -1452,7 +1452,7 @@ pub fn config(
             "keep-history no longer covers {} stored here; {by} what it does not cover",
             versions(beyond)
         );
-        print_stdout(&Message::Info { message }, ctx);
+        print_stdout(ctx, &Message::Info { message });
     }
     Ok(v.config)
 }

@@ -391,23 +391,23 @@ impl Drop for Progress {
 }
 
 /// Results.
-pub fn print_stdout<T: Display + Serialize>(value: &T, ctx: &Context) {
+pub fn print_stdout<T: Display + Serialize>(ctx: &Context, value: &T) {
     ctx.bar.suspend(|| println!("{}", line(value, ctx.json)));
 }
 
 /// Warnings and errors.
-pub fn print_stderr<T: Display + Serialize>(value: &T, ctx: &Context) {
+pub fn print_stderr<T: Display + Serialize>(ctx: &Context, value: &T) {
     ctx.bar.suspend(|| eprintln!("{}", line(value, ctx.json)));
 }
 
 /// The lines of `status`, with the paths padded to one width.
 // ponytail: the width is counted in characters, so wide ones (CJK) put the
 // columns out of line; use the unicode-width crate if that matters.
-pub fn print_states(lines: &[State], ctx: &Context) {
+pub fn print_states(ctx: &Context, lines: &[State]) {
     let width = lines.iter().map(|h| h.shown().chars().count()).max();
     for h in lines {
         if ctx.json {
-            print_stdout(&Message::State(h.clone()), ctx);
+            print_stdout(ctx, &Message::State(h.clone()));
         } else {
             ctx.bar
                 .suspend(|| println!("{}", h.row(width.unwrap_or(0))));
@@ -416,7 +416,7 @@ pub fn print_states(lines: &[State], ctx: &Context) {
 }
 
 pub fn warn(ctx: &Context, message: String) {
-    print_stderr(&Message::Warning { message }, ctx);
+    print_stderr(ctx, &Message::Warning { message });
 }
 
 #[cfg(test)]

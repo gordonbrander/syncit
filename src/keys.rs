@@ -122,7 +122,7 @@ pub fn save(ctx: &Context, url: &str, key: &Key, source: Source, save_key: bool)
     if save_key || ask(&format!("Save the key to {}? [y/N] ", file.display())) {
         add_saved(ctx, url, &words)?;
         let message = format!("saved the key for {url} in {}", file.display());
-        print_stdout(&Message::Info { message }, ctx);
+        print_stdout(ctx, &Message::Info { message });
     } else {
         unsaved();
     }

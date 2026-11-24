@@ -522,12 +522,12 @@ fn main() {
         Ok(None) => {}
         Ok(Some(summary)) => {
             let code = summary.exit_code();
-            print_stdout(&Message::Summary(summary), ctx);
+            print_stdout(ctx, &Message::Summary(summary));
             exit(code);
         }
         Err(e) => {
             let message = format!("{e:#}");
-            print_stderr(&Message::Error { message }, ctx);
+            print_stderr(ctx, &Message::Error { message });
             exit(1);
         }
     }
