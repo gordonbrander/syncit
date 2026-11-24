@@ -122,7 +122,7 @@ pub fn save(opts: &Options, url: &str, key: &Key, source: Source, save_key: bool
     if save_key || ask(&format!("Save the key to {}? [y/N] ", file.display())) {
         add_saved(opts, url, &words)?;
         let message = format!("saved the key for {url} in {}", file.display());
-        print_stdout(&Message::Info { message }, opts.json);
+        print_stdout(&Message::Info { message }, opts);
     } else {
         unsaved();
     }
@@ -261,7 +261,7 @@ mod tests {
             dry_run: false,
             no_remove: false,
             secret_key,
-            progress: false,
+            bar: crate::output::bar(false),
             config_dir: Some(dir.to_path_buf()),
         }
     }

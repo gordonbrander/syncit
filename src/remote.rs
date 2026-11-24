@@ -568,7 +568,7 @@ mod tests {
             dry_run: false,
             no_remove: false,
             secret_key: None,
-            progress: false,
+            bar: crate::output::bar(false),
             config_dir: Some(dir.to_path_buf()),
         }
     }

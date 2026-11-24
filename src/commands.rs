@@ -55,7 +55,7 @@ pub fn init(opts: &Options, dir: &Path) -> Result<()> {
         resolve_path(dir)?.display(),
         config.nickname
     );
-    print_stdout(&Message::Info { message }, opts.json);
+    print_stdout(&Message::Info { message }, opts);
     Ok(())
 }
 
@@ -97,7 +97,7 @@ pub fn init_remote(
     };
     bucket.create(&key, &config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
-    print_stdout(&Message::Info { message }, opts.json);
+    print_stdout(&Message::Info { message }, opts);
     if !generated {
         return Ok(None);
     }
@@ -106,7 +106,7 @@ pub fn init_remote(
         "Secret key for {url}:\n\n  {}\n\nWrite these words down and keep them safe. They are the only way to\nread this vault from another computer, and they are not shown again.",
         *words
     );
-    print_stdout(&Message::Info { message }, opts.json);
+    print_stdout(&Message::Info { message }, opts);
     keys::save(opts, url, &key, keys::Source::New, save_key)?;
     Ok(Some(words.to_string()))
 }
@@ -272,7 +272,7 @@ fn report(opts: &Options, vaults: [&Vault; 2]) {
             };
             let (f, s) = (files.len(), segments.len());
             let message = format!("{verb} {f} files, {s} segments {to} {}", v.name);
-            print_stdout(&Message::Info { message }, opts.json);
+            print_stdout(&Message::Info { message }, opts);
         }
     }
 }
@@ -306,7 +306,7 @@ fn autocompact(opts: &Options, v: &Vault) -> Result<()> {
 fn announce(opts: &Options) {
     if opts.dry_run {
         let message = "dry run: nothing is changed".to_string();
-        print_stdout(&Message::Info { message }, opts.json);
+        print_stdout(&Message::Info { message }, opts);
     }
 }
 
@@ -541,7 +541,7 @@ fn conflicts(opts: &Options, v: &Vault, seen: &mut BTreeSet<String>) {
             message,
             side: v.side,
         };
-        print_stdout(&conflict, opts.json);
+        print_stdout(&conflict, opts);
     }
 }
 
@@ -578,7 +578,7 @@ pub fn compact(opts: &Options, cwd: &Path, vault: Option<&Path>) -> Result<(usiz
         0 => "nothing to drop".to_string(),
         _ => format!("dropped {} ({})", versions(n), size(bytes)),
     };
-    print_stdout(&Message::Info { message }, opts.json);
+    print_stdout(&Message::Info { message }, opts);
     Ok((n, bytes))
 }
 
@@ -776,7 +776,7 @@ pub fn status(
     for line in &mut found {
         (line.ours, line.theirs) = (word(line.ours), line.theirs.map(word));
     }
-    print_states(&found, opts.json);
+    print_states(&found, opts);
     Ok(found)
 }
 
@@ -874,7 +874,7 @@ pub fn remotes(opts: &Options, cwd: &Path) -> Result<Vec<(String, String)>> {
             nickname: nickname.clone(),
             location: location.clone(),
         };
-        print_stdout(&message, opts.json);
+        print_stdout(&message, opts);
     }
     Ok(v.config.remotes.into_iter().collect())
 }
@@ -927,7 +927,7 @@ fn add(
     v.config.remotes.insert(nickname.clone(), location.clone());
     v.storage.save_config(&v.config)?;
     let message = format!("remote {nickname}: {location}");
-    print_stdout(&Message::Info { message }, opts.json);
+    print_stdout(&Message::Info { message }, opts);
     Ok(nickname)
 }
 
@@ -939,7 +939,7 @@ pub fn remote_remove(opts: &Options, cwd: &Path, nickname: &str) -> Result<()> {
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
     v.storage.save_config(&v.config)?;
     let message = format!("removed remote {nickname}: {location}");
-    print_stdout(&Message::Info { message }, opts.json);
+    print_stdout(&Message::Info { message }, opts);
     Ok(())
 }
 
@@ -1270,7 +1270,7 @@ pub fn blame(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(Strin
             path: path.clone(),
             nicknames: nicknames.clone(),
         };
-        print_stdout(&blame, opts.json);
+        print_stdout(&blame, opts);
         found.push((path.clone(), nicknames));
     }
     Ok(found)
@@ -1306,7 +1306,7 @@ pub fn log(opts: &Options, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>
                 current: winner.as_ref() == Some(id),
                 available: e.hash.as_ref().is_some_and(|h| available(&v, None, h)),
             };
-            print_stdout(&Message::Version(version.clone()), opts.json);
+            print_stdout(&Message::Version(version.clone()), opts);
             found.push(version);
         }
     }
@@ -1352,7 +1352,7 @@ pub fn restore(
     };
     let already = |what: &str| {
         let message = format!("{dest} {what}");
-        print_stdout(&Message::Info { message }, opts.json);
+        print_stdout(&Message::Info { message }, opts);
     };
     if in_place {
         if present.as_ref() == Some(&h) {
@@ -1444,7 +1444,7 @@ pub fn config(
         ("nickname", v.config.nickname.clone()),
     ];
     for (name, value) in settings {
-        print_stdout(&Message::Setting { name, value }, opts.json);
+        print_stdout(&Message::Setting { name, value }, opts);
     }
     // Say what a change is about to cost, at the moment it is made.
     let keep = v.log.keep(v.config.keep_history, |_| true);
@@ -1458,7 +1458,7 @@ pub fn config(
             "keep-history no longer covers {} stored here; {by} what it does not cover",
             versions(beyond)
         );
-        print_stdout(&Message::Info { message }, opts.json);
+        print_stdout(&Message::Info { message }, opts);
     }
     Ok(v.config)
 }

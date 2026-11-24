@@ -712,9 +712,9 @@ Three rules:
 How it is built:
 
 - A message is a value of the `Message` enum, which has a text form (`Display`) and a JSON form (`Serialize`).
-- `print_stdout(value, json)` and `print_stderr(value, json)` print any value that has both forms. They know nothing else.
-- `Progress::new(opts, label, total)` is the bar (the `indicatif` crate), `tick()` counts one, and dropping it erases it. While one is up, the print functions print above it.
-- `Options` holds the process-wide settings (`json`, `progress`, and `dry_run` and `no_remove` of section 10) and is passed to everything that can print or write.
+- `print_stdout(value, opts)` and `print_stderr(value, opts)` print any value that has both forms, in the form `opts.json` picks, above the progress bar if one is up.
+- `Options` holds the one progress bar of the process (the `indicatif` crate), made by `bar(shown)`: `main` shows it unless `--json`, tests do not. `Progress::new(opts, label, total)` starts a loop on it, `tick()` counts one, and dropping it erases the bar and leaves it idle.
+- `Options` holds the process-wide settings (`json`, and `dry_run` and `no_remove` of section 10) and the progress bar, and is passed to everything that can print or write.
 - What a run did is kept apart from printing. Each event is printed when it happens and also added to a `Summary`, which holds the events and counts of them. The command returns it; `main` prints the counts as the last line and takes the exit code from them. `move` reads the events to say why a file did not arrive, and tests read them. `init`, `status`, `blame`, `log`, `restore` and `config` have no summary.
 
 ### Messages

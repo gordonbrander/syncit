@@ -436,7 +436,7 @@ fn main() {
         dry_run,
         no_remove,
         secret_key: std::env::var("SYNCIT_SECRET_KEY").ok(),
-        progress: !cli.json,
+        bar: syncit::output::bar(!cli.json),
         config_dir: syncit::output::config_dir(),
     };
     // Commands that run a sync return a summary, printed last.
@@ -524,12 +524,12 @@ fn main() {
         Ok(None) => {}
         Ok(Some(summary)) => {
             let code = summary.exit_code();
-            print_stdout(&Message::Summary(summary), opts.json);
+            print_stdout(&Message::Summary(summary), opts);
             exit(code);
         }
         Err(e) => {
             let message = format!("{e:#}");
-            print_stderr(&Message::Error { message }, opts.json);
+            print_stderr(&Message::Error { message }, opts);
             exit(1);
         }
     }

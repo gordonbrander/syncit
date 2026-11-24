@@ -5,7 +5,6 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::fmt::{self, Display};
-use std::sync::Mutex;
 
 /// Settings for the whole process, passed to everything.
 #[derive(Clone)]
@@ -19,9 +18,9 @@ pub struct Options {
     /// A remote vault's secret key, as its 24 words: `SYNCIT_SECRET_KEY`.
     /// Read by `main`; the library never reads the environment for it.
     pub secret_key: Option<String>,
-    /// Show a progress bar in long loops, if stderr is a terminal. Set by
-    /// `main` unless `--json`; tests leave it off.
-    pub progress: bool,
+    /// Where long loops show how far they are: `bar(shown)`. One bar for the
+    /// process, idle between loops; the print functions print above it.
+    pub bar: ProgressBar,
     /// The user's syncit folder, which holds `credentials.toml` and
     /// `secrets.toml`. Found by `main`; tests leave it out.
     pub config_dir: Option<std::path::PathBuf>,
@@ -351,39 +350,31 @@ fn line<T: Display + Serialize>(value: &T, json: bool) -> String {
     }
 }
 
-/// The progress bar on screen, if there is one. The phases that show one
-/// never overlap.
-static BAR: Mutex<Option<ProgressBar>> = Mutex::new(None);
-
-/// Print with the progress bar out of the way: the line goes above it.
-fn show(print: impl FnOnce()) {
-    let bar = BAR.lock().unwrap().clone();
-    match bar {
-        Some(bar) => bar.suspend(print),
-        None => print(),
+/// The bar for `Options`. Shown, it is drawn on stderr when that is a
+/// terminal: `Scanning [===>  ] 41,200 / 90,112 (2m)`. `main` shows it unless
+/// `--json`; tests do not. It starts idle, drawing nothing.
+pub fn bar(shown: bool) -> ProgressBar {
+    if !shown {
+        return ProgressBar::hidden();
     }
+    let template = "{msg} [{bar:20}] {human_pos} / {human_len} ({eta})";
+    let style = ProgressStyle::with_template(template).expect("the template is valid");
+    let bar = ProgressBar::new(0).with_style(style.progress_chars("=> "));
+    bar.finish_and_clear();
+    bar
 }
 
-/// How far a long loop has come, on stderr: `Scanning [===>  ] 41,200 /
-/// 90,112 (2m)`. Drawn only with `Options::progress` and when stderr is a
-/// terminal; erased when dropped.
+/// One long loop on the bar. Dropping it erases the bar and leaves it idle.
 // ponytail: counts files, so one huge file stalls the bar and skews the time
 // left; count bytes if that misleads.
 pub struct Progress(ProgressBar);
 
 impl Progress {
     pub fn new(opts: &Options, label: &'static str, total: usize) -> Progress {
-        let bar = if !opts.progress {
-            ProgressBar::hidden()
-        } else {
-            let template = "{msg} [{bar:20}] {human_pos} / {human_len} ({eta})";
-            let style = ProgressStyle::with_template(template).expect("the template is valid");
-            ProgressBar::new(total as u64)
-                .with_style(style.progress_chars("=> "))
-                .with_message(label)
-        };
-        *BAR.lock().unwrap() = Some(bar.clone());
-        Progress(bar)
+        opts.bar.set_length(total as u64);
+        opts.bar.set_message(label);
+        opts.bar.reset();
+        Progress(opts.bar.clone())
     }
 
     /// One more done.
@@ -395,36 +386,36 @@ impl Progress {
 impl Drop for Progress {
     fn drop(&mut self) {
         self.0.finish_and_clear();
-        *BAR.lock().unwrap() = None;
     }
 }
 
 /// Results.
-pub fn print_stdout<T: Display + Serialize>(value: &T, json: bool) {
-    show(|| println!("{}", line(value, json)));
+pub fn print_stdout<T: Display + Serialize>(value: &T, opts: &Options) {
+    opts.bar.suspend(|| println!("{}", line(value, opts.json)));
 }
 
 /// Warnings and errors.
-pub fn print_stderr<T: Display + Serialize>(value: &T, json: bool) {
-    show(|| eprintln!("{}", line(value, json)));
+pub fn print_stderr<T: Display + Serialize>(value: &T, opts: &Options) {
+    opts.bar.suspend(|| eprintln!("{}", line(value, opts.json)));
 }
 
 /// The lines of `status`, with the paths padded to one width.
 // ponytail: the width is counted in characters, so wide ones (CJK) put the
 // columns out of line; use the unicode-width crate if that matters.
-pub fn print_states(lines: &[State], json: bool) {
+pub fn print_states(lines: &[State], opts: &Options) {
     let width = lines.iter().map(|h| h.shown().chars().count()).max();
     for h in lines {
-        if json {
-            print_stdout(&Message::State(h.clone()), true);
+        if opts.json {
+            print_stdout(&Message::State(h.clone()), opts);
         } else {
-            show(|| println!("{}", h.row(width.unwrap_or(0))));
+            opts.bar
+                .suspend(|| println!("{}", h.row(width.unwrap_or(0))));
         }
     }
 }
 
 pub fn warn(opts: &Options, message: String) {
-    print_stderr(&Message::Warning { message }, opts.json);
+    print_stderr(&Message::Warning { message }, opts);
 }
 
 #[cfg(test)]
@@ -433,13 +424,13 @@ mod tests {
 
     #[test]
     fn progress_counts() {
-        for progress in [false, true] {
+        for shown in [false, true] {
             let opts = Options {
                 json: false,
                 dry_run: false,
                 no_remove: false,
                 secret_key: None,
-                progress,
+                bar: bar(shown),
                 config_dir: None,
             };
             let progress = Progress::new(&opts, "Scanning", 3);

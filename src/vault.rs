@@ -268,7 +268,7 @@ impl Vault {
             from: None,
             side: self.side,
         };
-        print_stdout(&Message::Event(event.clone()), opts.json);
+        print_stdout(&Message::Event(event.clone()), opts);
         sum.record(event);
     }
 
@@ -282,7 +282,7 @@ impl Vault {
             from: Some(from.to_string()),
             side: self.side,
         };
-        print_stdout(&Message::Event(event.clone()), opts.json);
+        print_stdout(&Message::Event(event.clone()), opts);
         sum.record(event);
     }
 
