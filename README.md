@@ -26,6 +26,22 @@ Check that it worked:
 syncit --help
 ```
 
+### Agent skill
+
+This repository also ships a skill that teaches coding agents to use syncit.
+
+```sh
+# Claude Code (run inside a session)
+/plugin install syncit --marketplace gordonbrander/syncit
+
+# Pi
+pi install git:github.com/gordonbrander/syncit
+
+# Codex
+codex plugin marketplace add gordonbrander/syncit
+codex plugin add syncit@syncit
+```
+
 ## Quick start
 
 Turn a folder you already have into a syncable *vault*.
