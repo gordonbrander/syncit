@@ -410,11 +410,7 @@ fn merge_on_pull() {
     );
     // Both versions it replaced are in the history of the vault that merged.
     for old in ["ONE\ntwo\nthree\n", "one\ntwo\nTHREE\n"] {
-        assert!(
-            b.join(".syncit/blobs")
-                .join(sha256(old.as_bytes()))
-                .is_file()
-        );
+        assert!(blob_path(&b, &sha256(old.as_bytes())).is_file());
     }
 }
 
@@ -507,7 +503,7 @@ fn story_d1_no_history() {
     cmd::sync(O, &b, &a).unwrap();
     cmd::snapshot(O, &a).unwrap();
     for dir in [&a, &b] {
-        assert!(names(&dir.join(".syncit/blobs")).is_empty());
+        assert!(blobs(dir).is_empty());
         assert!(names(&dir.join(".syncit/tmp")).is_empty());
     }
 }
@@ -525,15 +521,9 @@ fn story_d2_history() {
         .iter()
         .map(|v| sha256(v.as_bytes()))
         .collect();
-    assert_eq!(
-        names(&b.join(".syncit/blobs")),
-        kept.iter().cloned().collect()
-    );
-    assert!(names(&a.join(".syncit/blobs")).is_empty());
-    assert_eq!(
-        fs::read_to_string(b.join(".syncit/blobs").join(&kept[0])).unwrap(),
-        "v1"
-    );
+    assert_eq!(blobs(&b), kept.iter().cloned().collect());
+    assert!(blobs(&a).is_empty());
+    assert_eq!(fs::read_to_string(blob_path(&b, &kept[0])).unwrap(), "v1");
 
     // Kept versions are a blob source: one that is nowhere else comes back.
     fs::remove_file(a.join("f.txt")).unwrap();
@@ -547,12 +537,20 @@ fn story_d2_history() {
     cmd::config(O, &b, None, Some(Setting::KeepHistory(Some(0)))).unwrap();
     put(&b, "f.txt", "v4", 3);
     cmd::sync(O, &b, &a).unwrap();
-    assert!(names(&b.join(".syncit/blobs")).is_empty());
+    assert!(blobs(&b).is_empty());
 }
 
-/// The names in a vault's `.syncit/blobs/`, and the names these contents have.
+/// The hashes stored in a vault's `.syncit/blobs/`, in its `ab/abcdef…` folders.
 fn blobs(dir: &Path) -> BTreeSet<String> {
-    names(&dir.join(".syncit/blobs"))
+    let root = dir.join(".syncit/blobs");
+    names(&root)
+        .iter()
+        .flat_map(|prefix| names(&root.join(prefix)))
+        .collect()
+}
+
+fn blob_path(dir: &Path, hash: &str) -> PathBuf {
+    dir.join(".syncit/blobs").join(&hash[..2]).join(hash)
 }
 
 fn hashes(contents: &[&str]) -> BTreeSet<String> {
@@ -1572,7 +1570,7 @@ fn drop_refuses_sole_copy() {
     cmd::config(O, &a, None, Some(Setting::KeepHistory(None))).unwrap();
     cmd::snapshot(O, &a).unwrap();
     cmd::drop(O, &a, &paths(&["f.txt"]), None, false).unwrap();
-    assert!(!a.join("f.txt").exists() && a.join(".syncit/blobs").join(sha256(b"edit")).exists());
+    assert!(!a.join("f.txt").exists() && blob_path(&a, &sha256(b"edit")).exists());
     cmd::config(O, &a, None, Some(Setting::KeepHistory(Some(0)))).unwrap();
     assert!(cmd::drop(O, &a, &paths(&["d"]), Some(&a), false).is_err());
     cmd::drop(O, &a, &paths(&["d"]), None, true).unwrap();
@@ -1620,12 +1618,12 @@ fn config_command() {
     assert_eq!(Config::load(&a).unwrap().keep_history, None);
     // The setting takes effect.
     cmd::snapshot(O, &a).unwrap();
-    assert!(a.join(".syncit/blobs").join(sha256(b"v1")).exists());
+    assert!(blob_path(&a, &sha256(b"v1")).exists());
     // Set to keep nothing back, the current version's content is not dropped.
     assert_eq!(history(Some(Some(0))), Some(0));
     assert_eq!(Config::load(&a).unwrap().keep_history, Some(0));
     cmd::snapshot(O, &a).unwrap();
-    assert!(a.join(".syncit/blobs").join(sha256(b"v1")).exists());
+    assert!(blob_path(&a, &sha256(b"v1")).exists());
     assert_eq!(history(None), Some(0));
     let auto = |on| config(Some(Setting::Autocompact(on))).unwrap().autocompact;
     assert!(!auto(false) && !Config::load(&a).unwrap().autocompact);
@@ -2168,8 +2166,16 @@ mod remote {
         out
     }
 
+    /// Object names under `kind`; blobs sit in `ab/abcdef…` folders.
     fn objects(dir: &Path, kind: &str) -> BTreeSet<String> {
-        names(&dir.join(kind))
+        let root = dir.join(kind);
+        match kind {
+            "blobs" => names(&root)
+                .iter()
+                .flat_map(|p| names(&root.join(p)))
+                .collect(),
+            _ => names(&root),
+        }
     }
 
     #[test]
@@ -2323,7 +2329,7 @@ mod remote {
         fs::write(r.join("log/not-a-name"), b"ignored").unwrap();
         // A truncated blob.
         let cut = syncit::crypt::name(&key, "blobs", &sha256("x".repeat(100_000).as_bytes()));
-        let blob = r.join("blobs").join(&cut);
+        let blob = r.join("blobs").join(&cut[..2]).join(&cut);
         let bytes = fs::read(&blob).unwrap();
         fs::write(&blob, &bytes[..bytes.len() - 10]).unwrap();
 
@@ -2670,11 +2676,11 @@ mod remote {
         cmd::push(o, &a, &origin).unwrap();
         let p = tmp.path().join("p");
         cmd::clone(o, Path::new("/"), &origin, &p, &["docs".to_string()], false).unwrap();
-        let blobs_before = names(&p.join(".syncit/blobs"));
+        let blobs_before = blobs(&p);
         assert_eq!(blobs_before.len(), 1);
         cmd::get_from(o, &p, &["music".to_string()], Path::new("origin")).unwrap();
         assert!(is(&p, "music/m.mp3", "m") && is(&p, "music/n.mp3", "n"));
-        assert_eq!(names(&p.join(".syncit/blobs")).len(), 3, "nothing else");
+        assert_eq!(blobs(&p).len(), 3, "nothing else");
         cmd::sync(o, &p, Path::new("origin")).unwrap();
         assert!(Config::load(&p).unwrap().includes("music/m.mp3"));
         assert!(is(&p, "music/m.mp3", "m"));

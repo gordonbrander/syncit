@@ -51,7 +51,7 @@ syncit pull <vault with more history>    # collects the versions it has
 syncit restore <file> <hash>
 ```
 
-As a last resort, each stored version is a plain file in `.syncit/blobs/`, named by its full hash. Read from there; never write there.
+As a last resort, each stored version is a plain file at `.syncit/blobs/<first 2 chars of hash>/<full hash>`. Read from there; never write there.
 
 ## Record a version without syncing
 

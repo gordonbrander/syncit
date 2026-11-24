@@ -101,7 +101,7 @@ syncit restore --in-place notes.txt 3f9a
 
 syncit records the file as it is first, so the version you replace can itself be restored later, unless `keep-history` is 0; then only another vault may still have it.
 
-Each stored version is also a plain file in `.syncit/blobs/`, named by the SHA-256 of its content.
+Each stored version is also a plain file in `.syncit/blobs/`, named by the SHA-256 of its content, in a folder named by the hash's first two characters: `.syncit/blobs/ab/abcdef…`.
 
 ## Who changed what
 
