@@ -700,7 +700,7 @@ With `--dry-run` the first line is `dry run: nothing is changed`, nothing is rem
 
 ### config
 
-- `syncit config` prints the vault's settings, as `setting` messages: `keep-history: <n>|all`, `autocompact: on|off`, then `nickname: <nickname>`.
+- `syncit config` prints the vault's settings, as `setting` messages: `keep-history: <n>|all`, `autocompact: on|off`, then `nickname: <nickname>`. For the vault here it locks the vault and reads its config only, not its log or dirstate, and writes nothing; so do `syncit remote` and `syncit remote remove`, which then saves the config.
 - `syncit config keep-history <n>|all` sets `keep_history`: a number of versions, or `all` for `null`.
 - `syncit config autocompact on|off` sets `autocompact`.
 - A change deletes nothing by itself. If blobs are stored that `keep_history` no longer covers, an `info` line after the settings gives their number and says what will drop them: the next sync or snapshot with `autocompact` on, `syncit compact` with it off.

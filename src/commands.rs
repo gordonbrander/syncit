@@ -12,7 +12,7 @@ use crate::output::{
 };
 use crate::scan::{Scan, deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
-use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
+use crate::vault::{TMP_PREFIX, Vault, find_root, lock, relative, resolve_path, unique};
 use anyhow::{Context as _, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -873,7 +873,7 @@ fn open_vault(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<Vault> 
 
 /// List the remotes this vault remembers. Returns them, as printed.
 pub fn remotes(ctx: &Context, cwd: &Path) -> Result<Vec<(String, String)>> {
-    let v = Vault::open(ctx, cwd, true)?;
+    let v = lock(cwd)?;
     for (nickname, location) in &v.config.remotes {
         let message = Message::Remote {
             nickname: nickname.clone(),
@@ -939,10 +939,10 @@ fn add(
 /// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
 /// other vaults on this machine may use them.
 pub fn remote_remove(ctx: &Context, cwd: &Path, nickname: &str) -> Result<()> {
-    let mut v = Vault::open(ctx, cwd, true)?;
+    let mut v = lock(cwd)?;
     let location = v.config.remotes.remove(nickname);
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
-    v.storage.save_config(&v.config)?;
+    v.config.save(&v.root)?;
     let message = format!("removed remote {nickname}: {location}");
     print_stdout(ctx, &Message::Info { message });
     Ok(())
@@ -1423,38 +1423,49 @@ pub fn config(
     vault: Option<&Path>,
     change: Option<Setting>,
 ) -> Result<Config> {
+    let print = |config: &Config| {
+        let depth = config.keep_history;
+        let auto = if config.autocompact { "on" } else { "off" };
+        let settings = [
+            (
+                "keep-history",
+                depth.map_or("all".to_string(), |n| n.to_string()),
+            ),
+            ("autocompact", auto.to_string()),
+            ("nickname", config.nickname.clone()),
+        ];
+        for (name, value) in settings {
+            print_stdout(ctx, &Message::Setting { name, value });
+        }
+    };
+    let Some(change) = change else {
+        // To show the settings of the vault here, its config is enough.
+        let config = match vault {
+            None => lock(cwd)?.config,
+            Some(_) => open_vault(ctx, cwd, vault)?.config,
+        };
+        print(&config);
+        return Ok(config);
+    };
     let mut v = open_vault(ctx, cwd, vault)?;
-    let changed = change.is_some();
     match change {
-        Some(Setting::KeepHistory(depth)) => v.config.keep_history = depth,
-        Some(Setting::Autocompact(on)) => v.config.autocompact = on,
-        Some(Setting::Nickname(nickname)) => {
+        Setting::KeepHistory(depth) => v.config.keep_history = depth,
+        Setting::Autocompact(on) => v.config.autocompact = on,
+        Setting::Nickname(nickname) => {
             ensure!(
                 valid_nickname(&nickname),
                 "a nickname is 1 to 64 bytes, with no spaces or control characters"
             );
             v.config.nickname = nickname;
         }
-        None => {}
     }
     v.storage.save_config(&v.config)?;
-    let depth = v.config.keep_history;
+    print(&v.config);
     let auto = v.config.autocompact;
-    let settings = [
-        (
-            "keep-history",
-            depth.map_or("all".to_string(), |n| n.to_string()),
-        ),
-        ("autocompact", if auto { "on" } else { "off" }.to_string()),
-        ("nickname", v.config.nickname.clone()),
-    ];
-    for (name, value) in settings {
-        print_stdout(ctx, &Message::Setting { name, value });
-    }
     // Say what a change is about to cost, at the moment it is made.
     let keep = v.log.keep(v.config.keep_history, |_| true);
     let beyond = v.storage.drop_blobs_except(&keep, true)?.0;
-    if changed && beyond > 0 {
+    if beyond > 0 {
         let by = match auto {
             true => "the next sync or snapshot drops",
             false => "`syncit compact` drops",
