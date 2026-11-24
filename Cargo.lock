@@ -2249,6 +2249,7 @@ dependencies = [
  "diffy",
  "futures",
  "getrandom 0.4.3",
+ "hex",
  "hkdf",
  "keyring-core",
  "object_store",
