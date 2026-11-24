@@ -48,6 +48,6 @@ Symbolic links, empty folders, and file permissions other than the executable bi
   cd ~/Documents && syncit push /Volumes/Backup/Documents
   ```
 
-- For a remote from cron, the key comes from the keychain if the job can reach it. Otherwise the user sets `SYNCIT_SECRET_KEY` in the job's environment, or uses `--save-key`. Do not write the 24 words into a script or crontab yourself; have the user put them where the job reads them.
+- For a remote from cron, the seed phrase comes from the keychain if the job can reach it. Otherwise the user sets `SYNCIT_SECRET_KEY` in the job's environment, or uses `--save-key`. Do not write the seed phrase into a script or crontab yourself; have the user put it where the job reads it.
 - Two runs on the same vault at once fail with "vault is in use", so leave enough time between scheduled runs.
 - It is safe to interrupt a run. Run it again and it finishes.

@@ -2,27 +2,27 @@
 
 A remote vault lives in object storage: an S3 bucket, Cloudflare R2, Google Cloud Storage, Azure, or a folder by `file://` URL. It has no working folder. It holds files and history, encrypted, and any vault can sync with it. Two computers that never see each other stay in step by syncing with the same remote.
 
-## The key: read this first
+## The seed phrase: read this first
 
-Everything in a remote is encrypted with a 32-byte key, shown as **24 words**. If every copy of the words is lost, nobody can read the remote, including the user. There is no recovery and no key rotation.
+Everything in a remote is encrypted with a 32-byte key, shown as a **24-word seed phrase**. If every copy of the seed phrase is lost, nobody can read the remote, including the user. There is no recovery and no key rotation.
 
-Three commands touch the key directly:
+Three commands touch the seed phrase directly:
 
 | Command | What happens |
 |---|---|
-| `syncit init <url>` | Creates the remote and **prints the 24 words once** |
-| `syncit clone <url> <dir>` | Asks for the words at a terminal |
-| `syncit remote add <url>` | Asks for the words at a terminal, unless this machine already has the key (for example, `init` was run here) |
+| `syncit init <url>` | Creates the remote and **prints the seed phrase once** |
+| `syncit clone <url> <dir>` | Asks for the seed phrase at a terminal |
+| `syncit remote add <url>` | Asks for the seed phrase at a terminal, unless this machine already has it stored (for example, `init` was run here) |
 
-**Have the user run these themselves, in their own terminal,** whenever the key will be printed or asked for. Give them the exact command. Reasons: you cannot answer the prompt (without a terminal the command fails), and if you run `init <url>` the words land in this conversation.
+**Have the user run these themselves, in their own terminal,** whenever the seed phrase will be printed or asked for. Give them the exact command. Reasons: you cannot answer the prompt (without a terminal the command fails), and if you run `init <url>` the seed phrase lands in this conversation.
 
-Rules for the key:
+Rules for the seed phrase:
 
-- Never ask the user to paste the words into the conversation, and never repeat, log, or write them to a file.
-- After `init <url>`, remind the user to store the words somewhere other than this computer (a password manager, or paper). They are not shown again.
-- After the user has run one of the three commands, the key is in the system keychain (macOS Keychain, or Secret Service on Linux), and every other command works without it: you can run `sync`, `push`, `pull`, `status --vs`, `get --from`, `move` yourself.
-- On a machine with no keychain (a server over SSH), the user chooses between `--save-key`, which stores the key unencrypted in `~/.config/syncit/secrets.toml`, and setting `SYNCIT_SECRET_KEY` for each command. That is their decision; explain both.
-- `no key for <url>: set SYNCIT_SECRET_KEY, or run syncit remote add <url>` means this machine has no key for that remote yet. Ask the user to run `syncit remote add <url>`.
+- Never ask the user to paste the seed phrase into the conversation, and never repeat it, log it, or write it to a file.
+- After `init <url>`, remind the user to store the seed phrase somewhere other than this computer (a password manager, or paper). It is not shown again.
+- After the user has run one of the three commands, the seed phrase is stored in the system keychain (macOS Keychain, or Secret Service on Linux), and every other command works without asking for it: you can run `sync`, `push`, `pull`, `status --vs`, `get --from`, `move` yourself.
+- On a machine with no keychain (a server over SSH), the user chooses between `--save-key`, which stores the seed phrase unencrypted in `~/.config/syncit/secrets.toml`, and setting `SYNCIT_SECRET_KEY` for each command. That is their decision; explain both.
+- `no key for <url>: set SYNCIT_SECRET_KEY, or run syncit remote add <url>` means this machine has no seed phrase stored for that remote yet. Ask the user to run `syncit remote add <url>`.
 - On macOS, after syncit is reinstalled or rebuilt, a system dialog asks once whether it may read the keychain item. Only the user can answer it; a command that seems to hang on a remote is probably waiting for it.
 
 ## Set up a remote on Cloudflare R2
@@ -59,7 +59,7 @@ chmod 600 ~/.config/syncit/credentials.toml
 - Environment variables with the same names in upper case (`AWS_ACCESS_KEY_ID`, …) override the file. `~/.aws/credentials` is not read.
 - Never commit this file or `secrets.toml`.
 
-**3. The user creates the remote** (prints the 24 words):
+**3. The user creates the remote** (prints the seed phrase):
 
 ```sh
 syncit init s3://my-bucket/notes
@@ -67,7 +67,7 @@ syncit init s3://my-bucket/notes
 
 The location must be empty. It can be run from any directory, and it does not connect any vault to the remote; step 4 does that. The remote's nickname is `origin` unless `--nickname` is given.
 
-**4. Connect a vault and sync.** On the machine that ran `init`, the key is already stored, so `remote add` does not ask for it and you can run:
+**4. Connect a vault and sync.** On the machine that ran `init`, the seed phrase is already stored, so `remote add` does not ask for it and you can run:
 
 ```sh
 cd ~/Documents
@@ -76,26 +76,26 @@ syncit sync --dry-run origin
 syncit sync origin
 ```
 
-If `remote add` fails with `no key for <url>`, the key was not stored on this machine: ask the user to run that `remote add` themselves.
+If `remote add` fails with `no key for <url>`, the seed phrase was not stored on this machine: ask the user to run that `remote add` themselves.
 
 A run with a remote also prints `sent N files, M segments to <url>` and `received …`.
 
 ## A second computer, or a replacement for a lost one
 
-The user needs the credentials (step 2) and the 24 words. Then they run one of:
+The user needs the credentials (step 2) and the seed phrase. Then they run one of:
 
 ```sh
 syncit clone s3://my-bucket/notes ~/Documents
 syncit clone s3://my-bucket/notes ~/Photos --only photos/2024 --only music
 ```
 
-Without the words the remote cannot be read. If the user has lost them but still has a computer that syncs with the remote, their files are safe on that computer: they can make a new remote with `init` at a new, empty URL and push to it.
+Without the seed phrase the remote cannot be read. If the user has lost it but still has a computer that syncs with the remote, their files are safe on that computer: they can make a new remote with `init` at a new, empty URL and push to it.
 
 ## Managing remotes
 
 ```sh
 syncit remote                    # list remembered vaults
-syncit remote remove origin      # forget one; changes nothing in the remote, keeps the saved key
+syncit remote remove origin      # forget one; changes nothing in the remote, keeps the saved seed phrase
 syncit remote add /Volumes/Backup/Documents   # folder vaults can be remembered too
 ```
 

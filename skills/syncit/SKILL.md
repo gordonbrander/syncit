@@ -37,7 +37,7 @@ If `syncit --version` fails, syncit is not installed: point the user to the inst
 3. **Ask the user before** `drop --force`, `compact`, lowering `keep-history`, or `--no-remove`. The first three discard data for good. `--no-remove` puts deleted files back for good.
 4. **Read the exit code.** `0` is done. `1` is failed. `2` means the run finished but something needs a look: a conflict, or a file that was skipped or is pending. Tell the user what the `U` and `!` lines say; do not report a `2` as a clean sync.
 5. **One command at a time per vault.** A second one fails with "vault is in use". Never edit anything inside `.syncit/`.
-6. **Remote keys stay out of the conversation.** See "Remote vaults" below before running `init`, `clone` or `remote add` with a URL.
+6. **Remote seed phrases stay out of the conversation.** See "Remote vaults" below before running `init`, `clone` or `remote add` with a URL.
 
 ## Journeys
 
@@ -129,13 +129,13 @@ List names or paths, one per line, in `.syncitignore` at the vault root. The fil
 
 ## Remote vaults
 
-A remote vault lives in object storage (S3, Cloudflare R2 and others), encrypted with a 24-word key. Once it is set up, use its nickname like any other vault: `syncit sync origin`.
+A remote vault lives in object storage (S3, Cloudflare R2 and others), encrypted with a key that is shown as a 24-word seed phrase. Once it is set up, use its nickname like any other vault: `syncit sync origin`.
 
-Setting one up involves the key, so read [references/remotes.md](references/remotes.md) first. In short: `syncit init <url>` prints the key, and `syncit clone <url>` and `syncit remote add <url>` ask for it at a terminal. Have the user run those three commands themselves, so the words never appear in this conversation.
+Setting one up involves the seed phrase, so read [references/remotes.md](references/remotes.md) first. In short: `syncit init <url>` prints the seed phrase, and `syncit clone <url>` and `syncit remote add <url>` ask for it at a terminal. Have the user run those three commands themselves, so the seed phrase never appears in this conversation.
 
 ## More
 
 - [references/partial.md](references/partial.md): partial vaults in depth; `move` vs `drop` vs deleting.
 - [references/history.md](references/history.md): how much history is kept, freeing space, rolling back a folder, undoing a bad sync.
-- [references/remotes.md](references/remotes.md): setting up a remote (Cloudflare R2 example), credentials, the encryption key, a second computer.
+- [references/remotes.md](references/remotes.md): setting up a remote (Cloudflare R2 example), credentials, the seed phrase, a second computer.
 - [references/troubleshooting.md](references/troubleshooting.md): `!` lines, errors, moved folders, scripts and scheduled backups.
