@@ -5,9 +5,11 @@ use crate::dirstate::{Row, TICK_MARGIN_MS, mtime_ms};
 use crate::entry::{Entry, Id, sha256};
 use crate::log::{Loser, PathState};
 use crate::output::{Options, Summary};
+use crate::scan::moves;
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault, unique};
 use anyhow::{Context, Result, bail, ensure};
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -91,12 +93,45 @@ pub fn materialise(
     if v.bare {
         return Ok(()); // no working folder
     }
-    let paths: Vec<String> = v.log.paths.keys().cloned().collect();
-    for path in paths {
-        // A path that fails a safety check or hits a filesystem error is
-        // left as it was, and the run goes on.
-        if let Err(e) = one(opts, v, peer, kept, &path, sum) {
+    let states: Vec<(String, PathState)> = (v.log.paths.keys())
+        .map(|p| (p.clone(), v.log.resolve(p)))
+        .collect();
+    let mut pass = Pass::default();
+    for (p, state) in &states {
+        if let PathState::Resolved { winner, .. } = state
+            && let Some(h) = &v.log.entries[winner].hash
+            && v.dirstate.rows.get(p).is_none_or(|row| &row.hash != h)
+            && v.takes(p)
+        {
+            pass.needed.insert(h.clone());
+        }
+    }
+    // A path that fails a safety check or hits a filesystem error is left as
+    // it was, and the run goes on.
+    for (path, state) in states {
+        if let Err(e) = one(opts, v, peer, kept, &path, state, &mut pass, sum) {
             v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
+        }
+    }
+    for (path, heads) in std::mem::take(&mut pass.deferred) {
+        if let Err(e) = delete(opts, v, &path, heads, &mut pass) {
+            v.event(opts, sum, "skipped", &path, &format!("{e:#}"));
+        }
+    }
+    // A deletion and an addition of the same content are one file moved.
+    let pairs = moves(&pass.deleted, &pass.added);
+    let paired: HashSet<&String> = pairs.iter().flat_map(|(a, b)| [a, b]).collect();
+    let mut lines: Vec<(&String, &'static str, Option<&String>)> = vec![];
+    lines.extend(pairs.iter().map(|(from, to)| (to, "renamed", Some(from))));
+    for (kind, side) in [("deleted", &pass.deleted), ("added", &pass.added)] {
+        let unpaired = side.iter().filter(|(p, _)| !paired.contains(p));
+        lines.extend(unpaired.map(|(p, _)| (p, kind, None)));
+    }
+    lines.sort();
+    for (path, kind, from) in lines {
+        match from {
+            Some(from) => v.renamed(opts, sum, from, path),
+            None => v.event(opts, sum, kind, path, ""),
         }
     }
     if opts.dry_run {
@@ -105,15 +140,49 @@ pub fn materialise(
     v.dirstate.save(&v.root)
 }
 
+/// What one materialise collects as it goes over the paths.
+#[derive(Default)]
+struct Pass {
+    /// The content written at some path in this run.
+    needed: HashSet<String>,
+    /// Deletions put off to the end, with the heads for their records.
+    deferred: Vec<(String, Vec<Id>)>,
+    /// Files removed and files added, as `(path, hash)`, to be printed as
+    /// moves where they pair.
+    deleted: Vec<(String, String)>,
+    added: Vec<(String, String)>,
+}
+
+/// Remove the file at `p`, whose winner is a tombstone.
+fn delete(opts: &Options, v: &mut Vault, p: &str, heads: Vec<Id>, pass: &mut Pass) -> Result<()> {
+    if let Some(row) = v.dirstate.rows.get(p) {
+        let hash = row.hash.clone();
+        safe(v, p)?;
+        if !opts.dry_run {
+            let file = v.root.join(p);
+            fs::remove_file(&file)?;
+            prune(&v.root, &file);
+        }
+        v.dirstate.rows.remove(p);
+        pass.deleted.push((p.to_string(), hash));
+    }
+    // No file here now reflects every head: this vault has seen them.
+    v.dirstate.deleted.insert(p.to_string(), heads);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn one(
     opts: &Options,
     v: &mut Vault,
     peer: Option<&Vault>,
     kept: bool,
     p: &str,
+    state: PathState,
+    pass: &mut Pass,
     sum: &mut Summary,
 ) -> Result<()> {
-    let (heads, winner, losers) = match v.log.resolve(p) {
+    let (heads, winner, losers) = match state {
         PathState::Absent => return Ok(()),
         PathState::Incomplete => {
             v.event(opts, sum, "incomplete", p, "waiting for missing history");
@@ -132,18 +201,15 @@ fn one(
     }
     let (file, w) = (v.root.join(p), v.log.entries[&winner].clone());
     let Some(h) = w.hash else {
-        if row.is_some() {
-            safe(v, p)?;
-            if !opts.dry_run {
-                fs::remove_file(&file)?;
-                prune(&v.root, &file);
-            }
-            v.dirstate.rows.remove(p);
-            v.event(opts, sum, "deleted", p, "");
+        // A file whose content another path is about to take is removed last:
+        // until then it is a source for it, and nothing is fetched.
+        // ponytail: a file moved to below its own path (`x` to `x/y`) then
+        // blocks the write, which is skipped until the next run.
+        if row.is_some_and(|row| pass.needed.contains(&row.hash)) {
+            pass.deferred.push((p.to_string(), heads));
+            return Ok(());
         }
-        // No file here now reflects every head: this vault has seen them.
-        v.dirstate.deleted.insert(p.to_string(), heads);
-        return Ok(());
+        return delete(opts, v, p, heads, pass);
     };
     let merge = kept.then(|| merged(v, peer, p, &heads, &winner)).flatten();
     if let Some((text, entry)) = merge {
@@ -228,13 +294,11 @@ fn one(
                 base: vec![],
             },
         );
-        v.event(
-            opts,
-            sum,
-            if row.is_some() { "updated" } else { "added" },
-            p,
-            "",
-        );
+        if row.is_some() {
+            v.event(opts, sum, "updated", p, "");
+        } else {
+            pass.added.push((p.to_string(), h.clone()));
+        }
         renamed = copy;
     } else if row.is_some_and(|row| row.exec != w.exec) {
         // Same content, other executable bit: nothing to fetch.

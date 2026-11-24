@@ -8,7 +8,7 @@ use crate::output::{Options, warn};
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault};
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -21,6 +21,30 @@ pub struct Scan {
     pub changes: Vec<(String, &'static str)>,
     /// Files that changed while they were being read.
     pub skipped: Vec<String>,
+    /// Deletions and new files that are one file moved: `(from, to)`.
+    pub moves: Vec<(String, String)>,
+}
+
+/// Pair deleted and added files, each `(path, hash)`, into moves `(from,
+/// to)`, as git does: by content. Only a hash found once on each side pairs,
+/// so copies, empty files and a move with an edit stay a delete and an add.
+pub fn moves(deleted: &[(String, String)], added: &[(String, String)]) -> Vec<(String, String)> {
+    let once = |side: &[(String, String)]| {
+        let mut seen: HashMap<String, Option<String>> = HashMap::new();
+        for (path, hash) in side {
+            seen.entry(hash.clone())
+                .and_modify(|p| *p = None)
+                .or_insert_with(|| Some(path.clone()));
+        }
+        seen
+    };
+    let (gone, new) = (once(deleted), once(added));
+    let mut pairs: Vec<_> = gone
+        .into_iter()
+        .filter_map(|(hash, from)| Some((from?, new.get(&hash)?.clone()?)))
+        .collect();
+    pairs.sort();
+    pairs
 }
 
 /// Scan the vault. A dry scan writes nothing: the vault value is brought up
@@ -42,7 +66,7 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
 
     let (mut dirstate, mut config, mut out) =
         (v.dirstate.clone(), v.config.clone(), Scan::default());
-    let mut excluded = vec![];
+    let (mut excluded, mut added, mut deleted) = (vec![], vec![], vec![]);
     for path in &files {
         // A file on disk is included, whether or not the vault knew it.
         if !config.includes(path) {
@@ -117,6 +141,9 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             parents,
             path: path.clone(),
         };
+        if kind == "new" {
+            added.push((path.clone(), hash.clone()));
+        }
         dirstate.rows.insert(
             path.clone(),
             Row {
@@ -134,11 +161,11 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
     let gone = |p: &&String| !files.contains(*p) && !v.skips(p);
     let gone: Vec<String> = dirstate.rows.keys().filter(gone).cloned().collect();
     for path in gone {
-        let parents = dirstate
-            .rows
-            .remove(&path)
-            .map(|row| row.base)
-            .unwrap_or_default();
+        let mut parents = vec![];
+        if let Some(row) = dirstate.rows.remove(&path) {
+            deleted.push((path.clone(), row.hash));
+            parents = row.base;
+        }
         out.changes.push((path.clone(), "deleted"));
         let entry = Entry {
             exec: false,
@@ -152,6 +179,8 @@ pub fn scan(opts: &Options, v: &mut Vault, dry: bool) -> Result<Scan> {
             .insert(entry.path.clone(), vec![entry.id()]);
         out.entries.push(entry);
     }
+
+    out.moves = moves(&deleted, &added);
 
     // Shortest first, so one dragged-in folder yields one include.
     excluded.sort_by_key(|p| p.len());
@@ -251,4 +280,23 @@ fn hash_stable(file: &Path) -> io::Result<Option<(u64, i64, bool, String)>> {
     let after = file.symlink_metadata()?;
     let same = before.len() == after.len() && mtime_ms(&before) == mtime_ms(&after);
     Ok(same.then(|| (before.len(), mtime_ms(&before), is_exec(&after), hash)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moves;
+
+    #[test]
+    fn moves_pair_by_unique_hash() {
+        let side = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(p, h)| (p.to_string(), h.to_string()))
+                .collect()
+        };
+        let deleted = side(&[("a", "1"), ("b", "2"), ("c", "3"), ("d", "3")]);
+        let added = side(&[("x", "1"), ("y", "2"), ("z", "2"), ("w", "3"), ("v", "9")]);
+        // 1 pairs; 2 is added twice and 3 deleted twice, so neither pairs.
+        assert_eq!(moves(&deleted, &added), vec![("a".into(), "x".into())]);
+    }
 }

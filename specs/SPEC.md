@@ -411,7 +411,7 @@ Let `S = resolve(p)`, `row` the dirstate row, `W` the winner, `h` its hash.
 1. `S` is `Absent`: nothing.
 2. `S` is `Incomplete`: report `incomplete`. Nothing else.
 3. The path is excluded or ignored: nothing. (`R5`. The scan has included every file on disk, section 7, so a path with a row is skipped here only if it is ignored.)
-4. **`W` is a tombstone.** If there is a row: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. Then, row or not, set the path's deletion record to the heads: with no file here, this vault's state reflects all of them. A path that reaches this step is included, so an included path the vault never had gets a record too.
+4. **`W` is a tombstone.** If there is a row: run the safety checks, delete the file, remove the row, and remove parent directories left empty, up to the vault root. Report `deleted`. If `row.hash` is the winner of another path that this run writes (a path this vault takes, with no row or a row with another hash), the whole step waits until every other path is done: until then the file is a source for that write, so a moved file is copied here and not fetched. A file moved below its own path (`x` to `x/y`) then blocks the write, which is skipped until the next run. Then, row or not, set the path's deletion record to the heads: with no file here, this vault's state reflects all of them. A path that reaches this step is included, so an included path the vault never had gets a record too.
    **4a. `W` is a file, and the path can be merged** ("Merging", below). Run the safety checks, write the merged text and record it. Report `updated`, or `added` if there was no row, with the note `merged`. Nothing else is done for the path: there are no copies.
 5. **`W` is a file, and there is a row with `row.hash == h`.** The content is in place. If `row.exec` differs from the winner's: run the safety checks, set the bit on the file where it is, set `row.exec`, and report `updated`. Nothing is fetched and the mtime does not change. Go to "copies and base".
 6. **`W` is a file, and there is a row with a different hash.** Run the safety checks.
@@ -632,6 +632,7 @@ It reads the log only. A vault that receives a file records nothing, so it is ne
    | `incomplete` | `!` | the path is `Incomplete` (and see below) |
    | `conflict` | `≠` | the path has losers, or a deletion lost to a file (section 9) |
    | `new`, `modified`, `removed` | `+`, `✎`, `✗` | the dry scan of this vault would record the path: as new, as modified, or as deleted. This `removed` is unrecorded |
+   | `renamed` | `→` | set after this table, below |
    | `current` | `✓` | its row has hash `h`: the file is here, and is the current version. This is narrower than *present* in the glossary, which a file that is `behind` is too |
    | `behind` or `incomplete` | `◐` or `!` | it has a row, and the winner is a tombstone: the next sync removes the file. `behind` if the other vault on the line is `removed`, which says what it is behind; `incomplete` if not, since a vault learns of a removal and removes the file in one run unless the run stops |
    | `behind` | `◐` | its row has another hash |
@@ -639,7 +640,8 @@ It reads the log only. A vault that receives a file records nothing, so it is ne
    | `missing` | `○` | no row |
 
    `current`, `excluded`, `ignored` and a recorded `removed` are settled: no scan and no sync changes them. A line is settled if every vault on it is. A path whose winner is a tombstone is listed only if its line is not settled: the log keeps deletions for ever, and a settled one is `log`'s to show. A line with a vault in `conflict` carries the conflict's copies, named as a run names them.
-4. For each given path in turn, list what lies under it, in path order. A given path that is a file is one line. A folder below the given path whose files, more than one, are all in the same state (in both vaults) is one line: its path with a trailing `/`, and the number of files. Any other folder is listed child by child, by the same rule. A line in `conflict` is never folded into a folder.
+   A file the dry scan would record as deleted and one it would record as new, with the same content, are one file renamed, paired as a run pairs them (section 12, "Messages"). If both are `removed` and `new` here, the other vault's state is the same for both or there is none, and every given path takes both or neither, the new path's line becomes `renamed` with `from` the old path, and the old path's line is dropped.
+4. For each given path in turn, list what lies under it, in path order. A given path that is a file is one line. A folder below the given path whose files, more than one, are all in the same state (in both vaults) is one line: its path with a trailing `/`, and the number of files. Any other folder is listed child by child, by the same rule. A line in `conflict` is never folded into a folder. Renamed files fold only if each one's `from` is its path below this folder put below one old folder, which is then the folder line's `from`: `notes/ -> docs/`. A rename that changed a file's name is never folded.
 5. Without `--all`, drop the settled lines. This comes after step 4, so a folder's line always counts all its files.
 6. Print a `state` message for each line, the paths padded to the widest.
 
@@ -717,11 +719,11 @@ How it is built:
 
 | `type` | Fields | Text form | Stream |
 |---|---|---|---|
-| `event` | `kind`, `vault`, `path`, `note` | a marker, a letter and the path, below | stdout |
+| `event` | `kind`, `vault`, `path`, `note`, and `from` for `renamed` | a marker, a letter and the path, below | stdout |
 | `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
 | `setting` | `name`, `value` | `<name>: <value>` | stdout |
 | `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
-| `state` | `path`, `files`, `ours`, `theirs` when there are two vaults, and `conflict` (the copies) when a vault is in that state | `<mark>[ <mark>]`, the path padded to the widest of the listing, each vault's state as a word padded to 10, then `<n> files` for a folder or the conflict's copies; two spaces between columns, none at the end. The states and marks are in `status`, section 11 | stdout |
+| `state` | `path`, `files`, `ours`, `theirs` when there are two vaults, `conflict` (the copies) when a vault is in that state, and `from` when ours is `renamed` | `<mark>[ <mark>]`, the path (`<from> -> <path>` when renamed) padded to the widest of the listing, each vault's state as a word padded to 10, then `<n> files` for a folder or the conflict's copies; two spaces between columns, none at the end. The states and marks are in `status`, section 11 | stdout |
 | `version` | `path`, `hash`, `exec`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`, `executable`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
 | `info` | `message` | the message | stdout |
 | `summary` | the counts | `recorded 3, added 1, …` | stdout |
@@ -734,10 +736,12 @@ An event's text form is a marker, one letter, then `path`, the file's path in it
 |---|---|
 | `A` | `added` |
 | `M` | `updated` |
-| `D` | `deleted` |
+| `D` | `deleted`; or `moved` or `dropped`, with that word as the note: `move` or `drop` removed the file from this vault |
 | `C` | `copied`: a conflict copy was written |
-| `R` | `moved` or `dropped`: `move` or `drop` removed the file from this vault |
+| `R` | `renamed`: `R <from> -> <path>` |
 | `!` | anything that needs attention: `skipped`, `pending`, `incomplete`, `rejected` |
+
+A run reports a file deleted and a file added in one vault as `renamed` when they are one file moved: by content, as git does. At the end of materialise, each `deleted` and each plain `added` (not `merged`) carries the file's hash; a hash found exactly once among the deleted and exactly once among the added pairs them into one `renamed` event, with `path` the new path and `from` the old. Copies, empty files and a move together with an edit stay a `D` and an `A`. These lines are printed together after the vault's other lines, in path order, and counted as `renamed`, not as `added` and `deleted`.
 
 Anything more goes in parentheses after the path. A file whose conflicting versions were merged (section 9) is `M notes.md (merged)`. A `!` line gives its kind and reason: `(skipped: changed since it was scanned)`. A rejected segment has no file, so its path is `.`, the vault itself: `-> ! . (rejected: segment 77b0…: not in canonical form)`.
 

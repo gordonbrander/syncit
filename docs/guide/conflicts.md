@@ -16,7 +16,7 @@ If the same file was edited in two folders since they last synced, syncit keeps 
 <- M notes.txt
 -> C notes-b842127a.txt
 -> U notes.txt (conflict: notes-b842127a.txt)
-recorded 2, added 0, updated 1, deleted 0, conflicts 1, pending 0, skipped 0
+recorded 2, added 0, updated 1, deleted 0, renamed 0, conflicts 1, pending 0, skipped 0
 ```
 
 Both folders end up with the same two files. To settle it:

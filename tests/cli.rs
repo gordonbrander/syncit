@@ -124,7 +124,7 @@ fn cli_smoke() {
     assert_eq!(run(&b, &["move", "sub"]).0, 1, "no vault named");
     let (code, out) = run(&b, &["move", "sub", "../a"]);
     assert_eq!(code, 2, "moved; the conflict is still open: {out}");
-    assert!(out.contains("\n-> R sub/f.txt\n"), "{out}");
+    assert!(out.contains("\n-> D sub/f.txt (moved)\n"), "{out}");
     assert!(!b.join("sub").exists());
     assert_eq!(
         run(&b, &["get", "../a/sub"]).0,

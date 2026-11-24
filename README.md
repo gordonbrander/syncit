@@ -60,7 +60,7 @@ syncit clone ~/Documents /Volumes/Backup/Documents
 ```
 -> A letters/anna.txt
 -> A notes.txt
-recorded 2, added 2, updated 0, deleted 0, conflicts 0, pending 0, skipped 0
+recorded 2, added 2, updated 0, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
 Each line is one file: `A` added, `M` modified, `D` deleted. The arrow says which folder it is in: `->` yours (for `clone`, the new one), `<-` the other. The last line sums up the run.
@@ -75,7 +75,7 @@ syncit sync /Volumes/Backup/Documents
 ```
 <- M notes.txt
 -> A todo.txt
-recorded 2, added 1, updated 1, deleted 0, conflicts 0, pending 0, skipped 0
+recorded 2, added 1, updated 1, deleted 0, renamed 0, conflicts 0, pending 0, skipped 0
 ```
 
 Edits, new files and deletions all travel in both directions. Running it again when nothing has changed does nothing.

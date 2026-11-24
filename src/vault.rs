@@ -265,6 +265,21 @@ impl Vault {
             vault: self.name.clone(),
             path: path.to_string(),
             note: note.to_string(),
+            from: None,
+            side: self.side,
+        };
+        print_stdout(&Message::Event(event.clone()), opts.json);
+        sum.record(event);
+    }
+
+    /// Print that a file was moved from `from` to `to`, and count it.
+    pub fn renamed(&self, opts: &Options, sum: &mut Summary, from: &str, to: &str) {
+        let event = Event {
+            kind: "renamed",
+            vault: self.name.clone(),
+            path: to.to_string(),
+            note: String::new(),
+            from: Some(from.to_string()),
             side: self.side,
         };
         print_stdout(&Message::Event(event.clone()), opts.json);
