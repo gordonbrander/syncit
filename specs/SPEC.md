@@ -215,12 +215,12 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 }
 ```
 
-- `scanned`: when the most recent scan started, in milliseconds. 0 before the first scan.
-- `rows`: one per file this vault had on disk at the last scan. `mtime` is the file's mtime as the filesystem reported it, in milliseconds (floor; negative before 1970). `exec` is whether the owner may execute it (`mode & 0o100`), the only permission that is recorded.
+- `scanned`: when the most recent scan started, in milliseconds. 0 before the first scan. A scan by `status` counts (section 7, "The stat cache").
+- `rows`: one per file this vault had on disk at the last scan. `size` is the file's size in bytes, or `null` when it is not known, as in a row `status` has smudged (section 7) and a row of a bare vault. `mtime` is the file's mtime as the filesystem reported it, in milliseconds (floor; negative before 1970). `exec` is whether the owner may execute it (`mode & 0o100`), the only permission that is recorded.
 - `deleted`: one per path this vault has seen deleted, with its base: the heads, all tombstones, that the absence of a file here reflects. A path is in at most one of `rows` and `deleted`. A dirstate written before this field existed has none, and loads as if it were empty.
 - A missing dirstate file is an empty dirstate. That is the "lost dirstate" case and must work (`CRDT.md`, "Writing an entry", third row).
 
-**The unchanged test.** A file is unchanged against its row if its size, mtime and executable bit equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash; it is the row's version only if its executable bit also equals the row's. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise, `move` and `drop`.
+**The unchanged test.** A file is unchanged against its row if its size, mtime and executable bit equal the row's **and** the row's mtime is less than `scanned − 2000`. Otherwise it is hashed and compared with the row's hash; it is the row's version only if its executable bit also equals the row's. The second condition catches an edit made in the same timestamp tick as the scan that recorded the file; the 2000 ms margin covers filesystems with coarse timestamps. Keep the margin a named constant. One function implements this test and is used by scan, materialise, `move` and `drop`. A row whose `size` is `null` (not known) never passes it: its file is always hashed.
 
 ### Segments
 
@@ -316,12 +316,20 @@ A file entry's `mtime` is the file's mtime in milliseconds, and its `exec` is th
 ### Finishing
 
 1. If there are new entries, write them as one segment into `.syncit/log/`. No entries, no segment.
-2. Set `scanned = now` and save the dirstate.
+2. Set `scanned = now`, and save the dirstate if the scan changed it: a row or a deletion record differs, or a row was hashed, found the same and is now old enough to trust. Otherwise the file is left as it is, with its older `scanned`, which only makes the unchanged test more cautious.
 3. Retain blobs (section 8).
 
 The segment is written before the dirstate is saved. If the run stops between the two, the next scan sees the same difference and writes an entry with the same path, hash, mtime and parents, which is the same entry. For a deletion it writes a second tombstone beside the first, which is harmless: two tombstone heads are the same version.
 
 `scan` has a dry mode that writes nothing: no segment, no config, no dirstate, and scratch files are left alone. The vault value in memory is brought up to date all the same, so what follows sees the state a real scan would leave. `status` and `--dry-run` (section 10) use it.
+
+**The stat cache.** A dry scan hashes every file that fails the unchanged test, and `status` would hash the same files again each time if that were thrown away. So, as `git status` does with its index, a dry scan hands back the dirstate it began with, changed in three ways only, and `status` saves it:
+
+- **Refreshed.** A row whose file was hashed and has the row's hash and executable bit takes the file's size and mtime.
+- **Smudged.** A row whose file has the row's size and mtime, but another hash or executable bit, or could not be read without changing, gets the size `null`. Git zeroes the cached size of such an index entry for the same reason.
+- **`scanned`** becomes the start of this scan.
+
+No row is added or removed, no base and no deletion record changes: nothing in it records a change, and the next scan writes the entries it would have written anyway. Moving `scanned` on is sound because every row is then one of: passing the test before and still older than `scanned`; hashed in this scan and found the same; failing the test on size or mtime; or smudged. It is handed back only if it differs in more than `scanned` and rows that are still too recent to trust, so a vault with nothing to learn is not rewritten. Only `status` saves it, for each vault it scans, because each was just opened and so began with the dirstate on disk; a `--dry-run` writes nothing. A save that fails is ignored.
 
 ## 8. Blobs
 
@@ -359,7 +367,7 @@ A vault retains blobs unless `keep_history` is `0`; then it never writes to `.sy
 - A vault collects only what it keeps. A peer that keeps more, or has not compacted, does not fill it up again.
 - A partial vault does not gather the content of paths it excludes.
 
-A retaining vault calls `retain()` after every scan, and again after segments are exchanged and before anything is materialised, so that a version is saved before it is replaced.
+A retaining vault calls `retain()` after every scan, and again after segments are exchanged and before anything is materialised, so that a version is saved before it is replaced. The second call is left out if the vault's log has not grown since the first: it would keep the same versions. A version that only the other vault's scan made available, as after that vault lost its dirstate, is then fetched at the next run.
 
 ### Compaction
 
@@ -481,7 +489,7 @@ Limits, accepted:
 
 ### Finishing
 
-Save the dirstate once, after all paths.
+Save the dirstate once, after all paths, if materialise changed it.
 
 ## 10. A run with a peer
 
@@ -491,7 +499,7 @@ Save the dirstate once, after all paths.
 2. Scan the local vault, then the peer (section 7). Both scan in every mode, so each vault's changes are recorded from its own dirstate.
 3. Exchange segments: each receiver takes every segment in the other vault's `log/` whose name it lacks. A segment is read, validated as in `CRDT.md`, and only then written into `log/`. A segment that fails is not stored, is reported as `rejected`, and does not stop the run.
 4. Each receiver reloads its log.
-5. Each retaining receiver calls `retain()`. This happens for both before either materialises.
+5. Each retaining receiver whose log grew in step 3 calls `retain()`. This happens for both before either materialises.
 6. Each receiver materialises with the other vault as blob source: the peer first, then the local vault.
 7. Collect conflicts from each receiver's log, for paths it includes, and report each once: for the local vault if it is open there, otherwise for the peer.
 8. Each vault with `autocompact` on compacts (section 8, "Compaction"). Last, so that no step of the run reads a blob that was just dropped. It prints nothing.
@@ -647,7 +655,7 @@ It reads the log only. A vault that receives a file records nothing, so it is ne
 
 One mark means one state and one word. `removed` is a file gone from the vault, whether or not a scan has recorded that: the two differ only in being settled, and a folder's line never mixes them. `syncit status --help` carries the legend.
 
-`status` writes nothing to either vault, has no summary and exits 0. It is the one command that collects before printing, because a folder's line depends on every file in it, and the width of the path column on every line. `status` alone knows only what this vault has not recorded; what another vault lacks is shown by `--vs`, and what a run would do by `--dry-run`.
+`status` records nothing in either vault, and writes only the stat cache (section 7); it has no summary and exits 0. It is the one command that collects before printing, because a folder's line depends on every file in it, and the width of the path column on every line. `status` alone knows only what this vault has not recorded; what another vault lacks is shown by `--vs`, and what a run would do by `--dry-run`.
 
 ### log
 
@@ -692,7 +700,7 @@ With `--dry-run` the first line is `dry run: nothing is changed`, nothing is rem
 
 ### config
 
-- `syncit config` prints the vault's settings, as `setting` messages: `keep-history: <n>|all`, `autocompact: on|off`, then `nickname: <nickname>`.
+- `syncit config` prints the vault's settings, as `setting` messages: `keep-history: <n>|all`, `autocompact: on|off`, then `nickname: <nickname>`. For the vault here it locks the vault and reads its config only, not its log or dirstate, and writes nothing; so do `syncit remote` and `syncit remote remove`, which then saves the config.
 - `syncit config keep-history <n>|all` sets `keep_history`: a number of versions, or `all` for `null`.
 - `syncit config autocompact on|off` sets `autocompact`.
 - A change deletes nothing by itself. If blobs are stored that `keep_history` no longer covers, an `info` line after the settings gives their number and says what will drop them: the next sync or snapshot with `autocompact` on, `syncit compact` with it off.
@@ -871,6 +879,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `changed_during_run` | a file modified after the scan is not replaced (`R10`); the next run records it |
 | `untracked_in_the_way` | a file created at an incoming path after the scan is not overwritten |
 | `same_tick_edit` | an edit that keeps size and mtime right after a scan is still detected |
+| `status_keeps_stat_cache` | after `status` hashes a file whose mtime changed and content did not, the dirstate on disk has the new mtime and a later `scanned`, a second `status` writes nothing, and nothing is recorded; rows of new and removed files are untouched |
+| `status_smudges_same_tick_edit` | `status` after such an edit moves `scanned` on and smudges the row, so the edit is still `modified` at the next `status` and recorded by the next snapshot |
 | `interrupted_before_dirstate` | restore the old dirstate after a snapshot, snapshot again: the set of entries is unchanged |
 | `interrupted_transfer` | remove a parent's segment from the receiver: the path is incomplete and untouched; a re-sync resolves it |
 | `hostile_segment` | a peer's log containing an invalid segment: it is rejected, the rest of the sync completes |

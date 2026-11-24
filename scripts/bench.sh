@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Time syncit commands on two vaults holding the same files: "flat" has one
 # snapshot, "deep" has a long history. The gap between the two columns is
-# what the log costs; the flat column is everything else.
+# what the log costs; the flat column is everything else. The last row syncs
+# each with a clone of itself that is already in step.
 #
 #   scripts/bench.sh
 #   FILES=1000 ROUNDS=10 EDITS=100 scripts/bench.sh    # a smaller vault
@@ -30,6 +31,17 @@ vault() {
 vault "$flat" 0 0
 vault "$deep" "$rounds" "$edits"
 
+# A clone of each, synced once, so that a timed sync has nothing to do.
+peer() {
+    [ -d "$1-peer" ] && return
+    rm -rf "$1-peer.part"
+    "$syncit" clone "$1" "$1-peer.part" >/dev/null
+    mv "$1-peer.part" "$1-peer"
+    (cd "$1" && "$syncit" sync "$PWD-peer" >/dev/null)
+}
+peer "$flat"
+peer "$deep"
+
 # The fastest of $runs runs, in seconds.
 best() {
     local dir=$1
@@ -45,3 +57,5 @@ for cmd in "status" "snapshot" "log d0/f0.txt"; do
     # shellcheck disable=SC2086
     printf '%-16s %8s %8s\n' "$cmd" "$(best "$flat" "$syncit" $cmd)" "$(best "$deep" "$syncit" $cmd)"
 done
+printf '%-16s %8s %8s\n' "sync (no-op)" \
+    "$(best "$flat" "$syncit" sync "$PWD/$flat-peer")" "$(best "$deep" "$syncit" sync "$PWD/$deep-peer")"

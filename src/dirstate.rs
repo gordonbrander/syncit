@@ -1,7 +1,8 @@
 //! `.syncit/dirstate`: this vault's position in the log, which the log cannot
 //! record because it is the same in every vault. It says which version of
 //! each file this vault has on disk, and which deletions it has seen. It is
-//! not a copy of anything: only the size and mtime in a row are a cache.
+//! not a copy of anything: only the size and mtime in a row are a cache,
+//! which `status` keeps fresh as `git status` does the index's.
 
 use crate::blobs::hash_file;
 use crate::entry::Id;
@@ -19,16 +20,20 @@ pub const TICK_MARGIN_MS: i64 = 2000;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Row {
-    pub size: u64,
+    /// None: not known, so the file is always hashed. `status` leaves it so
+    /// in a row whose file looks unchanged by size and mtime but is not, as
+    /// git zeroes the size of a racily clean index entry: the row then
+    /// stays distrusted when `scanned` moves on.
+    pub size: Option<u64>,
     pub mtime: i64,
     pub exec: bool,
     pub hash: String,
     pub base: Vec<Id>, // the entries the file was derived from; sorted
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct Dirstate {
-    pub scanned: i64, // when the most recent scan started, in milliseconds
+    pub scanned: i64, // when the most recent scan started, dry or not, in milliseconds
     pub rows: BTreeMap<String, Row>,
     /// Paths this vault has seen deleted, each with its base: the heads, all
     /// tombstones, that the absence of a file here reflects. A path is in at
@@ -70,7 +75,7 @@ impl Dirstate {
     /// The unchanged test: may a file with this metadata be taken as the
     /// row's version without hashing it?
     pub fn unchanged(&self, row: &Row, meta: &Metadata) -> bool {
-        meta.len() == row.size
+        Some(meta.len()) == row.size
             && mtime_ms(meta) == row.mtime
             && is_exec(meta) == row.exec
             && row.mtime < self.scanned - TICK_MARGIN_MS

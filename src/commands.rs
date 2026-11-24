@@ -10,9 +10,9 @@ use crate::materialise::{copy_name, materialise, no_symlinked_parent, prune, wri
 use crate::output::{
     Context, Event, Message, State, Summary, Version, print_states, print_stdout, warn,
 };
-use crate::scan::{deleted_heads, scan};
+use crate::scan::{Scan, deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
-use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
+use crate::vault::{TMP_PREFIX, Vault, find_root, lock, relative, resolve_path, unique};
 use anyhow::{Context as _, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -361,6 +361,9 @@ fn exchange(
             ),
         );
     }
+    // The size of each log when its vault last retained, which was in
+    // `record`. A log only grows, so the size says whether it has changed.
+    let (mut retained_a, mut retained_b) = (a.log.entries.len(), b.log.entries.len());
     if to_b {
         receive(ctx, b, a, sum)?;
     }
@@ -368,11 +371,11 @@ fn exchange(
         receive(ctx, a, b, sum)?;
     }
     if ctx.no_remove {
-        if to_b {
-            keep(ctx, b, a, sum)?;
+        if to_b && keep(ctx, b, a, sum)? {
+            retained_b = b.log.entries.len();
         }
-        if to_a {
-            keep(ctx, a, b, sum)?;
+        if to_a && keep(ctx, a, b, sum)? {
+            retained_a = a.log.entries.len();
         }
         // Each receiver takes the other's re-creations, so one run converges.
         // ponytail: a corrupt segment is reported as rejected a second time
@@ -385,11 +388,12 @@ fn exchange(
         }
     }
     // Both retain before either materialises, so that a version is saved
-    // before it is replaced.
-    if to_b {
+    // before it is replaced. A vault whose log is as it was when it last
+    // retained has nothing new to keep.
+    if to_b && b.log.entries.len() != retained_b {
         retain(ctx, b, Some(&*a))?;
     }
-    if to_a {
+    if to_a && a.log.entries.len() != retained_a {
         retain(ctx, a, Some(&*b))?;
     }
     // A merge replaces two versions. It is made only if a vault receiving in
@@ -417,8 +421,9 @@ fn exchange(
 
 /// `--no-remove`: a file here whose path the log says is deleted is kept, and
 /// recorded as re-created, as if the user had put it back. Its row becomes a
-/// deletion record of the tombstones, and the scan writes the entry.
-fn keep(ctx: &Context, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result<()> {
+/// deletion record of the tombstones, and the scan writes the entry. Returns
+/// whether it kept any, and so recorded and retained.
+fn keep(ctx: &Context, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result<bool> {
     let rows: Vec<String> = v.dirstate.rows.keys().cloned().collect();
     let mut kept = false;
     for path in rows {
@@ -436,7 +441,7 @@ fn keep(ctx: &Context, v: &mut Vault, peer: &Vault, sum: &mut Summary) -> Result
     if kept {
         record(ctx, v, Some(peer), sum)?;
     }
-    Ok(())
+    Ok(kept)
 }
 
 /// Scan, then retain blobs for what the scan recorded.
@@ -667,7 +672,8 @@ fn collapse(dir: &str, files: &[State], top: bool, out: &mut Vec<State>) {
 /// with `peer` in that vault too: what a scan would record, what a sync
 /// would bring or remove, and what is waiting for the user. Only the lines
 /// that need something, unless `all`. Folders in one state are one line.
-/// Writes nothing. Returns what it printed.
+/// Records nothing; it saves only what its scans learned of files that have
+/// not changed (`Scan::cache`). Returns what it printed.
 pub fn status(
     ctx: &Context,
     cwd: &Path,
@@ -689,11 +695,21 @@ pub fn status(
     let mut peer = peer.map(|path| other(ctx, &mut v, path)).transpose()?;
     // Dry scans, which say what no scan has recorded; then one log for both
     // vaults, so that each is compared with the same winner.
-    let scanned = scan(ctx, &mut v, true)?;
+    // Each vault was just opened, so its scan began with the dirstate on
+    // disk and may save what it learned. The save is a cache write and may
+    // fail, as on read-only media, without failing `status`.
+    let dry_scan = |v: &mut Vault| -> Result<Scan> {
+        let scanned = scan(ctx, v, true)?;
+        if let Some(cache) = &scanned.cache {
+            let _ = cache.save(&v.root);
+        }
+        Ok(scanned)
+    };
+    let scanned = dry_scan(&mut v)?;
     let ours: BTreeMap<_, _> = scanned.changes.into_iter().collect();
     let mut theirs = BTreeMap::new();
     if let Some(peer) = &mut peer {
-        theirs = scan(ctx, peer, true)?.changes.into_iter().collect();
+        theirs = dry_scan(peer)?.changes.into_iter().collect();
         absorb(&mut v, peer);
     }
     let mut files: Vec<State> = vec![];
@@ -862,7 +878,7 @@ fn open_vault(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<Vault> 
 
 /// List the remotes this vault remembers. Returns them, as printed.
 pub fn remotes(ctx: &Context, cwd: &Path) -> Result<Vec<(String, String)>> {
-    let v = Vault::open(ctx, cwd, true)?;
+    let v = lock(cwd)?;
     for (nickname, location) in &v.config.remotes {
         let message = Message::Remote {
             nickname: nickname.clone(),
@@ -928,10 +944,10 @@ fn add(
 /// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
 /// other vaults on this machine may use them.
 pub fn remote_remove(ctx: &Context, cwd: &Path, nickname: &str) -> Result<()> {
-    let mut v = Vault::open(ctx, cwd, true)?;
+    let mut v = lock(cwd)?;
     let location = v.config.remotes.remove(nickname);
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
-    v.storage.save_config(&v.config)?;
+    v.config.save(&v.root)?;
     let message = format!("removed remote {nickname}: {location}");
     print_stdout(ctx, &Message::Info { message });
     Ok(())
@@ -1412,38 +1428,49 @@ pub fn config(
     vault: Option<&Path>,
     change: Option<Setting>,
 ) -> Result<Config> {
+    let print = |config: &Config| {
+        let depth = config.keep_history;
+        let auto = if config.autocompact { "on" } else { "off" };
+        let settings = [
+            (
+                "keep-history",
+                depth.map_or("all".to_string(), |n| n.to_string()),
+            ),
+            ("autocompact", auto.to_string()),
+            ("nickname", config.nickname.clone()),
+        ];
+        for (name, value) in settings {
+            print_stdout(ctx, &Message::Setting { name, value });
+        }
+    };
+    let Some(change) = change else {
+        // To show the settings of the vault here, its config is enough.
+        let config = match vault {
+            None => lock(cwd)?.config,
+            Some(_) => open_vault(ctx, cwd, vault)?.config,
+        };
+        print(&config);
+        return Ok(config);
+    };
     let mut v = open_vault(ctx, cwd, vault)?;
-    let changed = change.is_some();
     match change {
-        Some(Setting::KeepHistory(depth)) => v.config.keep_history = depth,
-        Some(Setting::Autocompact(on)) => v.config.autocompact = on,
-        Some(Setting::Nickname(nickname)) => {
+        Setting::KeepHistory(depth) => v.config.keep_history = depth,
+        Setting::Autocompact(on) => v.config.autocompact = on,
+        Setting::Nickname(nickname) => {
             ensure!(
                 valid_nickname(&nickname),
                 "a nickname is 1 to 64 bytes, with no spaces or control characters"
             );
             v.config.nickname = nickname;
         }
-        None => {}
     }
     v.storage.save_config(&v.config)?;
-    let depth = v.config.keep_history;
+    print(&v.config);
     let auto = v.config.autocompact;
-    let settings = [
-        (
-            "keep-history",
-            depth.map_or("all".to_string(), |n| n.to_string()),
-        ),
-        ("autocompact", if auto { "on" } else { "off" }.to_string()),
-        ("nickname", v.config.nickname.clone()),
-    ];
-    for (name, value) in settings {
-        print_stdout(ctx, &Message::Setting { name, value });
-    }
     // Say what a change is about to cost, at the moment it is made.
     let keep = v.log.keep(v.config.keep_history, |_| true);
     let beyond = v.storage.drop_blobs_except(&keep, true)?.0;
-    if changed && beyond > 0 {
+    if beyond > 0 {
         let by = match auto {
             true => "the next sync or snapshot drops",
             false => "`syncit compact` drops",

@@ -133,27 +133,41 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
         .join("/"))
 }
 
+/// A vault found and locked, with its config and nothing else read: all
+/// that a command about its settings needs. Locked until dropped.
+pub struct Locked {
+    pub root: PathBuf,
+    pub config: Config,
+    lock: File,
+}
+
+/// Find and lock the vault at or above `start`, and read its config.
+pub fn lock(start: &Path) -> Result<Locked> {
+    let root = find_root(start)?;
+    let lock = File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".syncit/lock"))?;
+    lock.try_lock()
+        .map_err(|_| anyhow!("vault is in use: {}", root.display()))?;
+    let config = Config::load(&root)?;
+    ensure!(
+        config.syncit == 1,
+        "{} has format version {}, not 1",
+        root.display(),
+        config.syncit
+    );
+    Ok(Locked { root, config, lock })
+}
+
 impl Vault {
     /// Find, lock and load the vault at or above `start`. `local` is for the
     /// vault a command runs in; a peer's log is read leniently.
     pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault> {
-        let root = find_root(start)?;
+        let Locked { root, config, lock } = lock(start)?;
         let dot = root.join(".syncit");
-        let lock = File::options()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dot.join("lock"))?;
-        lock.try_lock()
-            .map_err(|_| anyhow!("vault is in use: {}", root.display()))?;
         let storage = Dir::new(&root);
-        let config = storage.load_config()?;
-        ensure!(
-            config.syncit == 1,
-            "{} has format version {}, not 1",
-            root.display(),
-            config.syncit
-        );
         let dirstate = Dirstate::load(&root)?;
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
@@ -231,7 +245,7 @@ impl Vault {
                 && stored(self, hash)
             {
                 let row = crate::dirstate::Row {
-                    size: 0,
+                    size: None,
                     mtime: e.mtime,
                     exec: e.exec,
                     hash: hash.clone(),
