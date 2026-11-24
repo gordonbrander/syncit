@@ -18,12 +18,8 @@ pub struct Entry {
     pub path: String,
 }
 
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 pub fn sha256(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 pub fn is_hash(s: &str) -> bool {

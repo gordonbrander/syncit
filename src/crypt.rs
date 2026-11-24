@@ -2,7 +2,6 @@
 //! object names derived from the master key, and XChaCha20-Poly1305 in the
 //! STREAM construction. No I/O beyond `Read` and `Write`.
 
-use crate::entry::hex;
 use aead_stream::{DecryptorBE32, EncryptorBE32};
 use chacha20poly1305::XChaCha20Poly1305;
 use hkdf::Hkdf;
@@ -33,12 +32,12 @@ fn derive(key: &Key, info: &str) -> Key {
 
 /// The value in `format` that tells a right key from a wrong one.
 pub fn check(key: &Key) -> String {
-    hex(&*derive(key, "syncit check"))
+    hex::encode(derive(key, "syncit check").as_slice())
 }
 
 /// The object name of a segment or blob (`kind` is `log` or `blobs`).
 pub fn name(key: &Key, kind: &str, hash: &str) -> String {
-    hex(&*derive(key, &format!("syncit name {kind} {hash}")))
+    hex::encode(derive(key, &format!("syncit name {kind} {hash}")).as_slice())
 }
 
 /// The key an object named `name` is encrypted with.
