@@ -160,7 +160,7 @@ The remote implementation needs a scratch directory for plaintext in transit. It
 <url>/format         plaintext, one line: {"check":"<64 hex>","syncit":1}
 <url>/config         the vault's config, encrypted
 <url>/log/<name>     a segment, encrypted
-<url>/blobs/<name>   a blob, encrypted
+<url>/blobs/<ab>/<name>   a blob, encrypted, in a folder named by the first 2 chars of its name
 ```
 
 - `<name>` is 64 lowercase hex characters (section 6). Other names in a listing are ignored.

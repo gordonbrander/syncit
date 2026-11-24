@@ -171,7 +171,7 @@ pub struct Loser { pub hash: String, pub mtime: i64, pub exec: bool }
     dirstate     # JSON, local
     lock      # empty file, locked while a command runs
     log/      # segments, named by hash; the only replicated part
-    blobs/    # blobs, named by hash, flat
+    blobs/    # blobs, named by hash, in folders by its first 2 hex chars: ab/abcdef…
     tmp/      # scratch for atomic writes into .syncit/
   .syncitignore   # optional ignore list; an ordinary file
 ```
@@ -332,9 +332,9 @@ Implements `PRD.md`, "Blobs". Serves `R11`, `R13`, `R15`. Stores (`R16`, `R24`, 
 `fetch(hash, destination)` tries these in order and stops at the first that yields the right bytes:
 
 1. this vault's working files;
-2. this vault's `.syncit/blobs/<hash>`;
+2. this vault's `.syncit/blobs/<ab>/<hash>`;
 3. the peer's working files, if there is a peer in this run;
-4. the peer's `.syncit/blobs/<hash>`;
+4. the peer's `.syncit/blobs/<ab>/<hash>`;
 
 - Working files are found through an in-memory map from hash to paths, one per vault, built at the start of the run from the dirstate rows. Whenever the run writes a file or renames one (including a conflict copy, which has no row), it adds the new location to the map. The map is a hint only.
 - Every fetch copies to the destination while hashing and succeeds only if the hash matches (`R11`). On a mismatch the destination is removed and the next source is tried.

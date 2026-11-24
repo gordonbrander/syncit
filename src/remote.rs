@@ -372,6 +372,11 @@ pub struct Remote {
     blobs: RefCell<BTreeMap<String, u64>>,
 }
 
+/// Where a blob object is: `blobs/ab/abcdef…`, as in a vault's `.syncit/`.
+fn blob_path(object: &str) -> String {
+    format!("blobs/{}/{object}", &object[..2])
+}
+
 impl Remote {
     /// List the vault, and download and check the segments the local vault
     /// does not have (store.md, section 6, "Segment names in a remote").
@@ -380,7 +385,13 @@ impl Remote {
             list.into_iter().filter(|(n, _)| is_hash(n)).collect()
         };
         let log: BTreeSet<String> = hashed(bucket.list("log")?).into_keys().collect();
-        let blobs = hashed(bucket.list("blobs")?);
+        let blobs = bucket.list("blobs")?.into_iter();
+        // Listed as `ab/<name>`; known by the name alone.
+        let blobs = hashed(
+            blobs
+                .map(|(n, s)| (n.rsplit('/').next().unwrap_or("").into(), s))
+                .collect(),
+        );
         let known: BTreeMap<String, String> = match &local {
             Some(dir) => dir.segment_names()?,
             None => BTreeSet::new(),
@@ -478,7 +489,7 @@ impl Storage for Remote {
         }
         let object = self.blob_name(hash);
         let sealed = self.scratch()?;
-        let got = self.bucket.get_to_file(&format!("blobs/{object}"), &sealed);
+        let got = self.bucket.get_to_file(&blob_path(&object), &sealed);
         if !got.map_err(io::Error::other)? {
             return Ok(false);
         }
@@ -498,7 +509,7 @@ impl Storage for Remote {
         if crypt::plain_len(size)? > max {
             return None;
         }
-        let sealed = self.bucket.get(&format!("blobs/{object}")).ok()??;
+        let sealed = self.bucket.get(&blob_path(&object)).ok()??;
         let plain = open(&crypt::object_key(&self.key, "blobs", &object), &sealed).ok()?;
         (sha256(&plain) == hash).then_some(plain)
     }
@@ -510,7 +521,7 @@ impl Storage for Remote {
             let key = crypt::object_key(&self.key, "blobs", &object);
             let done = crypt::encrypt(&key, File::open(src)?, File::create(&sealed)?)
                 .map_err(anyhow::Error::from)
-                .and_then(|_| self.bucket.put_file(&format!("blobs/{object}"), &sealed));
+                .and_then(|_| self.bucket.put_file(&blob_path(&object), &sealed));
             let size = sealed.metadata().map(|m| m.len());
             let _ = fs::remove_file(&sealed);
             done?;
@@ -531,7 +542,7 @@ impl Storage for Remote {
             .collect();
         if !dry_run {
             for (object, _) in &found {
-                self.bucket.delete(&format!("blobs/{object}"))?;
+                self.bucket.delete(&blob_path(object))?;
                 self.blobs.borrow_mut().remove(object);
             }
         }
