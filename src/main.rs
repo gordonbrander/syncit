@@ -235,7 +235,7 @@ enum Command {
         paths: Vec<PathBuf>,
         /// Make sure another vault has a backup of the files.
         ///
-        /// The current state of the dropped files will be snapshotted and pushed there for backup.
+        /// Nothing is sent there. To send files and then remove them here, use `syncit move`.
         #[arg(long, value_name = "VAULT")]
         check: Option<PathBuf>,
         /// Drop files, even if no backup can be made
@@ -272,7 +272,7 @@ With --vs there are two marks and two words: ours first, theirs second.")]
         #[arg(short, long)]
         all: bool,
     },
-    /// Show the vault that edited each version of a file
+    /// Show the vault that edited the current version of each file
     #[command(after_long_help = "\
 Each line is: <vault nicknames> <path>, for the current version of the file.
 Several nicknames, as in `laptop,drive notes.txt`, mean each of those vaults
