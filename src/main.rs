@@ -335,6 +335,16 @@ For every version of a file and when it was made, see `syncit log`.")]
         #[command(subcommand)]
         setting: Option<SettingArg>,
     },
+    /// Update a vault made by an older syncit to the current format
+    ///
+    /// The vault you run a command in is updated by that command, so this is
+    /// for a vault that others use too: a remote, or a folder on a drive. A
+    /// command refuses such a vault until it is migrated. Afterwards an older
+    /// syncit can no longer use it, so update syncit on every machine that does.
+    Migrate {
+        /// The vault to migrate (path, URL, or remote nickname). Default: this vault
+        vault: Option<PathBuf>,
+    },
     /// List other vaults this one knows about. Add or remove other vaults.
     Remote {
         #[command(subcommand)]
@@ -498,6 +508,7 @@ fn main() {
         Command::Compact { vault, .. } => {
             commands::compact(ctx, cwd, vault.as_deref()).map(|_| None)
         }
+        Command::Migrate { vault } => commands::migrate(ctx, cwd, vault.as_deref()).map(|_| None),
         Command::Remote { action: None } => commands::remotes(ctx, cwd).map(|_| None),
         Command::Remote {
             action:

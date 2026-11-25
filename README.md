@@ -119,6 +119,7 @@ Short guides to everything else are at **[gordonbrander.github.io/syncit](https:
 | `syncit compact [--dry-run]` | drop the old versions `keep-history` no longer covers |
 | `syncit config nickname <name>` | name this vault in the changes it records |
 | `syncit config --vault <vault> ...`, `syncit compact --vault <vault>` | act on another vault, such as a remote |
+| `syncit migrate [<vault>]` | update a vault made by an older syncit; needed only for a remote or another folder, when a command says so |
 | `syncit remote` | list the vaults this one remembers by nickname |
 | `syncit remote add [--nickname <name>] <url or folder>` | remember a vault; for a remote, find or ask for its key |
 | `syncit remote remove <nickname>` | forget a remote |

@@ -80,6 +80,9 @@ pub fn upgrade(ctx: &Context, b: &impl Backend, name: &str) -> Result<()> {
 
 /// The migration from version `from` to the next. Each must be safe to stop
 /// at any change and run again from the top.
+// ponytail: a stopped step is run again, not replayed, so each is written to
+// allow that. If one cannot be, have steps return a plan of changes that the
+// runner journals and replays.
 fn step(b: &impl Backend, from: u32) -> Result<()> {
     match from {
         1 => to_2(b),
