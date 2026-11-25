@@ -14,6 +14,9 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// Where a vault's config is on its backend.
+const CONFIG: &str = "config.toml";
+
 pub struct Store<B: Backend> {
     /// The vault's folder or URL, for errors.
     name: String,
@@ -66,15 +69,23 @@ impl<B: Backend> Store<B> {
 
     pub fn load_config(&self) -> Result<Config> {
         let name = &self.name;
-        let read = self.backend.read("config");
+        let read = self.backend.read(CONFIG);
         let bytes = read.with_context(|| format!("cannot read the config of {name}"))?;
         let bytes = bytes.with_context(|| format!("{name} has no config"))?;
-        serde_json::from_slice(&bytes).with_context(|| format!("corrupt config {name}"))
+        let text = std::str::from_utf8(&bytes).map_err(anyhow::Error::from);
+        text.and_then(Config::parse)
+            .with_context(|| format!("corrupt config {name}"))
     }
 
+    /// Only the values that changed are rewritten: what else is in the file
+    /// is its owner's, and stays.
     pub fn save_config(&self, config: &Config) -> Result<()> {
-        let text = serde_json::to_string_pretty(config)? + "\n";
-        self.backend.write("config", text.as_bytes())
+        let existing = self.backend.read(CONFIG)?;
+        let existing = existing
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        self.backend
+            .write(CONFIG, config.to_toml(existing).as_bytes())
     }
 
     fn log(&self) -> Result<RefMut<'_, BTreeSet<String>>> {

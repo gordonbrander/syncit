@@ -37,6 +37,9 @@ Exit codes:
 Files:
   .syncitignore  at the vault root: one name or path per line that is
                  not to be synced; no wildcards
+  .syncit/config.toml
+                 this vault's settings, which `syncit config` prints.
+                 Yours to edit: comments are kept
   ~/.config/syncit/credentials.toml
                  credentials for remote vaults";
 
@@ -347,7 +350,12 @@ For every version of a file and when it was made, see `syncit log`.")]
         #[arg(long, value_name = "VAULT")]
         vault: Option<PathBuf>,
     },
-    /// Show this vault's settings, or change a setting
+    /// Show this vault's settings, or change a setting.
+    ///
+    /// Prints `.syncit/config.toml`, which may also be edited by hand.
+    /// Editing `include` or `exclude` there moves no files: the next pull
+    /// fetches what is newly included, and `syncit drop` removes what is
+    /// newly excluded.
     Config {
         /// Configure a different vault (path, URL, or remote nickname)
         #[arg(long, value_name = "VAULT")]

@@ -28,7 +28,7 @@ Every difference in behaviour must follow from one of the two properties:
 | No lock | remote: object storage has none. Safe because log and blob objects are immutable and named by hash |
 | A secret key is needed | remote |
 
-Everything else is the same as for any vault: a `config` with `nickname`, `include`, `exclude`, `keep_history` and `autocompact`; a log; blobs; validation of every segment (`CRDT.md`, "Validation") and blob received. The log format does not change.
+Everything else is the same as for any vault: a config with `nickname`, `include`, `exclude`, `keep-history` and `autocompact`; a log; blobs; validation of every segment (`CRDT.md`, "Validation") and blob received. The log format does not change.
 
 **Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from `credentials.toml` and the environment, section 5). Parallel transfers. A bare vault on a plain local path.
 
@@ -80,7 +80,7 @@ These are added to the dependencies the crate has today. Everything this documen
 Rules for the features:
 
 - `cargo install` gives the whole tool. `--no-default-features` gives the small one, and `--no-default-features --features remote` a build for a machine with no keychain.
-- `Store`, the `Backend` trait, `Fs`, `config.remotes`, the `remote` commands and targets that are paths or nicknames of paths are **not** behind a feature. The config format is the same in every build, so a vault made by one build opens in another.
+- `Store`, the `Backend` trait, `Fs`, `config.remotes`, the `remote` commands and targets that are paths or nicknames of paths are **not** behind a feature. The config format is the same in every build, so a vault made by one build opens in another; `toml_edit`, which reads and writes it, is therefore not behind a feature.
 - The gates are few and at the edges: the bucket and sealed backends and the two modules beside them, the place a URL target is opened, `init <url>`, and the keychain entry in the key search. No `#[cfg]` inside the run, the log or the blob code.
 - There is no feature for each cloud. S3, GCS and Azure share nearly all their dependencies.
 
@@ -162,7 +162,7 @@ A read that finds something other than what was written (changed, cut short, or 
 
 ```
 format              what the vault is: its layout version (section 14)
-config              the vault's config
+config.toml         the vault's config
 log/<name>          a segment, named by its SHA-256
 blobs/<ab>/<hash>   a blob, in a folder named by the first 2 chars of its hash
 ```
@@ -199,7 +199,7 @@ and these operations: `open`, which refuses a vault that is not at this build's 
 
 ```
 <url>/format                          plaintext, one line: {"check":"<64 hex>","syncit":2}
-<url>/E(config)                       the vault's config
+<url>/E(config.toml)                  the vault's config
 <url>/E(log)/E(<name>)                a segment
 <url>/E(blobs)/E(<ab>)/E(<hash>)      a blob
 ```
@@ -208,7 +208,7 @@ This is the layout of section 4 on a sealed backend: `E(x)` is the name `x`, enc
 
 - A name that the vault's key did not make is not one of the vault's files. It is left out of every listing and never touched.
 - Segments and blobs are immutable and written whole. A blob that exists is not written again.
-- `config` is the same JSON as `.syncit/config`, and is the one file that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
+- `config.toml` is the same TOML as `.syncit/config.toml`, and is the one file that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
 - `format` is canonical JSON, keys in alphabetical order. `syncit` is the layout version (section 14), as in every vault. `check` lets a wrong key be told from a damaged store. It is the one file read before the key is known, so it is the one file `Sealed` does not encrypt: `Sealed` stores it under its own name, as it is.
 - A prefix with objects but no `format` is not a vault and is refused, untouched.
 - syncit never creates a bucket or a directory. A `file://` directory that does not exist is an error, and syncit must check for it itself (section 2).
@@ -249,7 +249,7 @@ Everything is derived from `K` with HKDF-SHA256 `expand` (`Hkdf::from_prk(K)`):
 | key for names | `"syncit names"` | 64 |
 | key for the file at `path` | `"syncit content " + path` | 32 |
 
-`path` is the plaintext path of section 4, such as `log/<name>` or `config`.
+`path` is the plaintext path of section 4, such as `log/<name>` or `config.toml`.
 
 **Names.** Each name in a path is encrypted on its own with AES-256-SIV (RFC 5297, `aes-siv`), with no associated data, and written in lowercase hex: 16 bytes longer than the name, so 160 characters for a hash.
 
@@ -278,7 +278,7 @@ A vault opened by URL is a `Vault<_, Bare>` (section 4). In a bare vault:
 - **No lock, no ignore file.** `takes(path)` is `includes(path)` and the `.syncit` and scratch-name rules.
 - **Compaction** is the same code: `drop_blobs_except(Log::keep(keep_history, |_| true))`.
 
-A remote vault created by `init` has `keep_history: null` (all) and `autocompact: false`, so by default it never drops anything. Both can be changed (section 9).
+A remote vault created by `init` has `keep-history = "all"` and `autocompact = false`, so by default it never drops anything. Both can be changed (section 9).
 
 **A known race.** Compacting a remote while another vault pushes to it can drop a blob whose segment has not arrived yet. The path then reads as `pending` to others, and the pusher's next push uploads the blob again, because `retain` asks the storage what it lacks on every run. This is not guarded.
 
@@ -330,7 +330,7 @@ A folder that shares a remote's nickname is reached as `./name`. A URL may be us
 **`syncit init <url>`** makes a remote vault. The prefix must be reachable and empty.
 
 1. `K` is the key in `Context.secret_key` if set, otherwise new random bytes.
-2. Write `format`, then `config`: `include: [""]`, `keep_history: null`, `autocompact: false`, `nickname` from `--nickname <name>`, default `origin`.
+2. Write `format`, then `config.toml`: `include = ["."]`, `keep-history = "all"`, `autocompact = false`, `nickname` from `--nickname <name>`, default `origin`.
 3. If the key was generated, print it, then save it (section 8):
 
 ```
@@ -413,7 +413,7 @@ No test uses the real keychain or the network. Tests pass a phrase in `Context.s
 | `secrets_file` | mode 0600, in a folder saving makes; two remotes give two entries; saving again replaces; comments and other keys written by hand stay; a missing file gives no key; bad TOML, a `remotes` that is not a table and a phrase that is not a string are each `corrupt secrets` |
 | `credentials_match` | an entry's `url` applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; the entries that apply come from the shortest prefix to the longest, whatever their order in the file; `url` is not among the settings; a URL no entry covers gets none |
 | `credentials_errors` | a missing file gives no settings; bad TOML, a `remotes` that is not `[[remotes]]` entries, an entry with no `url` or a `url` that is not a string, a setting that is not a string, and two entries with the same `url` are each `corrupt credentials <path>`, naming the entry |
-| `init_remote` | writes `format` and the encrypted `config`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses `format` version 2 |
+| `init_remote` | writes `format` and the encrypted `config.toml`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses a `format` ahead of the build |
 | `remote_add` | records the target's nickname and location for a URL and for a path; a taken name needs `--nickname`; a wrong phrase is refused and `config` is unchanged; `remote remove` forgets it |
 | `story_c2_sync_through_remote` | two vaults that never sync with each other converge through one remote, in either order, including a conflict; a vault with no history supplies its current files; a third machine `clone`s the URL and has everything |
 | `remote_is_opaque` | no object in the remote's directory contains a known line of a file, a path, a nickname or a plaintext hash, and no name in the tree is a plaintext hash or a plaintext name |
@@ -489,7 +489,7 @@ fn step(b: &impl Backend, from: u32) -> Result<()>       // one `match`: 1 => to
 | Layout | Change |
 |---|---|
 | 1 | as first built. The version is the config's `syncit` field |
-| 2 | the version is in `format`, in every vault, and the config has no `syncit` |
+| 2 | the version is in `format`, in every vault. The config is TOML in `config.toml`, with no `syncit`: `""` in a list of paths is written `"."`, and a `keep_history` of `null` is `keep-history = "all"` |
 
 Tests: `every_step_survives_a_stop` and `every_step_survives_a_stop_sealed` (the rules above, on a folder and on a sealed folder: a layout 1 vault migrates and keeps every setting; again is nothing; a newer vault is refused untouched; no step is harmed by a stop), `migrates_own_vault`, `migrate_other_vault`, `migrate_remote` (an old remote is refused by `sync`, `clone` and `config --vault` and not changed; migrated from outside any vault; then they work).
 

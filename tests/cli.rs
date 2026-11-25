@@ -57,16 +57,17 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["sync"]).0, 1, "no vault named");
     assert_eq!(run(&a, &["config", "keep-history", "maybe"]).0, 1);
     assert_eq!(run(&a, &["config", "autocompact", "maybe"]).0, 1);
+    // `config` prints the config as TOML, as `config.toml` has it.
+    let toml = |nickname: &str, keep: &str| {
+        format!(
+            "nickname = \"{nickname}\"\nkeep-history = {keep}\nautocompact = true\n\
+             include = [\".\"]\nexclude = []\n\n[remotes]\n"
+        )
+    };
     let (code, out) = run(&a.join("sub"), &["config", "keep-history", "3"]);
-    assert_eq!(
-        (code, out.as_str()),
-        (0, "keep-history: 3\nautocompact: on\nnickname: a\n")
-    );
+    assert_eq!((code, out), (0, toml("a", "3")));
     let (code, out) = run(&a.join("sub"), &["config", "keep-history", "all"]);
-    assert_eq!(
-        (code, out.as_str()),
-        (0, "keep-history: all\nautocompact: on\nnickname: a\n")
-    );
+    assert_eq!((code, out.clone()), (0, toml("a", "\"all\"")));
     assert_eq!(run(&a, &["compact"]), (0, "nothing to drop\n".to_string()));
     assert_eq!(
         run(&a, &["config", "store", "none"]).0,
@@ -76,11 +77,25 @@ fn cli_smoke() {
     assert_eq!(run(&a, &["config"]).1, out);
     assert_eq!(run(&a, &["blame"]), (0, "a sub/f.txt\n".to_string()));
     assert_eq!(run(&a, &["config", "nickname", "two words"]).0, 1);
+    // The file is the user's to edit: a comment survives a change made by
+    // the command, and a misspelt key is named.
+    let file = a.join(".syncit/config.toml");
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, format!("# mine\n{text}")).unwrap();
     let (code, out) = run(&a, &["config", "nickname", "desk"]);
+    assert_eq!((code, out), (0, toml("desk", "\"all\"")));
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("# mine\nnickname = \"desk\"\n"), "{text}");
+    let (code, out) = run(&a, &["--json", "config"]);
+    assert_eq!(code, 0);
     assert_eq!(
-        (code, out.as_str()),
-        (0, "keep-history: all\nautocompact: on\nnickname: desk\n")
+        out.trim(),
+        r#"{"type":"config","include":["."],"exclude":[],"keep-history":"all","autocompact":true,"nickname":"desk","remotes":{}}"#
     );
+    fs::write(&file, text.replace("exclude", "exlude")).unwrap();
+    let (code, _, err) = both(&a, &["status"]);
+    assert!(code == 1 && err.contains("unknown key exlude"), "{err}");
+    fs::write(&file, text).unwrap();
     let (code, out) = run(&a, &["--json", "blame", "sub"]);
     assert_eq!(code, 0);
     assert_eq!(

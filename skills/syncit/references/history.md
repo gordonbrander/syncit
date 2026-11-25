@@ -3,7 +3,7 @@
 ## What a vault keeps
 
 ```sh
-syncit config            # shows keep-history, autocompact, nickname
+syncit config            # prints the vault's config.toml: keep-history, autocompact, nickname, include, exclude, remotes
 ```
 
 - `keep-history` is how many versions back the vault stores file content for. A new vault keeps `1`: the version before the current one can be restored, older ones cannot. A new remote vault keeps `all`.

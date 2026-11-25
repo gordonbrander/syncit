@@ -127,6 +127,24 @@ To drop a folder but keep part of it, add `--keep`. The kept files are not touch
 syncit drop --check /Volumes/Backup/Archive photos --keep photos/2024
 ```
 
+## The rules in the config file
+
+What a vault includes and excludes is two lists in its config, which `syncit config` prints:
+
+```toml
+include = ["."]
+exclude = ["video", "photos/raw"]
+```
+
+`"."` is the whole vault. The longest matching path decides, so `include = ["photos"]` with `exclude = ["photos/raw"]` is "photos, without raw".
+
+`clone`, `get`, `move` and `drop` write these lists for you, and move the files to match. You can also edit them in `.syncit/config.toml`. Editing changes what is fetched from then on, and never moves a file by itself:
+
+- A path you add to `include` arrives with the next `pull` or `sync`.
+- A path you add to `exclude` stays on disk and keeps syncing. `syncit status` lists it as `undropped`, and each sync reminds you, until you decide: `syncit drop <path>` removes it here, and `syncit get` keeps it.
+
+If you delete an excluded folder by hand, it is removed from this vault only. Nothing is deleted anywhere else.
+
 ## Pushing to a partial vault
 
 The other way round works too: when you `push` to a vault that has only part of the archive, it takes only what it includes, and tells you what it did not take:
