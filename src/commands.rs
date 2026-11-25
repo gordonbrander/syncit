@@ -8,6 +8,7 @@ use crate::dirstate::is_exec;
 use crate::entry::valid_path;
 use crate::log::PathState;
 use crate::materialise::{copy_name, no_symlinked_parent, prune, write_now};
+use crate::migrate::{self, VERSION};
 use crate::output::{
     Context, Event, Message, State, Summary, Traffic, Version, print_states, print_stdout, warn,
 };
@@ -53,7 +54,7 @@ fn create(dir: &Path, include: Vec<String>) -> Result<Config> {
         fs::create_dir_all(dir.join(".syncit").join(sub))?;
     }
     File::create(dir.join(".syncit/lock"))?;
-    config.save(dir)?;
+    Store::create(&dir.display().to_string(), Fs::at(dir), &config)?;
     Ok(config)
 }
 
@@ -111,7 +112,7 @@ pub fn init_remote(
     };
     crate::sealed::create(&bucket, &key)?;
     let sealed = crate::sealed::Sealed::new(bucket, key.clone());
-    Store::new(url, sealed).save_config(&config)?;
+    Store::create(url, sealed, &config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
     print_stdout(ctx, &Message::Info { message });
     if !generated {
@@ -940,9 +941,58 @@ pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Res
     run(ctx, cwd, from, Mode::Pull)
 }
 
+/// The store of the vault at or above `cwd`, which a command runs in:
+/// locked, and brought up to this build's layout if it is behind. For a
+/// command that needs the vault's settings and not its log.
+fn own_store(ctx: &Context, cwd: &Path) -> Result<Store<Fs>> {
+    let fs = Fs::open(cwd)?;
+    let name = fs.root().display().to_string();
+    migrate::upgrade(ctx, &fs, &name)?;
+    Store::open(&name, fs)
+}
+
+/// Bring a vault up to this build's layout: the one `vault` names, or the
+/// one here. Any command does this for the vault it runs in; this is for a
+/// vault that others use too, a remote or a folder on a drive, which no
+/// other command changes the layout of. Returns the version it was at.
+pub fn migrate(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<u32> {
+    let done = |name: &str, from: u32| {
+        let message = match from {
+            VERSION => format!("{name} is at format version {VERSION}"),
+            _ => format!("migrated {name} from format version {from} to {VERSION}"),
+        };
+        print_stdout(ctx, &Message::Info { message });
+        from
+    };
+    let dir = |start: &Path| -> Result<u32> {
+        let fs = Fs::open(start)?;
+        let name = fs.root().display().to_string();
+        Ok(done(&name, migrate::migrate(&fs, &name)?))
+    };
+    let Some(target) = vault else {
+        return dir(cwd);
+    };
+    // A nickname is one of the vault here, if there is a vault here.
+    let remotes = own_store(ctx, cwd).and_then(|store| Ok(store.load_config()?.remotes));
+    match Target::parse(target, remotes.as_ref().ok()) {
+        Target::Dir(start) => dir(&start),
+        Target::Url(url) => Ok(done(&url, migrate_url(ctx, &url)?)),
+    }
+}
+
+#[cfg(feature = "remote")]
+fn migrate_url(ctx: &Context, url: &str) -> Result<u32> {
+    migrate::migrate(&crate::remote::backend(ctx, url)?, url)
+}
+
+#[cfg(not(feature = "remote"))]
+fn migrate_url(_: &Context, _: &str) -> Result<u32> {
+    Err(no_remote())
+}
+
 /// List the remotes this vault remembers. Returns them, as printed.
 pub fn remotes(ctx: &Context, cwd: &Path) -> Result<Vec<(String, String)>> {
-    let config = Store::dir(Fs::open(cwd)?).load_config()?;
+    let config = own_store(ctx, cwd)?.load_config()?;
     for (nickname, location) in &config.remotes {
         let message = Message::Remote {
             nickname: nickname.clone(),
@@ -1011,7 +1061,7 @@ fn add(
 /// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
 /// other vaults on this machine may use them.
 pub fn remote_remove(ctx: &Context, cwd: &Path, nickname: &str) -> Result<()> {
-    let store = Store::dir(Fs::open(cwd)?);
+    let store = own_store(ctx, cwd)?;
     let mut config = store.load_config()?;
     let location = config.remotes.remove(nickname);
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
@@ -1045,7 +1095,7 @@ fn find_remote(ctx: &Context, url: &str) -> Result<(Config, Found)> {
         Err(_) => (keys::prompt(url, &check)?, Source::New),
     };
     let sealed = crate::sealed::Sealed::new(bucket, found.0.clone());
-    let config = Store::new(url, sealed).load_config()?;
+    let config = Store::open(url, sealed)?.load_config()?;
     Ok((config, found))
 }
 
@@ -1576,7 +1626,7 @@ pub fn config(
         return match change {
             // To show the settings of the vault here, its config is enough.
             None => {
-                let config = Store::dir(Fs::open(cwd)?).load_config()?;
+                let config = own_store(ctx, cwd)?.load_config()?;
                 print_settings(ctx, &config);
                 Ok(config)
             }

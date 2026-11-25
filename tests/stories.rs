@@ -19,7 +19,7 @@ static O: LazyLock<Context> = LazyLock::new(|| Context {
     ours: None,
 });
 use std::sync::LazyLock;
-use syncit::backend::Fs;
+use syncit::backend::{Backend, Fs};
 use syncit::blobs::NO_PEER;
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
@@ -102,7 +102,7 @@ fn paths(list: &[&str]) -> Vec<PathBuf> {
 }
 
 fn log(dir: &Path) -> Log {
-    Log::load(&O, &Store::dir(Fs::at(dir)), None, true).unwrap()
+    Log::load(&O, &Store::open("v", Fs::at(dir)).unwrap(), None, true).unwrap()
 }
 
 fn names(dir: &Path) -> BTreeSet<String> {
@@ -1800,10 +1800,81 @@ fn nested_vault_is_ordinary_files() {
     assert!(cmd::clone(&O, Path::new("/"), &a, &tmp.path().join("c"), &[], false).is_ok());
 }
 
+/// Make the vault on `b` what version 1 made: the version in the config,
+/// and no `version` file.
+fn to_version_1(b: &impl Backend) {
+    let bytes = b.read("config").unwrap().unwrap();
+    let mut config: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    config["syncit"] = 1.into();
+    let text = serde_json::to_string_pretty(&config).unwrap();
+    b.write("config", text.as_bytes()).unwrap();
+    b.remove("version").unwrap();
+}
+
+#[test]
+fn migrates_own_vault() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
+    to_version_1(&Fs::at(&a));
+    let before = Config::load(&b).unwrap();
+    assert!(Config::load(&a).is_err(), "not read as it is");
+    // Any command in the vault brings it up to date, a dry one too.
+    assert!(status(&a).is_empty());
+    assert_eq!(
+        fs::read_to_string(a.join(".syncit/version")).unwrap(),
+        "2\n"
+    );
+    let after = Config::load(&a).unwrap();
+    assert_eq!(
+        (after.include, after.keep_history),
+        (before.include, before.keep_history)
+    );
+    put(&a, "f.txt", "v2", 1);
+    cmd::sync(&O, &a, &b).unwrap();
+    assert!(is(&b, "f.txt", "v2"));
+    // So does one that reads only its settings.
+    to_version_1(&Fs::at(&a));
+    cmd::remotes(&O, &a).unwrap();
+    Config::load(&a).unwrap();
+}
+
+#[test]
+fn migrate_other_vault() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
+    to_version_1(&Fs::at(&b));
+    put(&a, "f.txt", "v2", 1);
+    let before = tree(&b.join(".syncit"));
+    // The other vault of a run is not changed without being asked.
+    for result in [
+        cmd::sync(&O, &a, &b).map(|_| ()),
+        cmd::push(&O, &a, &b).map(|_| ()),
+        cmd::status(&O, &a, &[], Some(&b), false).map(|_| ()),
+    ] {
+        let error = result.expect_err("an old peer is refused").to_string();
+        assert!(error.contains("Run: syncit migrate"), "{error}");
+    }
+    assert_eq!(tree(&b.join(".syncit")), before);
+    assert!(is(&b, "f.txt", "v1"));
+    assert_eq!(cmd::migrate(&O, &a, Some(&b)).unwrap(), 1);
+    assert_eq!(
+        cmd::migrate(&O, &a, Some(&b)).unwrap(),
+        2,
+        "nothing more to do"
+    );
+    cmd::sync(&O, &a, &b).unwrap();
+    assert!(is(&b, "f.txt", "v2"));
+    // By nickname, and with no vault named: the one here.
+    cmd::remote_add(&O, &a, b.to_str().unwrap(), Some("backup".into()), false).unwrap();
+    to_version_1(&Fs::at(&b));
+    assert_eq!(cmd::migrate(&O, &a, Some(Path::new("backup"))).unwrap(), 1);
+    to_version_1(&Fs::at(&a));
+    assert_eq!(cmd::migrate(&O, &a, None).unwrap(), 1);
+    assert_eq!(cmd::migrate(&O, &a, None).unwrap(), 2);
+}
+
 #[test]
 fn version_mismatch() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
-    configure(&a, |c| c.syncit = 2);
+    fs::write(a.join(".syncit/version"), "3\n").unwrap();
     put(&a, "f.txt", "v2", 1);
     for result in [
         cmd::sync(&O, &b, &a),
@@ -1812,9 +1883,12 @@ fn version_mismatch() {
         cmd::snapshot(&O, &a),
     ] {
         let error = result
-            .expect_err("a version 2 vault is refused")
+            .expect_err("a vault from a newer syncit is refused")
             .to_string();
-        assert!(error.contains("version 2"), "{error}");
+        assert!(
+            error.contains("version 3") && error.contains("upgrade"),
+            "{error}"
+        );
     }
     assert!(is(&b, "f.txt", "v1"));
     assert!(
@@ -2176,7 +2250,11 @@ mod remote {
         assert_eq!(words.split(' ').count(), 24);
         let key = keys::parse_phrase(&words).unwrap();
         let config = syncit::crypt::seal_name(&key, "config");
-        assert_eq!(names(&r), BTreeSet::from([config.clone(), "format".into()]));
+        let version = syncit::crypt::seal_name(&key, "version");
+        assert_eq!(
+            names(&r),
+            BTreeSet::from([config.clone(), version, "format".into()])
+        );
         let format = fs::read_to_string(r.join("format")).unwrap();
         let check = format
             .strip_prefix(r#"{"check":""#)
@@ -2186,7 +2264,7 @@ mod remote {
         let stored = fs::read(r.join(config)).unwrap();
         assert!(!stored.windows(6).any(|w| w == b"origin"));
         let bucket = Bucket::new(&url(&r), vec![]).unwrap();
-        let config = Store::new("r", Sealed::new(bucket, key));
+        let config = Store::open("r", Sealed::new(bucket, key)).unwrap();
         let config = config.load_config().unwrap();
         assert_eq!(
             (config.include, config.keep_history, config.autocompact),
@@ -2246,7 +2324,7 @@ mod remote {
     fn configure_remote(target: &Path, change: impl FnOnce(&mut Config)) {
         let target = target.to_str().unwrap();
         let bucket = Bucket::new(target, vec![]).unwrap();
-        let r = Store::new(target, Sealed::new(bucket, key()));
+        let r = Store::open(target, Sealed::new(bucket, key())).unwrap();
         let mut config = r.load_config().unwrap();
         change(&mut config);
         r.save_config(&config).unwrap();
@@ -2557,6 +2635,38 @@ mod remote {
             "{done:?}"
         );
         assert_eq!(planned, done);
+    }
+
+    #[test]
+    fn migrate_remote() {
+        let o = &o();
+        let (tmp, a) = vault(&[("f.txt", "v1")]);
+        let (r, origin) = remote(&tmp, "r");
+        cmd::push(o, &a, &origin).unwrap();
+        let sealed = || {
+            let bucket = Bucket::new(origin.to_str().unwrap(), vec![]).unwrap();
+            Sealed::new(bucket, key())
+        };
+        to_version_1(&sealed());
+        put(&a, "f.txt", "v2", 1);
+        let before = listing(&r);
+        // A remote is not changed without being asked.
+        let c = tmp.path().join("c");
+        for result in [
+            cmd::sync(o, &a, &origin).map(|_| ()),
+            cmd::clone(o, tmp.path(), &origin, &c, &[], false).map(|_| ()),
+            cmd::config(o, tmp.path(), Some(&origin), None).map(|_| ()),
+        ] {
+            let error = result.expect_err("an old remote is refused").to_string();
+            assert!(error.contains("Run: syncit migrate file://"), "{error}");
+        }
+        assert!(before == listing(&r) && !c.join(".syncit").exists());
+        // From anywhere: a remote needs no vault here.
+        assert_eq!(cmd::migrate(o, tmp.path(), Some(&origin)).unwrap(), 1);
+        assert_eq!(syncit::migrate::version(&sealed()).unwrap(), 2);
+        cmd::sync(o, &a, &origin).unwrap();
+        cmd::clone(o, tmp.path(), &origin, &c, &[], false).unwrap();
+        assert!(is(&c, "f.txt", "v2"));
     }
 
     #[test]

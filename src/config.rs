@@ -10,7 +10,6 @@ use std::path::Path;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub syncit: u32,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     /// How many versions back from a head this vault keeps content for in
@@ -58,7 +57,6 @@ pub fn prefix_matches(prefix: &str, path: &str) -> bool {
 impl Config {
     pub fn new(include: String, nickname: String) -> Config {
         Config {
-            syncit: 1,
             include: vec![include],
             exclude: vec![],
             keep_history: Some(1),
@@ -68,12 +66,13 @@ impl Config {
         }
     }
 
+    /// The config of the vault in the folder `root`, which is not locked.
     pub fn load(root: &Path) -> Result<Config> {
-        Store::dir(Fs::at(root)).load_config()
+        Store::open(&root.display().to_string(), Fs::at(root))?.load_config()
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
-        Store::dir(Fs::at(root)).save_config(self)
+        Store::open(&root.display().to_string(), Fs::at(root))?.save_config(self)
     }
 
     /// Whether the vault's filter selects the path. The longest matching

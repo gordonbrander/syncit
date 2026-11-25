@@ -294,11 +294,17 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
 
 impl Vault<Fs, Dir> {
     /// Find, lock and load the vault at or above `start`. `local` is for the
-    /// vault a command runs in; a peer's log is read leniently.
+    /// vault a command runs in, which is brought up to this build's layout
+    /// if it is behind; a peer is refused if it is, and its log is read
+    /// leniently.
     pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault<Fs, Dir>> {
         let fs = Fs::open(start)?;
         let root = fs.root().to_path_buf();
-        let store = Store::dir(fs);
+        let name = root.display().to_string();
+        if local {
+            crate::migrate::upgrade(ctx, &fs, &name)?;
+        }
+        let store = Store::open(&name, fs)?;
         let config = store.load_config()?;
         let dirstate = Dirstate::load(&root)?;
         let ignore =
@@ -319,7 +325,7 @@ impl Vault<Fs, Dir> {
         }
         Ok(Vault {
             log: Log::load(ctx, &store, None, local)?,
-            name: worktree.root.display().to_string(),
+            name,
             store,
             config,
             worktree,
@@ -337,7 +343,7 @@ impl<B: Backend> Vault<B, Bare> {
         backend: B,
         known: Option<&Store<Fs>>,
     ) -> Result<Vault<B, Bare>> {
-        let store = Store::new(name, backend);
+        let store = Store::open(name, backend)?;
         let config = store.load_config()?;
         store.list()?;
         let mut vault = Vault {
