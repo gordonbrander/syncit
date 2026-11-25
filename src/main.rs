@@ -263,6 +263,8 @@ Marks:
   ≠  conflict    both versions are kept; the copies are named
   !  incomplete  an earlier sync did not finish; sync again
   -  excluded    not here by choice; get brings it
+  -  undropped   Filtered by exclude rules. Use `syncit get` to track it,
+                 or `syncit drop` to drop it.
   ·  ignored     ignored by this vault
 
 Only files that need something are listed; --all lists every file.

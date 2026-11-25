@@ -164,7 +164,8 @@ impl Worktree for Bare {
 
     fn retained(v: &mut Vault<impl Backend, Self>, arrived: &BTreeSet<String>) {
         let mut rows = BTreeMap::new();
-        for path in v.log.paths.keys().filter(|p| v.takes(p)) {
+        let wanted = |p: &&String| v.config.includes(p) && !v.skips(p);
+        for path in v.log.paths.keys().filter(wanted) {
             let PathState::Resolved { winner, .. } = v.log.resolve(path) else {
                 continue;
             };
@@ -394,11 +395,11 @@ impl<B: Backend, W: Worktree> Vault<B, W> {
         sum.record(event);
     }
 
-    /// Whether a run writes this path here: the vault includes it and does
-    /// not ignore it. A scan includes every file on disk, so after one a path
-    /// with a row is taken unless it is ignored.
+    /// Whether a run writes this path here: the vault includes it or has it
+    /// already, and does not ignore it. A path with a row is taken whatever
+    /// the filter says, until `drop` or `move` removes it.
     pub fn takes(&self, path: &str) -> bool {
-        self.config.includes(path) && !self.skips(path)
+        (self.config.includes(path) || self.worktree.rows().contains_key(path)) && !self.skips(path)
     }
 
     /// Whether a scan would not look at this path: it is ignored, belongs to a

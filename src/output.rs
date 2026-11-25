@@ -125,7 +125,7 @@ fn mark(state: &str) -> &'static str {
         "behind" => "◐",
         "missing" => "○",
         "conflict" => "≠",
-        "excluded" => "-",
+        "excluded" | "undropped" => "-",
         "ignored" => "·",
         _ => "!", // incomplete
     }

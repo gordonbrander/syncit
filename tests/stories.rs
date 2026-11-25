@@ -1673,15 +1673,22 @@ fn interrupted_move() {
     // files: the folder is excluded and its files are still present.
     let (_tmp, a, b) = pair(&[("d/g.txt", "g"), ("d/h.txt", "h"), ("f.txt", "f")]);
     configure(&b, |c| c.exclude.push("d".into()));
-    // The next scan includes what is on disk: nothing is lost.
+    // The next scan leaves the filter and the files as they are: nothing is
+    // lost, and `status` says the files are excluded but still here.
     assert_eq!(cmd::snapshot(&O, &b).unwrap().recorded, 0);
-    let config = Config::load(&b).unwrap();
-    assert!(config.includes("d/g.txt") && config.includes("d/h.txt"));
+    let filter = |dir: &Path| {
+        let config = Config::load(dir).unwrap();
+        (config.include, config.exclude)
+    };
+    assert_eq!(filter(&b), (vec![String::new()], vec!["d".to_string()]));
     assert!(is(&b, "d/g.txt", "g") && is(&b, "d/h.txt", "h"));
+    assert!(has(&status(&b), "undropped", "d/"));
     // The files are synced as before, in both directions.
     put(&a, "d/g.txt", "edit", 1);
+    put(&b, "d/h.txt", "ours", 1);
     assert_eq!(cmd::sync(&O, &b, &a).unwrap().exit_code(), 0);
-    assert!(is(&b, "d/g.txt", "edit") && is(&a, "d/h.txt", "h"));
+    assert!(is(&b, "d/g.txt", "edit") && is(&a, "d/h.txt", "ours"));
+    assert_eq!(filter(&b), (vec![String::new()], vec!["d".to_string()]));
     // Moving again finishes the job and leaves one exclude.
     let report = cmd::move_to(&O, &b, &paths(&["d"]), &a).unwrap();
     assert!(report.has("moved", "d/g.txt") && report.has("moved", "d/h.txt"));
@@ -1690,7 +1697,27 @@ fn interrupted_move() {
         (config.include, config.exclude),
         (vec![String::new()], vec!["d".to_string()])
     );
-    assert!(!b.join("d").exists() && is(&a, "d/g.txt", "edit") && is(&a, "d/h.txt", "h"));
+    assert!(!b.join("d").exists() && is(&a, "d/g.txt", "edit") && is(&a, "d/h.txt", "ours"));
+    assert!(status(&b).is_empty());
+}
+
+#[test]
+fn hand_exclude_then_delete_is_local() {
+    // A folder excluded by editing the config, then deleted by hand: it is
+    // gone from this vault only. No deletion is recorded or sent.
+    let (_tmp, a, b) = pair(&[("d/g.txt", "g"), ("d/h.txt", "h"), ("f.txt", "f")]);
+    configure(&b, |c| c.exclude.push("d".into()));
+    fs::remove_dir_all(b.join("d")).unwrap();
+    assert!(status(&b).is_empty());
+    let report = cmd::sync(&O, &b, &a).unwrap();
+    assert_eq!((report.recorded, report.exit_code()), (0, 0));
+    assert!(is(&a, "d/g.txt", "g") && is(&a, "d/h.txt", "h") && !b.join("d").exists());
+    // A later change there stays there; `get` brings the folder back.
+    put(&a, "d/g.txt", "edit", 1);
+    cmd::sync(&O, &b, &a).unwrap();
+    assert!(!b.join("d").exists());
+    cmd::get(&O, &b, &[a.join("d")]).unwrap();
+    assert!(is(&b, "d/g.txt", "edit") && is(&b, "d/h.txt", "h"));
 }
 
 #[test]

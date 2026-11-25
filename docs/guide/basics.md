@@ -98,6 +98,7 @@ Each line is a mark, the file, and the name of the mark:
 | `≠` | conflict | Conflict. Both versions are kept. |
 | `!` | incomplete | An earlier sync did not finish. Sync again. |
 | `-` | excluded | Filtered from partial replica |
+| `-` | undropped | Filtered by exclude rules, but still here. Use `syncit get` to track it, or `syncit drop` to drop it. |
 | `·` | ignored | [Ignored](#ignoring-files) due to `.syncitignore` |
 
 On its own, `status` looks only at this folder. "Not yet recorded" means changed since the last `sync` or `snapshot` here; it does not say what another vault lacks. For that, add `--vs`. Each line then has two marks and two names: ours first, theirs second.
