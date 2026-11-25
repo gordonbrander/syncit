@@ -198,7 +198,7 @@ pub(crate) mod tests {
     use super::*;
 
     /// What every backend does. `scratch` is a folder outside it.
-    pub(crate) fn contract(b: &dyn Backend, scratch: &Path) {
+    pub(crate) fn contract(b: &impl Backend, scratch: &Path) {
         let list = |dir: &str| b.list(dir).unwrap().into_iter().collect::<Vec<_>>();
         let (src, out) = (scratch.join("src"), scratch.join("out"));
         // Nothing there.

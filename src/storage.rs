@@ -13,10 +13,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-pub struct Store {
+pub struct Store<B: Backend> {
     /// The vault's folder or URL, for errors.
     name: String,
-    backend: Box<dyn Backend>,
+    backend: B,
     /// The names of the segments stored, once listed.
     log: RefCell<Option<BTreeSet<String>>>,
     /// The hashes of the blobs stored, once listed.
@@ -38,20 +38,22 @@ fn once<T>(cell: &RefCell<Option<T>>, list: impl FnOnce() -> Result<T>) -> Resul
     Ok(RefMut::map(cell, |listed| listed.as_mut().unwrap()))
 }
 
-impl Store {
+impl Store<Fs> {
+    /// The vault in a dir.
+    pub fn dir(fs: Fs) -> Store<Fs> {
+        Store::new(&fs.root().display().to_string(), fs)
+    }
+}
+
+impl<B: Backend> Store<B> {
     /// The vault called `name`, stored on `backend`.
-    pub fn new(name: &str, backend: Box<dyn Backend>) -> Store {
+    pub fn new(name: &str, backend: B) -> Store<B> {
         Store {
             name: name.to_string(),
             backend,
             log: RefCell::default(),
             blobs: RefCell::default(),
         }
-    }
-
-    /// The vault in a dir.
-    pub fn dir(fs: Fs) -> Store {
-        Store::new(&fs.root().display().to_string(), Box::new(fs))
     }
 
     pub fn load_config(&self) -> Result<Config> {
@@ -198,7 +200,7 @@ mod tests {
         let blobs = tmp.path().join(".syncit/blobs");
         let (a, b) = (sha256(b"a"), sha256(b"b"));
         let both = BTreeSet::from([a.clone(), b.clone()]);
-        let put = |store: &Store, hash: &str, text: &str| {
+        let put = |store: &Store<Fs>, hash: &str, text: &str| {
             let src = tmp.path().join("src");
             fs::write(&src, text).unwrap();
             store.put_blob(hash, &src).unwrap();

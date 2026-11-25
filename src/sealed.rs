@@ -20,7 +20,7 @@ struct Format {
 
 /// The `check` in the `format` of the vault stored on `inner`, which tells
 /// its key from another. `name` is the vault's, for errors.
-pub fn check(inner: &dyn Backend, name: &str) -> Result<String> {
+pub fn check(inner: &impl Backend, name: &str) -> Result<String> {
     let Some(bytes) = inner.read("format")? else {
         bail!("no vault at {name}: run syncit init {name}");
     };
@@ -32,7 +32,7 @@ pub fn check(inner: &dyn Backend, name: &str) -> Result<String> {
 }
 
 /// Write the `format` of a new vault whose key is `key`.
-pub fn create(inner: &dyn Backend, key: &Key) -> Result<()> {
+pub fn create(inner: &impl Backend, key: &Key) -> Result<()> {
     let format = Format {
         check: crypt::check(key),
         syncit: 1,

@@ -1,12 +1,13 @@
 //! Scan: compare the working folder with the stat dirstate and write entries.
 
+use crate::backend::Backend;
 use crate::blobs::hash_file;
 use crate::dirstate::{Dirstate, Row, TICK_MARGIN_MS, is_exec, mtime_ms};
 use crate::entry::{Entry, Id};
 use crate::log::{Log, PathState};
 use crate::output::{Context, Progress, warn};
 use crate::segment;
-use crate::vault::{TMP_PREFIX, Vault};
+use crate::vault::{Dir, TMP_PREFIX, Vault};
 use anyhow::{Context as _, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -57,22 +58,19 @@ pub fn moves(deleted: &[(String, String)], added: &[(String, String)]) -> Vec<(S
 
 /// Scan the vault. A dry scan writes nothing: the vault value is brought up
 /// to date in memory only.
-pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
-    if v.bare {
-        return Ok(Scan::default()); // no working folder
-    }
+pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Result<Scan> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let (mut files, mut odd) = (BTreeSet::new(), 0);
-    walk(ctx, v, &v.root, "", dry, &mut files, &mut odd)?;
+    walk(ctx, v, &v.work.root, "", dry, &mut files, &mut odd)?;
     if odd > 0 {
-        let root = v.root.display();
+        let root = v.work.root.display();
         warn(
             ctx,
             format!("skipped {odd} symbolic links or special files in {root}"),
         );
     }
 
-    let mut dirstate = v.dirstate.clone();
+    let mut dirstate = v.work.dirstate.clone();
     let mut out = Scan::default();
     // Files on disk that the config does not include yet.
     let mut excluded = vec![];
@@ -90,7 +88,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         if !v.config.includes(path) {
             excluded.push(path);
         }
-        let file = v.root.join(path);
+        let file = v.work.root.join(path);
         let row = dirstate.rows.get(path).cloned();
         let meta = file.symlink_metadata().ok();
         if let (Some(row), Some(meta)) = (&row, &meta)
@@ -109,7 +107,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
             out.skipped.push(path.clone());
             continue;
         };
-        v.hint(&hash, file);
+        v.work.hint(&hash, file);
         let size = Some(size);
         let (parents, kind) = match row {
             Some(row) if row.hash == hash && row.exec == exec => {
@@ -227,13 +225,13 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
     // sees the same difference and writes the same entries again.
     if !out.entries.is_empty() && !dry {
         let (name, bytes) = segment::encode(&v.config.nickname, &out.entries);
-        v.storage.write_segment(&name, &bytes)?;
+        v.store.write_segment(&name, &bytes)?;
     }
     for e in &out.entries {
         v.log.add(e.clone(), &v.config.nickname);
     }
     if config != v.config && !dry {
-        v.storage.save_config(&config)?;
+        v.store.save_config(&config)?;
     }
     v.config = config;
     dirstate.scanned = now;
@@ -241,13 +239,14 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         // A scan that found the folder as the dirstate has it writes
         // nothing; the file keeps its older `scanned`, which is only more
         // cautious. `learned`: some row is the same but newly trusted.
-        let same = dirstate.rows == v.dirstate.rows && dirstate.deleted == v.dirstate.deleted;
+        let same =
+            dirstate.rows == v.work.dirstate.rows && dirstate.deleted == v.work.dirstate.deleted;
         if !same || learned {
-            dirstate.save(&v.root)?;
+            dirstate.save(&v.work.root)?;
         }
     } else if learned || !smudged.is_empty() {
-        // `v.dirstate` is still the one the scan began with.
-        let mut cache = std::mem::take(&mut v.dirstate);
+        // `v.work.dirstate` is still the one the scan began with.
+        let mut cache = std::mem::take(&mut v.work.dirstate);
         for (path, size, mtime) in refreshed {
             if let Some(row) = cache.rows.get_mut(&path) {
                 (row.size, row.mtime) = (size, mtime);
@@ -261,7 +260,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         cache.scanned = now;
         out.cache = Some(cache);
     }
-    v.dirstate = dirstate;
+    v.work.dirstate = dirstate;
     Ok(out)
 }
 
@@ -280,7 +279,7 @@ pub fn deleted_heads(log: &Log, path: &str) -> Option<Vec<Id>> {
 /// An unreadable directory is an error: its files must not read as deleted.
 fn walk(
     ctx: &Context,
-    v: &Vault,
+    v: &Vault<impl Backend, Dir>,
     dir: &Path,
     prefix: &str,
     dry: bool,
@@ -304,7 +303,7 @@ fn walk(
         let kind = item.file_type()?;
         if name.eq_ignore_ascii_case(".syncit") {
             if !prefix.is_empty() {
-                let (inner, outer) = (dir.display(), v.root.display());
+                let (inner, outer) = (dir.display(), v.work.root.display());
                 warn(
                     ctx,
                     format!(
@@ -314,7 +313,7 @@ fn walk(
             }
             continue;
         }
-        if v.ignore.matches(&path) {
+        if v.work.ignore.matches(&path) {
             continue;
         }
         if kind.is_dir() {

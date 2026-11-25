@@ -20,6 +20,7 @@ static O: LazyLock<Context> = LazyLock::new(|| Context {
 });
 use std::sync::LazyLock;
 use syncit::backend::Fs;
+use syncit::blobs::NO_PEER;
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
 use syncit::entry::sha256;
@@ -268,7 +269,7 @@ fn rename_needs_no_source() {
         Vault::open(&O, &b, true).unwrap(),
     );
     cmd::receive(&O, &mut va, &vb, &mut report).unwrap();
-    materialise(&O, &mut va, None, false, &mut report).unwrap();
+    materialise(&O, &mut va, NO_PEER, false, &mut report).unwrap();
     assert_eq!((report.exit_code(), report.renamed), (0, 1));
     assert!(is(&a, "b.txt", "content") && !a.join("a.txt").exists());
 }
@@ -1410,7 +1411,7 @@ fn interrupted_transfer() {
     {
         let mut report = Summary::default();
         let mut vb = Vault::open(&O, &b, true).unwrap();
-        materialise(&O, &mut vb, None, false, &mut report).unwrap();
+        materialise(&O, &mut vb, NO_PEER, false, &mut report).unwrap();
         assert_eq!((report.incomplete, report.exit_code()), (1, 2));
     }
     assert!(is(&b, "f.txt", "v1"));
@@ -2185,7 +2186,7 @@ mod remote {
         let stored = fs::read(r.join(config)).unwrap();
         assert!(!stored.windows(6).any(|w| w == b"origin"));
         let bucket = Bucket::new(&url(&r), vec![]).unwrap();
-        let config = Store::new("r", Box::new(Sealed::new(bucket, key)));
+        let config = Store::new("r", Sealed::new(bucket, key));
         let config = config.load_config().unwrap();
         assert_eq!(
             (config.include, config.keep_history, config.autocompact),
@@ -2245,7 +2246,7 @@ mod remote {
     fn configure_remote(target: &Path, change: impl FnOnce(&mut Config)) {
         let target = target.to_str().unwrap();
         let bucket = Bucket::new(target, vec![]).unwrap();
-        let r = Store::new(target, Box::new(Sealed::new(bucket, key())));
+        let r = Store::new(target, Sealed::new(bucket, key()));
         let mut config = r.load_config().unwrap();
         change(&mut config);
         r.save_config(&config).unwrap();
@@ -2507,9 +2508,11 @@ mod remote {
         cmd::push(o, &a, &origin).unwrap();
         assert_eq!(objects(&r, "blobs").len(), 2, "only the folder it includes");
         let va = Vault::open(o, &a, true).unwrap();
-        let vr = Vault::open_url(o, origin.to_str().unwrap(), Some(&va)).unwrap();
+        let url = origin.to_str().unwrap();
+        let backend = syncit::remote::backend(o, url).unwrap();
+        let vr = Vault::bare(o, url, backend, Some(&va.store)).unwrap();
         assert_eq!(cmd::excluded(&va, &vr), ["music/m.mp3"]);
-        assert!(vr.dirstate.rows.contains_key("docs/a.txt"));
+        assert!(vr.work.rows.contains_key("docs/a.txt"));
         // A vault that pulls gets only what the remote has.
         let c = tmp.path().join("c");
         fs::create_dir(&c).unwrap();

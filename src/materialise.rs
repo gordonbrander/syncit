@@ -1,13 +1,14 @@
 //! Materialise: bring the working folder to the state the log describes.
 
-use crate::blobs::{available, fetch, hash_file, read};
+use crate::backend::Backend;
+use crate::blobs::{NO_PEER, available, fetch, hash_file, read};
 use crate::dirstate::{Row, TICK_MARGIN_MS, mtime_ms};
 use crate::entry::{Entry, Id, sha256};
 use crate::log::{Loser, PathState};
 use crate::output::{Context, Progress, Summary, Traffic};
-use crate::scan::moves;
+use crate::scan::{deleted_heads, moves};
 use crate::segment;
-use crate::vault::{TMP_PREFIX, Vault, unique};
+use crate::vault::{Dir, TMP_PREFIX, Vault, Worktree, unique};
 use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -49,8 +50,8 @@ fn mergeable(path: &str) -> bool {
 /// all three contents can be read, and the edits do not overlap. The winner
 /// is "ours" and the mtime is fixed, so every vault writes the same entry.
 fn merged(
-    v: &Vault,
-    peer: Option<&Vault>,
+    v: &Vault<impl Backend, Dir>,
+    peer: Option<&Vault<impl Backend, impl Worktree>>,
     p: &str,
     heads: &[Id],
     winner: &Id,
@@ -88,17 +89,14 @@ fn merged(
 /// nothing is merged.
 pub fn materialise(
     ctx: &Context,
-    v: &mut Vault,
-    peer: Option<&Vault>,
+    v: &mut Vault<impl Backend, Dir>,
+    peer: Option<&Vault<impl Backend, impl Worktree>>,
     kept: bool,
     sum: &mut Summary,
 ) -> Result<()> {
-    if v.bare {
-        return Ok(()); // no working folder
-    }
     // To save the dirstate only if this changes it. Compared, not tracked:
     // a change made anywhere below cannot then go unsaved.
-    let before = v.dirstate.clone();
+    let before = v.work.dirstate.clone();
     let states: Vec<(String, PathState)> = (v.log.paths.keys())
         .map(|p| (p.clone(), v.log.resolve(p)))
         .collect();
@@ -106,7 +104,7 @@ pub fn materialise(
     for (p, state) in &states {
         if let PathState::Resolved { winner, .. } = state
             && let Some(h) = &v.log.entries[winner].hash
-            && v.dirstate.rows.get(p).is_none_or(|row| &row.hash != h)
+            && v.work.dirstate.rows.get(p).is_none_or(|row| &row.hash != h)
             && v.takes(p)
         {
             pass.needed.insert(h.clone());
@@ -143,10 +141,10 @@ pub fn materialise(
             None => v.event(ctx, sum, kind, path, ""),
         }
     }
-    if ctx.dry_run || v.dirstate == before {
+    if ctx.dry_run || v.work.dirstate == before {
         return Ok(());
     }
-    v.dirstate.save(&v.root)
+    v.work.dirstate.save(&v.work.root)
 }
 
 /// What one materialise collects as it goes over the paths.
@@ -163,28 +161,34 @@ struct Pass {
 }
 
 /// Remove the file at `p`, whose winner is a tombstone.
-fn delete(ctx: &Context, v: &mut Vault, p: &str, heads: Vec<Id>, pass: &mut Pass) -> Result<()> {
-    if let Some(row) = v.dirstate.rows.get(p) {
+fn delete(
+    ctx: &Context,
+    v: &mut Vault<impl Backend, Dir>,
+    p: &str,
+    heads: Vec<Id>,
+    pass: &mut Pass,
+) -> Result<()> {
+    if let Some(row) = v.work.dirstate.rows.get(p) {
         let hash = row.hash.clone();
         safe(v, p)?;
         if !ctx.dry_run {
-            let file = v.root.join(p);
+            let file = v.work.root.join(p);
             fs::remove_file(&file)?;
-            prune(&v.root, &file);
+            prune(&v.work.root, &file);
         }
-        v.dirstate.rows.remove(p);
+        v.work.dirstate.rows.remove(p);
         pass.deleted.push((p.to_string(), hash));
     }
     // No file here now reflects every head: this vault has seen them.
-    v.dirstate.deleted.insert(p.to_string(), heads);
+    v.work.dirstate.deleted.insert(p.to_string(), heads);
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn one(
     ctx: &Context,
-    v: &mut Vault,
-    peer: Option<&Vault>,
+    v: &mut Vault<impl Backend, Dir>,
+    peer: Option<&Vault<impl Backend, impl Worktree>>,
     kept: bool,
     p: &str,
     state: PathState,
@@ -204,11 +208,11 @@ fn one(
             ..
         } => (heads, winner, losers),
     };
-    let row = v.dirstate.rows.get(p).cloned();
+    let row = v.work.dirstate.rows.get(p).cloned();
     if !v.takes(p) {
         return Ok(());
     }
-    let (file, w) = (v.root.join(p), v.log.entries[&winner].clone());
+    let (file, w) = (v.work.root.join(p), v.log.entries[&winner].clone());
     let Some(h) = w.hash else {
         // A file whose content another path is about to take is removed last:
         // until then it is a source for it, and nothing is fetched.
@@ -236,11 +240,11 @@ fn one(
             // content that is nowhere. Stopped in between, the next scan
             // records the file as an ordinary edit.
             let (name, bytes) = segment::encode(&v.config.nickname, std::slice::from_ref(&entry));
-            v.storage.write_segment(&name, &bytes)?;
+            v.store.write_segment(&name, &bytes)?;
             placed
         };
-        v.dirstate.deleted.remove(p);
-        v.dirstate.rows.insert(
+        v.work.dirstate.deleted.remove(p);
+        v.work.dirstate.rows.insert(
             p.to_string(),
             Row {
                 size,
@@ -270,7 +274,7 @@ fn one(
         });
         if let Some(c) = &copy {
             ensure!(
-                v.root.join(c).symlink_metadata().is_err(),
+                v.work.root.join(c).symlink_metadata().is_err(),
                 "the conflict copy name {c} is taken"
             );
         }
@@ -287,16 +291,16 @@ fn one(
                 return Ok(());
             };
             if let (Some(c), Some(row)) = (&copy, &row) {
-                if let Err(e) = fs::rename(&file, v.root.join(c)) {
+                if let Err(e) = fs::rename(&file, v.work.root.join(c)) {
                     let _ = fs::remove_file(&tmp);
                     return Err(e.into());
                 }
-                v.hint(&row.hash, v.root.join(c));
+                v.work.hint(&row.hash, v.work.root.join(c));
             }
             place(v, &tmp, p, &h)?
         };
-        v.dirstate.deleted.remove(p);
-        v.dirstate.rows.insert(
+        v.work.dirstate.deleted.remove(p);
+        v.work.dirstate.rows.insert(
             p.to_string(),
             Row {
                 size,
@@ -318,7 +322,7 @@ fn one(
         if !ctx.dry_run {
             set_exec(&file, w.exec)?;
         }
-        if let Some(row) = v.dirstate.rows.get_mut(p) {
+        if let Some(row) = v.work.dirstate.rows.get_mut(p) {
             row.exec = w.exec;
         }
         v.event(ctx, sum, "updated", p, "");
@@ -332,8 +336,8 @@ fn one(
 #[allow(clippy::too_many_arguments)]
 fn copies_and_base(
     ctx: &Context,
-    v: &mut Vault,
-    peer: Option<&Vault>,
+    v: &mut Vault<impl Backend, Dir>,
+    peer: Option<&Vault<impl Backend, impl Worktree>>,
     p: &str,
     h: &str,
     heads: Vec<Id>,
@@ -344,7 +348,7 @@ fn copies_and_base(
     let mut visible = vec![h];
     for l in losers {
         let c = copy_name(p, &l.hash);
-        let file = v.root.join(&c);
+        let file = v.work.root.join(&c);
         let surfaced = if v.log.paths.contains_key(&c) || renamed.as_ref() == Some(&c) {
             true // surfaced before; a copy the user deleted stays deleted
         } else if file.symlink_metadata().is_ok() {
@@ -372,7 +376,7 @@ fn copies_and_base(
             .is_none_or(|x| visible.contains(&x))
     };
     let base: Vec<Id> = heads.into_iter().filter(shown).collect();
-    if let Some(row) = v.dirstate.rows.get_mut(p) {
+    if let Some(row) = v.work.dirstate.rows.get_mut(p) {
         row.base = base;
     }
 }
@@ -381,8 +385,8 @@ fn copies_and_base(
 /// records it.
 fn write_copy(
     ctx: &Context,
-    v: &mut Vault,
-    peer: Option<&Vault>,
+    v: &mut Vault<impl Backend, Dir>,
+    peer: Option<&Vault<impl Backend, impl Worktree>>,
     c: &str,
     l: &Loser,
     traffic: &mut Traffic,
@@ -400,10 +404,32 @@ fn write_copy(
     Ok(true)
 }
 
+/// `--no-remove`: a file here whose path the log says is deleted is kept, to
+/// be recorded as re-created, as if the user had put it back. Its row
+/// becomes a deletion record of the tombstones, and the next scan writes the
+/// entry. Whether any was kept.
+pub fn unremove(ctx: &Context, v: &mut Vault<impl Backend, Dir>, sum: &mut Summary) -> bool {
+    let rows: Vec<String> = v.work.dirstate.rows.keys().cloned().collect();
+    let mut kept = false;
+    for path in rows {
+        if !v.takes(&path) {
+            continue;
+        }
+        let Some(heads) = deleted_heads(&v.log, &path) else {
+            continue;
+        };
+        v.work.dirstate.rows.remove(&path);
+        v.work.dirstate.deleted.insert(path.clone(), heads);
+        v.event(ctx, sum, "added", &path, "kept");
+        kept = true;
+    }
+    kept
+}
+
 /// Segments come from other vaults and must not write outside this one.
-pub fn no_symlinked_parent(v: &Vault, p: &str) -> Result<()> {
-    let mut dir = v.root.join(p);
-    while dir.pop() && dir != v.root {
+pub fn no_symlinked_parent(v: &Vault<impl Backend, Dir>, p: &str) -> Result<()> {
+    let mut dir = v.work.root.join(p);
+    while dir.pop() && dir != v.work.root {
         if dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
             bail!("a parent folder is a symbolic link");
         }
@@ -412,12 +438,12 @@ pub fn no_symlinked_parent(v: &Vault, p: &str) -> Result<()> {
 }
 
 /// The safety checks before a write, rename or delete at `p`.
-fn safe(v: &Vault, p: &str) -> Result<()> {
+fn safe(v: &Vault<impl Backend, Dir>, p: &str) -> Result<()> {
     no_symlinked_parent(v, p)?;
-    let file = v.root.join(p);
-    match v.dirstate.rows.get(p) {
+    let file = v.work.root.join(p);
+    match v.work.dirstate.rows.get(p) {
         Some(row) => ensure!(
-            v.dirstate.matches(row, &file),
+            v.work.dirstate.matches(row, &file),
             "changed since it was scanned"
         ),
         None => ensure!(
@@ -445,13 +471,13 @@ fn set_exec(file: &Path, exec: bool) -> io::Result<()> {
 /// set its mtime and executable bit. None if `fill` says there is no content
 /// (no source has the blob); then nothing is left behind.
 fn stage(
-    v: &Vault,
+    v: &Vault<impl Backend, Dir>,
     p: &str,
     mtime: i64,
     exec: bool,
     fill: impl FnOnce(&Path) -> io::Result<bool>,
 ) -> Result<Option<PathBuf>> {
-    let file = v.root.join(p);
+    let file = v.work.root.join(p);
     let dir = file.parent().context("no parent folder")?;
     let (mut top, mut d) = (None, dir); // the topmost folder this call creates
     while !d.exists() {
@@ -492,28 +518,33 @@ fn stage(
 }
 
 /// Rename a staged file onto `p`. Returns its size and mtime as stat reports.
-fn place(v: &mut Vault, tmp: &Path, p: &str, h: &str) -> Result<(Option<u64>, i64)> {
-    let file = v.root.join(p);
+fn place(
+    v: &mut Vault<impl Backend, Dir>,
+    tmp: &Path,
+    p: &str,
+    h: &str,
+) -> Result<(Option<u64>, i64)> {
+    let file = v.work.root.join(p);
     if let Err(e) = fs::rename(tmp, &file) {
         let _ = fs::remove_file(tmp);
         return Err(e.into());
     }
     let meta = file.symlink_metadata()?;
-    v.hint(h, file);
+    v.work.hint(h, file);
     Ok((Some(meta.len()), mtime_ms(&meta)))
 }
 
 /// Write content `h` at `p`, dated now, for `restore`, executable or not. A file already there
 /// must be unchanged since it was scanned, as for any write; a row whose
 /// file is gone is no obstacle. False if no source has the content.
-pub fn write_now(v: &mut Vault, p: &str, h: &str, exec: bool) -> Result<bool> {
-    if v.root.join(p).symlink_metadata().is_ok() {
+pub fn write_now(v: &mut Vault<impl Backend, Dir>, p: &str, h: &str, exec: bool) -> Result<bool> {
+    if v.work.root.join(p).symlink_metadata().is_ok() {
         safe(v, p)?;
     } else {
         no_symlinked_parent(v, p)?;
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
-    let fill = |tmp: &Path| fetch(v, None, h, tmp, &mut Traffic::default());
+    let fill = |tmp: &Path| fetch(v, NO_PEER, h, tmp, &mut Traffic::default());
     let Some(tmp) = stage(v, p, now, exec, fill)? else {
         return Ok(false);
     };

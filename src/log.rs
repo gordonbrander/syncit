@@ -1,5 +1,6 @@
 //! The log: a set of entries, and the read rules over it (CRDT.md).
 
+use crate::backend::{Backend, Fs};
 use crate::entry::{Entry, Id};
 use crate::output::{Context, warn};
 use crate::segment;
@@ -65,18 +66,21 @@ impl Log {
     ///
     /// A segment is immutable and named by its hash, so any copy will do:
     /// one that `known` has is read from there, which for a remote vault
-    /// saves fetching it.
+    /// saves fetching it. `known` is the store of the vault a command runs in.
     pub fn load(
         ctx: &Context,
-        storage: &Store,
-        known: Option<&Store>,
+        storage: &Store<impl Backend>,
+        known: Option<&Store<Fs>>,
         strict: bool,
     ) -> Result<Log> {
         let mut log = Log::default();
         let have = known.map(Store::segment_names).transpose()?;
         for name in storage.segment_names()? {
             let from = known.filter(|_| have.as_ref().is_some_and(|h| h.contains(&name)));
-            let read = from.unwrap_or(storage).read_segment(&name);
+            let read = match from {
+                Some(known) => known.read_segment(&name),
+                None => storage.read_segment(&name),
+            };
             let segment = read.and_then(|bytes| {
                 let segment = segment::decode(&name, &bytes);
                 if known.is_some() && from.is_none() {
