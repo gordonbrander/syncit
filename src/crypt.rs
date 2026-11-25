@@ -1,8 +1,10 @@
-//! Encryption of a remote vault's objects (store.md, section 6): keys and
-//! object names derived from the master key, and XChaCha20-Poly1305 in the
+//! Encryption of a vault (store.md, section 6): keys derived from the
+//! master key, names in AES-SIV, and contents in XChaCha20-Poly1305 in the
 //! STREAM construction. No I/O beyond `Read` and `Write`.
 
 use aead_stream::{DecryptorBE32, EncryptorBE32};
+use aes_siv::KeyInit;
+use aes_siv::siv::Aes256Siv;
 use chacha20poly1305::XChaCha20Poly1305;
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -35,18 +37,34 @@ pub fn check(key: &Key) -> String {
     base16ct::lower::encode_string(derive(key, "syncit check").as_slice())
 }
 
-/// The object name of a segment or blob (`kind` is `log` or `blobs`).
-pub fn name(key: &Key, kind: &str, hash: &str) -> String {
-    base16ct::lower::encode_string(derive(key, &format!("syncit name {kind} {hash}")).as_slice())
+/// The key the object at `path` is encrypted with. An object moved to
+/// another path does not decrypt.
+pub fn content_key(key: &Key, path: &str) -> Key {
+    derive(key, &format!("syncit content {path}"))
 }
 
-/// The key an object named `name` is encrypted with.
-pub fn object_key(key: &Key, kind: &str, name: &str) -> Key {
-    derive(key, &format!("syncit key {kind} {name}"))
+/// The cipher for names: AES-256-SIV (RFC 5297), which is deterministic, so
+/// a name always encrypts to the same stored name, and authenticated, so a
+/// stored name that this key did not make does not open.
+fn names(key: &Key) -> Aes256Siv {
+    let hk = Hkdf::<Sha256>::from_prk(&key[..]).expect("32 bytes is a valid PRK");
+    let mut out = Zeroizing::new([0u8; 64]);
+    hk.expand(b"syncit names", &mut *out)
+        .expect("64 bytes is a valid length");
+    Aes256Siv::new((&*out).into())
 }
 
-pub fn config_key(key: &Key) -> Key {
-    derive(key, "syncit key config")
+/// One component of a path, encrypted, in hex. `open_name` turns it back.
+pub fn seal_name(key: &Key, name: &str) -> String {
+    let sealed = names(key).encrypt([] as [&[u8]; 0], name.as_bytes());
+    base16ct::lower::encode_string(&sealed.expect("no headers, so no error"))
+}
+
+/// The name that `seal_name` encrypted; None if this key did not make it.
+pub fn open_name(key: &Key, sealed: &str) -> Option<String> {
+    let bytes = base16ct::lower::decode_vec(sealed).ok()?;
+    let plain = names(key).decrypt([] as [&[u8]; 0], &bytes).ok()?;
+    String::from_utf8(plain).ok()
 }
 
 /// The length of the object that `n` plaintext bytes encrypt to.
@@ -154,19 +172,12 @@ mod tests {
     fn crypt_rejects() {
         let k = key(1);
         let plain = vec![9u8; 200_000];
-        let hash = sha256(&plain);
-        let n = name(&k, "blobs", &hash);
-        let sealed = {
-            let mut out = vec![];
-            encrypt(&object_key(&k, "blobs", &n), &plain[..], &mut out).unwrap();
-            out
-        };
-        let right = object_key(&k, "blobs", &n);
+        let right = content_key(&k, "blobs/ab/abcdef");
+        let sealed = seal(&right, &plain);
         assert_eq!(open(&right, &sealed).unwrap(), plain);
-        let wrong_key = object_key(&key(2), "blobs", &n);
-        let wrong_name = object_key(&k, "blobs", &name(&k, "blobs", &sha256(b"other")));
-        let wrong_kind = object_key(&k, "log", &n);
-        for other in [&wrong_key, &wrong_name, &wrong_kind] {
+        let wrong_key = content_key(&key(2), "blobs/ab/abcdef");
+        let wrong_path = content_key(&k, "log/abcdef");
+        for other in [&wrong_key, &wrong_path, &k] {
             assert!(open(other, &sealed).is_err());
         }
         for at in [0, 5, NONCE, NONCE + 70_000, sealed.len() - 1] {
@@ -189,16 +200,29 @@ mod tests {
     }
 
     #[test]
-    fn names_are_keyed() {
-        let hash = sha256(b"content");
+    fn names_open() {
         let (a, b) = (key(1), key(2));
-        assert_eq!(name(&a, "blobs", &hash), name(&a, "blobs", &hash));
-        assert_ne!(name(&a, "blobs", &hash), name(&b, "blobs", &hash));
-        assert_ne!(name(&a, "blobs", &hash), name(&a, "log", &hash));
-        for n in [name(&a, "blobs", &hash), name(&a, "log", &hash)] {
-            assert_ne!(n, hash);
-            assert!(crate::entry::is_hash(&n));
+        for name in ["ab", "log", "config", &sha256(b"content")] {
+            let sealed = seal_name(&a, name);
+            assert_eq!(sealed, seal_name(&a, name), "stable for one key");
+            assert_ne!(sealed, seal_name(&b, name));
+            assert!(!sealed.contains(name) && sealed.len() == 2 * (name.len() + 16));
+            assert_eq!(open_name(&a, &sealed).as_deref(), Some(name));
+            assert_eq!(open_name(&b, &sealed), None, "another key");
+            let flip = |c: char| if c == '0' { '1' } else { '0' };
+            for at in [0, sealed.len() - 1] {
+                let mut changed: Vec<char> = sealed.chars().collect();
+                changed[at] = flip(changed[at]);
+                let changed: String = changed.into_iter().collect();
+                assert_eq!(open_name(&a, &changed), None, "changed at {at}");
+            }
+            assert_eq!(open_name(&a, &sealed.to_uppercase()), None);
         }
+        for foreign in ["", "format", "not-a-name", "abcd", &sha256(b"x")] {
+            assert_eq!(open_name(&a, foreign), None, "{foreign}");
+        }
+        assert_ne!(content_key(&a, "log/x"), content_key(&a, "blobs/x"));
+        assert_ne!(content_key(&a, "log/x"), content_key(&b, "log/x"));
         assert_ne!(check(&a), check(&b));
     }
 }

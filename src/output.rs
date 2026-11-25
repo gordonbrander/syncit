@@ -25,6 +25,31 @@ pub struct Context {
     /// The user's syncit folder, which holds `credentials.toml` and
     /// `secrets.toml`. Found by `main`; tests leave it out.
     pub config_dir: Option<std::path::PathBuf>,
+    /// In a run with two vaults, the name of the one the command runs in.
+    /// What happens there is printed with `->`, and in the other with `<-`.
+    pub ours: Option<String>,
+}
+
+impl Context {
+    /// The arrow for what happens in the vault `name`; none in a command on
+    /// one vault.
+    pub fn side(&self, name: &str) -> &'static str {
+        match &self.ours {
+            None => "",
+            Some(ours) if ours == name => "->",
+            Some(_) => "<-",
+        }
+    }
+}
+
+/// What a run sent to a bare vault and received from it: blob hashes, since
+/// a blob may be asked for twice, and how many segments.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Traffic {
+    pub sent_files: std::collections::BTreeSet<String>,
+    pub sent_segments: usize,
+    pub received_files: std::collections::BTreeSet<String>,
+    pub received_segments: usize,
 }
 
 /// The user's syncit folder: under `$XDG_CONFIG_HOME`, else `~/.config`.
@@ -296,6 +321,8 @@ pub struct Summary {
     pub rejected: usize,
     #[serde(skip)]
     pub events: Vec<Event>,
+    #[serde(skip)]
+    pub traffic: Traffic,
 }
 
 impl Summary {
@@ -433,6 +460,7 @@ mod tests {
                 secret_key: None,
                 bar: bar(shown),
                 config_dir: None,
+                ours: None,
             };
             let progress = Progress::new(&ctx.bar, "scanning", 3);
             progress.tick();

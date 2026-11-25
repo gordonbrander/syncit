@@ -1,52 +1,211 @@
-//! A vault: a folder with `.syncit/`, opened and locked.
+//! A vault, opened: its store, its config and log, and the files it has.
 
+use crate::backend::{Backend, Fs};
 use crate::config::{Config, prefix_matches};
-use crate::dirstate::Dirstate;
-use crate::log::Log;
+use crate::dirstate::{Dirstate, Row};
+use crate::log::{Log, PathState};
 use crate::output::{Context, Event, Message, Summary, print_stdout};
-use crate::storage::{Dir, Storage};
-use anyhow::{Context as _, Result, anyhow, ensure};
-use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
-use std::fs::{self, File};
+use crate::scan::Scan;
+use crate::storage::Store;
+use anyhow::{Context as _, Result, anyhow};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Working-folder files with this prefix are scratch files of a run.
+/// Working-dir files with this prefix are scratch files of a run.
 pub const TMP_PREFIX: &str = ".syncit-tmp-";
 
-pub struct Vault {
-    /// The working folder; empty for a bare vault.
-    pub root: PathBuf,
-    /// Where the vault is, for people: its folder or URL.
+/// A vault on the backend `B`, whose files are a `W`: a working dir, or none.
+pub struct Vault<B: Backend, W: Worktree> {
+    /// Where the vault is, for people: its dir or URL.
     pub name: String,
-    /// Bare: no working folder. Its current versions are in its storage,
-    /// and its dirstate is derived from its log and the blobs it holds.
-    pub bare: bool,
-    /// Its config, log and blobs.
-    pub storage: Box<dyn Storage>,
-    /// Scratch space for files in transit.
-    pub tmp: PathBuf,
-    /// In a run with a peer, `->` for our vault and `<-` for theirs.
-    pub side: &'static str,
+    /// Its config, log and blobs, as stored.
+    pub store: Store<B>,
     pub config: Config,
-    pub dirstate: Dirstate,
     pub log: Log,
-    pub ignore: Ignore,
-    /// Hash to working files that may have it. A hint: every use is verified.
-    pub hints: HashMap<String, Vec<PathBuf>>,
-    /// What a run moved to and from this vault's storage.
-    pub traffic: RefCell<Traffic>,
-    _lock: Option<File>,
+    pub worktree: W,
 }
 
-/// Blob hashes and segment names, sent to a vault or received from it.
+/// A working dir: the files a person edits.
+pub struct Dir {
+    pub root: PathBuf,
+    pub dirstate: Dirstate,
+    pub ignore: Ignore,
+    /// Hash to files that may have it. A hint: every use is verified.
+    pub hints: HashMap<String, Vec<PathBuf>>,
+}
+
+impl Dir {
+    pub fn hint(&mut self, hash: &str, file: PathBuf) {
+        self.hints.entry(hash.to_string()).or_default().push(file);
+    }
+}
+
+/// No working dir. The vault's files are its blobs, and the version it has
+/// of each path is derived from its log and the blobs it holds (store.md,
+/// section 7): a row for each path it takes whose winner is a live entry
+/// with a stored blob.
 #[derive(Default)]
-pub struct Traffic {
-    pub sent_files: BTreeSet<String>,
-    pub sent_segments: BTreeSet<String>,
-    pub received_files: BTreeSet<String>,
-    pub received_segments: BTreeSet<String>,
+pub struct Bare {
+    pub rows: BTreeMap<String, Row>,
+}
+
+/// What a vault's files are. Everything that differs between a vault with a
+/// working dir and one without is here.
+pub trait Worktree: Sized {
+    /// Its blobs are its files: it gathers content whatever `keep_history`
+    /// says, and a run reports what was sent to it and received from it.
+    const BARE: bool;
+    /// The version of each path it has.
+    fn rows(&self) -> &BTreeMap<String, Row>;
+    /// Whether it never records or writes this path, beyond the names every
+    /// vault reserves.
+    fn skips(&self, path: &str) -> bool;
+    /// Files that may hold this content.
+    fn files(&self, hash: &str) -> &[PathBuf];
+    /// Its dir, if it has one.
+    fn root(&self) -> Option<&Path>;
+
+    /// Record what changed in its files.
+    fn scan(ctx: &Context, v: &mut Vault<impl Backend, Self>, dry: bool) -> Result<Scan>;
+    /// Bring its files to what the log says.
+    fn materialise(
+        ctx: &Context,
+        v: &mut Vault<impl Backend, Self>,
+        peer: Option<&Vault<impl Backend, impl Worktree>>,
+        kept: bool,
+        sum: &mut Summary,
+    ) -> Result<()>;
+    /// `--no-remove`: keep the files whose paths the log says are deleted.
+    /// Whether any was kept, which a scan then records.
+    fn unremove(ctx: &Context, v: &mut Vault<impl Backend, Self>, sum: &mut Summary) -> bool;
+    /// After blobs were retained. `arrived` is what a dry run would have
+    /// stored.
+    fn retained(v: &mut Vault<impl Backend, Self>, arrived: &BTreeSet<String>);
+}
+
+impl Worktree for Dir {
+    const BARE: bool = false;
+
+    fn rows(&self) -> &BTreeMap<String, Row> {
+        &self.dirstate.rows
+    }
+
+    fn skips(&self, path: &str) -> bool {
+        self.ignore.matches(path)
+    }
+
+    fn files(&self, hash: &str) -> &[PathBuf] {
+        self.hints.get(hash).map_or(&[], Vec::as_slice)
+    }
+
+    fn root(&self) -> Option<&Path> {
+        Some(&self.root)
+    }
+
+    fn scan(ctx: &Context, v: &mut Vault<impl Backend, Self>, dry: bool) -> Result<Scan> {
+        crate::scan::scan(ctx, v, dry)
+    }
+
+    fn materialise(
+        ctx: &Context,
+        v: &mut Vault<impl Backend, Self>,
+        peer: Option<&Vault<impl Backend, impl Worktree>>,
+        kept: bool,
+        sum: &mut Summary,
+    ) -> Result<()> {
+        crate::materialise::materialise(ctx, v, peer, kept, sum)
+    }
+
+    fn unremove(ctx: &Context, v: &mut Vault<impl Backend, Self>, sum: &mut Summary) -> bool {
+        crate::materialise::unremove(ctx, v, sum)
+    }
+
+    fn retained(_: &mut Vault<impl Backend, Self>, _: &BTreeSet<String>) {}
+}
+
+impl Worktree for Bare {
+    const BARE: bool = true;
+
+    fn rows(&self) -> &BTreeMap<String, Row> {
+        &self.rows
+    }
+
+    fn skips(&self, _: &str) -> bool {
+        false
+    }
+
+    fn files(&self, _: &str) -> &[PathBuf] {
+        &[]
+    }
+
+    fn root(&self) -> Option<&Path> {
+        None
+    }
+
+    fn scan(_: &Context, _: &mut Vault<impl Backend, Self>, _: bool) -> Result<Scan> {
+        Ok(Scan::default())
+    }
+
+    fn materialise(
+        _: &Context,
+        _: &mut Vault<impl Backend, Self>,
+        _: Option<&Vault<impl Backend, impl Worktree>>,
+        _: bool,
+        _: &mut Summary,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn unremove(_: &Context, _: &mut Vault<impl Backend, Self>, _: &mut Summary) -> bool {
+        false
+    }
+
+    fn retained(v: &mut Vault<impl Backend, Self>, arrived: &BTreeSet<String>) {
+        let mut rows = BTreeMap::new();
+        for path in v.log.paths.keys().filter(|p| v.takes(p)) {
+            let PathState::Resolved { winner, .. } = v.log.resolve(path) else {
+                continue;
+            };
+            let e = &v.log.entries[&winner];
+            if let Some(hash) = &e.hash
+                && (v.store.has_blob(hash) || arrived.contains(hash))
+            {
+                let row = Row {
+                    size: None,
+                    mtime: e.mtime,
+                    exec: e.exec,
+                    hash: hash.clone(),
+                    base: vec![winner],
+                };
+                rows.insert(path.clone(), row);
+            }
+        }
+        v.worktree.rows = rows;
+    }
+}
+
+/// Another vault, as a command names it.
+pub enum Target {
+    /// A dir in the vault.
+    Dir(PathBuf),
+    /// The URL of a remote vault.
+    Url(String),
+}
+
+impl Target {
+    /// What `arg` names: the location `remotes` has under that nickname, or
+    /// else `arg` itself.
+    pub fn parse(arg: &Path, remotes: Option<&BTreeMap<String, String>>) -> Target {
+        let text = arg.to_str();
+        let location = text.and_then(|t| remotes?.get(t).map(String::as_str));
+        match location.or(text) {
+            Some(text) if text.contains("://") => Target::Url(text.to_string()),
+            Some(text) => Target::Dir(PathBuf::from(text)),
+            None => Target::Dir(arg.to_path_buf()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -133,138 +292,67 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
         .join("/"))
 }
 
-/// A vault found and locked, with its config and nothing else read: all
-/// that a command about its settings needs. Locked until dropped.
-pub struct Locked {
-    pub root: PathBuf,
-    pub config: Config,
-    lock: File,
-}
-
-/// Find and lock the vault at or above `start`, and read its config.
-pub fn lock(start: &Path) -> Result<Locked> {
-    let root = find_root(start)?;
-    let lock = File::options()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join(".syncit/lock"))?;
-    lock.try_lock()
-        .map_err(|_| anyhow!("vault is in use: {}", root.display()))?;
-    let config = Config::load(&root)?;
-    ensure!(
-        config.syncit == 1,
-        "{} has format version {}, not 1",
-        root.display(),
-        config.syncit
-    );
-    Ok(Locked { root, config, lock })
-}
-
-impl Vault {
+impl Vault<Fs, Dir> {
     /// Find, lock and load the vault at or above `start`. `local` is for the
     /// vault a command runs in; a peer's log is read leniently.
-    pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault> {
-        let Locked { root, config, lock } = lock(start)?;
-        let dot = root.join(".syncit");
-        let storage = Dir::new(&root);
+    pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault<Fs, Dir>> {
+        let fs = Fs::open(start)?;
+        let root = fs.root().to_path_buf();
+        let store = Store::dir(fs);
+        let config = store.load_config()?;
         let dirstate = Dirstate::load(&root)?;
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
-        let mut vault = Vault {
-            log: Log::load(ctx, &storage, local)?,
-            name: root.display().to_string(),
-            bare: false,
-            traffic: RefCell::default(),
-            storage: Box::new(storage),
-            tmp: dot.join("tmp"),
-            side: "",
+        let mut worktree = Dir {
             hints: HashMap::new(),
             root,
-            config,
             dirstate,
             ignore,
-            _lock: Some(lock),
         };
-        for (path, row) in &vault.dirstate.rows {
-            vault
+        for (path, row) in &worktree.dirstate.rows {
+            let file = worktree.root.join(path);
+            worktree
                 .hints
                 .entry(row.hash.clone())
                 .or_default()
-                .push(vault.root.join(path));
+                .push(file);
         }
-        Ok(vault)
-    }
-
-    /// Open the remote vault at `url` for a command run in `local`, if
-    /// there is one: it finds the key there, and moves files through its
-    /// `.syncit/tmp`. A remote is bare and is not locked.
-    #[cfg(feature = "remote")]
-    pub fn open_url(ctx: &Context, url: &str, local: Option<&Vault>) -> Result<Vault> {
-        use crate::remote::{Bucket, Remote, credentials};
-        let root = local.map(|v| v.root.as_path());
-        let bucket = Bucket::new(url, credentials(ctx, url)?)?;
-        let check = bucket.check()?;
-        let (key, _) = crate::keys::find(ctx, url, &check)?;
-        let storage = Remote::open(bucket, key, root.map(Dir::new))?;
-        let config = storage.load_config()?;
-        ensure!(
-            config.syncit == 1,
-            "{url} has format version {}, not 1",
-            config.syncit
-        );
-        let mut vault = Vault {
-            root: PathBuf::new(),
-            name: url.to_string(),
-            bare: true,
-            log: Log::load(ctx, &storage, false)?,
-            storage: Box::new(storage),
-            tmp: local.map(|v| v.tmp.clone()).unwrap_or_default(),
-            side: "",
+        Ok(Vault {
+            log: Log::load(ctx, &store, None, local)?,
+            name: worktree.root.display().to_string(),
+            store,
             config,
-            dirstate: Dirstate::default(),
-            ignore: Ignore::default(),
-            hints: HashMap::new(),
-            traffic: RefCell::default(),
-            _lock: None,
+            worktree,
+        })
+    }
+}
+
+impl<B: Backend> Vault<B, Bare> {
+    /// Load the vault called `name` that is stored on `backend`, for a
+    /// command run in the vault whose store is `known`, if there is one: the
+    /// segments that vault has are read from it.
+    pub fn bare(
+        ctx: &Context,
+        name: &str,
+        backend: B,
+        known: Option<&Store<Fs>>,
+    ) -> Result<Vault<B, Bare>> {
+        let store = Store::new(name, backend);
+        let config = store.load_config()?;
+        store.list()?;
+        let mut vault = Vault {
+            name: name.to_string(),
+            log: Log::load(ctx, &store, known, false)?,
+            store,
+            config,
+            worktree: Bare::default(),
         };
-        vault.derive(|v, hash| v.storage.has_blob(hash));
+        Bare::retained(&mut vault, &BTreeSet::new());
         Ok(vault)
     }
+}
 
-    /// A bare vault's dirstate (store.md, section 7): a row for each path it
-    /// takes whose winner is a live entry with a `stored` blob.
-    pub fn derive(&mut self, stored: impl Fn(&Vault, &str) -> bool) {
-        let mut rows = std::collections::BTreeMap::new();
-        for path in self.log.paths.keys().filter(|p| self.takes(p)) {
-            let crate::log::PathState::Resolved { winner, .. } = self.log.resolve(path) else {
-                continue;
-            };
-            let e = &self.log.entries[&winner];
-            if let Some(hash) = &e.hash
-                && stored(self, hash)
-            {
-                let row = crate::dirstate::Row {
-                    size: None,
-                    mtime: e.mtime,
-                    exec: e.exec,
-                    hash: hash.clone(),
-                    base: vec![winner],
-                };
-                rows.insert(path.clone(), row);
-            }
-        }
-        self.dirstate.rows = rows;
-    }
-
-    pub fn dot(&self) -> PathBuf {
-        self.root.join(".syncit")
-    }
-
-    pub fn hint(&mut self, hash: &str, file: PathBuf) {
-        self.hints.entry(hash.to_string()).or_default().push(file);
-    }
-
+impl<B: Backend, W: Worktree> Vault<B, W> {
     /// Print what happened to one file, and count it.
     pub fn event(
         &self,
@@ -280,7 +368,7 @@ impl Vault {
             path: path.to_string(),
             note: note.to_string(),
             from: None,
-            side: self.side,
+            side: ctx.side(&self.name),
         };
         print_stdout(ctx, &Message::Event(event.clone()));
         sum.record(event);
@@ -294,7 +382,7 @@ impl Vault {
             path: to.to_string(),
             note: String::new(),
             from: Some(from.to_string()),
-            side: self.side,
+            side: ctx.side(&self.name),
         };
         print_stdout(ctx, &Message::Event(event.clone()));
         sum.record(event);
@@ -312,7 +400,7 @@ impl Vault {
     /// never recorded and never written.
     pub fn skips(&self, path: &str) -> bool {
         let name = path.rsplit('/').next().unwrap_or(path);
-        self.ignore.matches(path)
+        self.worktree.skips(path)
             || name.starts_with(TMP_PREFIX)
             || path.split('/').any(|c| c.eq_ignore_ascii_case(".syncit"))
     }

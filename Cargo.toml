@@ -11,7 +11,7 @@ default = ["remote", "keychain"]
 remote = [
     "dep:object_store", "dep:tokio", "dep:futures", "dep:url",
     "dep:chacha20poly1305", "dep:aead-stream", "dep:hkdf", "dep:getrandom",
-    "dep:zeroize", "dep:bip39", "dep:rpassword", "dep:toml_edit",
+    "dep:zeroize", "dep:bip39", "dep:rpassword", "dep:toml_edit", "dep:aes-siv",
 ]
 keychain = [
     "remote", "dep:keyring-core",
@@ -34,6 +34,7 @@ url = { version = "2", optional = true }
 chacha20poly1305 = { version = "0.11", optional = true }
 aead-stream = { version = "0.6", features = ["alloc"], optional = true }
 hkdf = { version = "0.13", optional = true }
+aes-siv = { version = "0.8", optional = true }
 getrandom = { version = "0.4", optional = true }
 zeroize = { version = "1", optional = true }
 bip39 = { version = "3", features = ["zeroize"], optional = true }

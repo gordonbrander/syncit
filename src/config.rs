@@ -1,10 +1,10 @@
 //! `.syncit/config`, and which paths a vault includes.
 
-use crate::vault::write_atomic;
-use anyhow::{Context, Result};
+use crate::backend::Fs;
+use crate::storage::Store;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -69,15 +69,11 @@ impl Config {
     }
 
     pub fn load(root: &Path) -> Result<Config> {
-        let file = root.join(".syncit/config");
-        let text =
-            fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("corrupt config {}", file.display()))
+        Store::dir(Fs::at(root)).load_config()
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
-        let text = serde_json::to_string_pretty(self)? + "\n";
-        write_atomic(root, &root.join(".syncit/config"), text.as_bytes())
+        Store::dir(Fs::at(root)).save_config(self)
     }
 
     /// Whether the vault's filter selects the path. The longest matching
