@@ -300,7 +300,7 @@ Paths are recorded as the operating system returns them, joined with `/`. No Uni
 Let `now` be the time the scan started. For each file found, and for each row whose path was not found and is not ignored, apply the table in `CRDT.md`, "Writing an entry":
 
 - **File and row.** Apply the unchanged test. If the hash and the executable bit equal the row's, refresh the row's size and mtime and write nothing. If either differs, write a file entry with `parents` = the row's base; the row becomes `(size, mtime, exec, hash, [new entry id])`. A change of the bit alone is a new version, as in Git; `chmod` leaves the mtime alone, so that entry has its parent's mtime.
-- **Row, no file.** Write a tombstone with `mtime = now` and `parents` = the row's base. Replace the row with a deletion record whose base is the tombstone.
+- **Row, no file.** If the path is excluded, remove the row and write nothing: the file left this vault only, as after `drop`. Otherwise write a tombstone with `mtime = now` and `parents` = the row's base, and replace the row with a deletion record whose base is the tombstone.
 - **File, deletion record.** Hash it. Write a file entry with `parents` = the record's base, whatever the hash. Replace the record with the row.
 - **File, neither.** Hash it. Then the first of these that applies:
   1. `resolve` gives a winner that is a tombstone (so every head is one): write a file entry with `parents` = the heads and create the row.
@@ -309,7 +309,7 @@ Let `now` be the time the scan started. For each file found, and for each row wh
   4. Otherwise write a file entry with `parents = []` and create the row.
 - **No file, no row.** Nothing. The vault does not have the path, or the path is deleted and stays so.
 
-**Auto-include.** A file on disk is included. When the walk finds a file whose path is excluded, with or without a row, the scan adds an include for it. A folder dragged into a vault is therefore synced from then on, including files later added to it elsewhere, and a file the vault has is never left out of a run (a `move` stopped partway, a config edited by hand): when in doubt, data is kept. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
+**Auto-include.** A file the vault did not know is included. When the walk finds a file with no row whose path is excluded, the scan adds an include for it. A folder dragged into a vault is therefore synced from then on, including files later added to it elsewhere. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
 
 | New file | Include added | Why not shorter |
 |---|---|---|
@@ -318,6 +318,8 @@ Let `now` be the time the scan started. For each file found, and for each row wh
 | `foo/bar/big/n/a.txt`, with `foo/bar/big` excluded | `foo/bar/big/n` | `foo/bar/big` is already a prefix |
 
 If every prefix is already listed, which happens only when the file's own path is in `exclude` (a moved file put back by hand), the path moves from `exclude` to `include`, as `get` would do. Includes are added after the walk, shortest first, re-checking the filter, so one dragged folder yields one include. The config is saved before the dirstate. A dry scan adds nothing. `move` and `drop` undo it.
+
+**Excluded but still here.** A file with a row whose path is excluded is left as it is: the scan changes neither the config nor the row. This is the state after `exclude` is edited by hand, and after a `move` or `drop` stopped partway. The file is never left out of a run: a path with a row is taken (section 8) whatever the filter says, so it syncs in both directions as before and no data is lost. `status` shows it as `undropped`, and a run warns on stderr: `<n> files in <vault> are excluded but still here (<names>); \`syncit drop\` removes them, \`syncit get\` keeps them`, with the names as in the warning of a push to a partial vault. `drop` or `move` removes the files; `get` includes the path again. If the user deletes such a file, the row goes and nothing is recorded (above).
 
 A file entry's `mtime` is the file's mtime in milliseconds, and its `exec` is the file's executable bit; a tombstone's `exec` is `false`. Stat the file before and after hashing; if size or mtime changed in between, leave the path and its row untouched this scan and report it as `skipped`.
 
@@ -370,7 +372,7 @@ With depth 1 or more, the last content of a deleted file is kept: the tombstone 
 
 A vault retains blobs unless `keep_history` is `0`; then it never writes to `.syncit/blobs/` (`R13`). Local history is whatever blobs are there: it is never required to be complete.
 
-`retain()`: for every hash that `Log::keep` gives for the paths this vault takes (included and not ignored), and that is not already in `.syncit/blobs/`, `fetch` it into `.syncit/blobs/`. Hashes with no source are skipped silently. Two limits follow from the rule, and both are meant:
+`retain()`: for every hash that `Log::keep` gives for the paths this vault takes (included or with a row, and not ignored), and that is not already in `.syncit/blobs/`, `fetch` it into `.syncit/blobs/`. Hashes with no source are skipped silently. Two limits follow from the rule, and both are meant:
 
 - A vault collects only what it keeps. A peer that keeps more, or has not compacted, does not fill it up again.
 - A partial vault does not gather the content of paths it excludes.
@@ -646,6 +648,7 @@ It reads the log only. A vault that receives a file records nothing, so it is ne
    |---|---|---|
    | `ignored` | `·` | the vault ignores the path (`skips`) |
    | `excluded` | `-` | no row, nothing unrecorded, and the path is excluded |
+   | `undropped` | `-` | it has a row, and the path is excluded (section 7, "Excluded but still here") |
    | `incomplete` | `!` | the path is `Incomplete` (and see below) |
    | `conflict` | `≠` | the path has losers, or a deletion lost to a file (section 9) |
    | `new`, `modified`, `removed` | `+`, `✎`, `✗` | the dry scan of this vault would record the path: as new, as modified, or as deleted. This `removed` is unrecorded |
@@ -811,7 +814,7 @@ The same run's first and last lines with `--json`:
 | after replacing files, before saving the dirstate | files newer than their rows | the scan re-records them as entries with the winner's hash and mtime: either the same entry or a head with the same hash, which is the same version. Files with no row are adopted; one written over a deletion record is re-recorded with the winner's hash and mtime, which is again the same version |
 | after renaming a loser to its copy name, before placing the winner | the path is missing, the copy has no row | the scan records a tombstone and the copy; the winner still beats the tombstone, and the losing content is in the copy |
 | after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones. The deletion record names only the second until the next materialise sets it to both |
-| during `move` or `drop`, after saving the config, before saving the dirstate | present files under an excluded prefix | the scan includes each file on disk again, one include per file; nothing is lost, and running the command again completes it and leaves one exclude (`interrupted_move`) |
+| during `move` or `drop`, after saving the config, before saving the dirstate | present files with rows under an excluded prefix | the scan leaves the config and the rows alone; the files sync as before and `status` shows them as `undropped`. Nothing is lost, and running the command again completes it (`interrupted_move`) |
 | during `move` or `drop`, after saving the dirstate | files with no rows | the scan adopts and includes them; nothing is recorded as deleted |
 | while compacting | some of the blobs to drop are gone and others are not | each removal is whole; the next compaction removes the rest. The log was not touched |
 | while uploading to a remote vault (`store.md`, section 10) | some blobs or segments are there and others are not | every object is whole or absent; a reader sees a path as `pending` or `incomplete` and waits; the next run uploads the rest |
@@ -910,7 +913,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `cli_smoke` | the built binary runs every command and returns the documented exit codes; results are on stdout and warnings and errors on stderr; with `--json` every line of both streams is an object with a `type`, and the last stdout line of a run is the summary; `push` to a partial vault warns and `sync` does not |
 | `message_forms` | each message type's text form and JSON form; the summary's counts and exit code |
 | `push_counts_excluded` | the files a push would not deliver: those the target excludes, and those it ignores |
-| `interrupted_move` | an exclude over files the vault still has, as a `move` stopped partway leaves: the next scan includes them again, they sync as before, and a second `move` completes and leaves one exclude |
+| `interrupted_move` | an exclude over files the vault still has, as a `move` stopped partway or a config edited by hand leaves: the next scan leaves the config alone, `status` shows the files as `undropped`, they sync as before in both directions, and a second `move` completes and leaves one exclude |
+| `hand_exclude_then_delete_is_local` | an exclude added by hand over files that are then deleted by hand: nothing is recorded, the other vault keeps the files, and `get` brings them back |
 | `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion, a conflict and a merge of text, and for `move` and `drop`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` or `drop` that would be refused is refused |
 
 ### Requirement coverage
@@ -985,7 +989,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Unicode paths | recorded as the OS returns them; names that are not UTF-8 are skipped with a warning |
 | Case-insensitive filesystems | no special handling; a case collision surfaces as "untracked file in the way" and nothing is overwritten |
 | Conflict-copy name clash | the existing file is left alone; the conflict is reported and stays open |
-| A file on disk outside the included paths | added to `include` by the scan, whether new or already with a row (section 7): the filter follows the disk, so data is kept. `move` and `drop` undo it |
+| A file on disk outside the included paths | with no row, added to `include` by the scan (section 7). With a row, left alone: it syncs as before and is shown as `undropped` until `drop`, `move` or `get` settles it, so a config edited by hand is never rewritten by a scan and never deletes a file elsewhere |
 | Seeing a partial vault | `status --all`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
 | Terms for partial replication | three independent facts, one word each: included or excluded (the filter), present (the disk, which the dirstate records), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
 | Merging conflicting files | text only (`.md`, `.markdown`, `.txt`), only in a run where a receiving vault keeps history, so the versions replaced can be restored, and only when a line-by-line three-way merge from their common ancestor is clean; otherwise copies. The merge is an entry with both versions as parents. `PRD.md` first listed merging as a non-goal |

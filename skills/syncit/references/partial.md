@@ -22,6 +22,8 @@ syncit status --all --vs /Volumes/Backup/Archive
 
 `-` (excluded) means "not kept here by choice". It is not a deletion and nothing is lost.
 
+`-` (undropped) means the path is excluded but its files are still here, after an interrupted `move` or `drop` or a hand-edited config. They keep syncing, and each run warns about them. Ask the user which they want: `syncit drop <path>` (dry-run first) removes them here, `syncit get <path>` keeps them.
+
 ## Get more
 
 ```sh

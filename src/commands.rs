@@ -315,6 +315,8 @@ fn run_with(
     announce(ctx);
     record(ctx, a, Some(&b), &mut sum)?;
     record(ctx, &mut b, Some(&*a), &mut sum)?;
+    undropped(ctx, a);
+    undropped(ctx, &b);
     exchange(ctx, a, &mut b, mode, &mut sum)?;
     autocompact(ctx, a)?;
     autocompact(ctx, &b)?;
@@ -355,6 +357,37 @@ pub fn excluded(
         .collect()
 }
 
+/// The top-level names of some files, for a warning: at most five.
+fn tops(files: &[String]) -> String {
+    let top = |p: &String| match p.split_once('/') {
+        Some((dir, _)) => format!("{dir}/"),
+        None => p.clone(),
+    };
+    let tops: BTreeSet<String> = files.iter().map(top).collect();
+    let mut names: Vec<String> = tops.iter().take(5).cloned().collect();
+    if tops.len() > 5 {
+        names.push(format!("and {} more", tops.len() - 5));
+    }
+    names.join(", ")
+}
+
+/// Say which files a vault has that its filter excludes: a config edited by
+/// hand, or a `move` or `drop` stopped partway. They sync as before.
+fn undropped(ctx: &Context, v: &Vault<impl Backend, impl Worktree>) {
+    let files = excluded(v, v);
+    if !files.is_empty() {
+        warn(
+            ctx,
+            format!(
+                "{} files in {} are excluded but still here ({}); `syncit drop` removes them, `syncit get` keeps them",
+                files.len(),
+                v.name,
+                tops(&files)
+            ),
+        );
+    }
+}
+
 /// The files `from` has that `to` ignores.
 pub fn ignored(
     from: &Vault<impl Backend, impl Worktree>,
@@ -384,22 +417,13 @@ fn exchange<WA: Worktree, WB: Worktree>(
         if mode != Mode::Push || files.is_empty() {
             continue;
         }
-        let top = |p: &String| match p.split_once('/') {
-            Some((dir, _)) => format!("{dir}/"),
-            None => p.clone(),
-        };
-        let tops: BTreeSet<String> = files.iter().map(top).collect();
-        let mut names: Vec<String> = tops.iter().take(5).cloned().collect();
-        if tops.len() > 5 {
-            names.push(format!("and {} more", tops.len() - 5));
-        }
         warn(
             ctx,
             format!(
                 "{} {verb} {} files ({}); they were not copied",
                 b.name,
                 files.len(),
-                names.join(", ")
+                tops(&files)
             ),
         );
     }
@@ -665,6 +689,9 @@ fn state(
     }
     if row.is_none() && change.is_none() && !v.config.includes(path) {
         return "excluded";
+    }
+    if row.is_some() && !v.config.includes(path) {
+        return "undropped";
     }
     let Some(winner) = winner else {
         return "incomplete";

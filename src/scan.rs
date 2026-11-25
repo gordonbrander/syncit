@@ -84,12 +84,14 @@ pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Resul
     let progress = Progress::new(&ctx.bar, "scanning", files.len());
     for path in &files {
         progress.tick();
-        // A file on disk is included, whether or not the vault knew it.
-        if !v.config.includes(path) {
-            excluded.push(path);
-        }
         let file = v.worktree.root.join(path);
         let row = dirstate.rows.get(path).cloned();
+        // A file the vault did not know is included. One it knows stays as
+        // the filter has it: excluded but still here, which `status` shows
+        // as undropped.
+        if row.is_none() && !v.config.includes(path) {
+            excluded.push(path);
+        }
         let meta = file.symlink_metadata().ok();
         if let (Some(row), Some(meta)) = (&row, &meta)
             && dirstate.unchanged(row, meta)
@@ -195,6 +197,11 @@ pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Resul
     let gone: Vec<String> = dirstate.rows.keys().filter(gone).cloned().collect();
     let mut deleted = vec![];
     for path in gone {
+        // Under an excluded path the file left this vault only: no deletion.
+        if !v.config.includes(&path) {
+            dirstate.rows.remove(&path);
+            continue;
+        }
         let mut parents = vec![];
         if let Some(row) = dirstate.rows.remove(&path) {
             deleted.push((path.clone(), row.hash));
