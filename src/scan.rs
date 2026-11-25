@@ -72,19 +72,16 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         );
     }
 
-    let (mut dirstate, mut config, mut out) =
-        (v.dirstate.clone(), v.config.clone(), Scan::default());
-    let (mut excluded, mut added, mut deleted) = (vec![], vec![], vec![]);
+    let mut dirstate = v.dirstate.clone();
+    let mut out = Scan::default();
     // For `Scan::cache`: rows to refresh, rows to smudge, and whether a
     // refresh changes what the next scan hashes.
-    let (mut refreshed, mut smudged, mut learned) = (vec![], vec![], false);
+    let mut refreshed = vec![];
+    let mut smudged = vec![];
+    let mut learned = false;
     let progress = Progress::new(&ctx.bar, "scanning", files.len());
     for path in &files {
         progress.tick();
-        // A file on disk is included, whether or not the vault knew it.
-        if !config.includes(path) {
-            excluded.push(path.clone());
-        }
         let file = v.root.join(path);
         let row = dirstate.rows.get(path).cloned();
         let meta = file.symlink_metadata().ok();
@@ -170,9 +167,6 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
             parents,
             path: path.clone(),
         };
-        if kind == "new" {
-            added.push((path.clone(), hash.clone()));
-        }
         dirstate.rows.insert(
             path.clone(),
             Row {
@@ -190,6 +184,7 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
 
     let gone = |p: &&String| !files.contains(*p) && !v.skips(p);
     let gone: Vec<String> = dirstate.rows.keys().filter(gone).cloned().collect();
+    let mut deleted = vec![];
     for path in gone {
         let mut parents = vec![];
         if let Some(row) = dirstate.rows.remove(&path) {
@@ -210,9 +205,18 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         out.entries.push(entry);
     }
 
+    // `changes` and `entries` are pushed together, one of each per path.
+    let new = out.changes.iter().zip(&out.entries);
+    let added: Vec<_> = new
+        .filter(|((_, kind), _)| *kind == "new")
+        .filter_map(|(_, e)| Some((e.path.clone(), e.hash.clone()?)))
+        .collect();
     out.moves = moves(&deleted, &added);
 
+    // A file on disk is included, whether or not the vault knew it.
     // Shortest first, so one dragged-in folder yields one include.
+    let mut config = v.config.clone();
+    let mut excluded: Vec<_> = files.iter().filter(|p| !config.includes(p)).collect();
     excluded.sort_by_key(|p| p.len());
     excluded.iter().for_each(|p| config.auto_include(p));
 
