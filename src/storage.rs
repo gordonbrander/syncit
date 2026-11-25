@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::entry::{is_hash, sha256};
 use anyhow::{Context, Result, ensure};
 use std::cell::{RefCell, RefMut};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -21,10 +21,6 @@ pub struct Store {
     log: RefCell<Option<BTreeSet<String>>>,
     /// The hashes of the blobs stored, once listed.
     blobs: RefCell<Option<BTreeSet<String>>>,
-    /// The segments read so far, kept so that a run that reads one twice (to
-    /// load the log, then to copy it) fetches it once. None for a folder,
-    /// where a second read costs little.
-    read: Option<RefCell<BTreeMap<String, Vec<u8>>>>,
 }
 
 /// `blobs/ab/abcdef…`: folders by the first two hex chars, as git does, so
@@ -50,16 +46,12 @@ impl Store {
             backend,
             log: RefCell::default(),
             blobs: RefCell::default(),
-            read: Some(RefCell::default()),
         }
     }
 
     /// The vault in a dir.
     pub fn dir(fs: Fs) -> Store {
-        Store {
-            read: None,
-            ..Store::new(&fs.root().display().to_string(), Box::new(fs))
-        }
+        Store::new(&fs.root().display().to_string(), Box::new(fs))
     }
 
     pub fn load_config(&self) -> Result<Config> {
@@ -110,17 +102,8 @@ impl Store {
 
     /// A segment's bytes, not validated.
     pub fn read_segment(&self, name: &str) -> Result<Vec<u8>> {
-        if let Some(read) = &self.read
-            && let Some(bytes) = read.borrow().get(name)
-        {
-            return Ok(bytes.clone());
-        }
         let bytes = self.backend.read(&format!("log/{name}"))?;
-        let bytes = bytes.context("no such segment")?;
-        if let Some(read) = &self.read {
-            read.borrow_mut().insert(name.to_string(), bytes.clone());
-        }
-        Ok(bytes)
+        bytes.context("no such segment")
     }
 
     pub fn write_segment(&self, name: &str, bytes: &[u8]) -> Result<()> {

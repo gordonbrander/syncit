@@ -14,6 +14,9 @@ pub struct Log {
     /// For each entry, the nicknames of the segments holding it: the vaults
     /// that recorded it. A label for people; no rule reads it.
     pub authors: BTreeMap<Id, BTreeSet<String>>,
+    /// The bytes of the segments that loading this log had to fetch: those
+    /// `known` did not have. A vault that takes them need not fetch again.
+    pub fetched: BTreeMap<String, Vec<u8>>,
 }
 
 /// The result of the read rules for one path.
@@ -73,10 +76,14 @@ impl Log {
         let have = known.map(Store::segment_names).transpose()?;
         for name in storage.segment_names()? {
             let from = known.filter(|_| have.as_ref().is_some_and(|h| h.contains(&name)));
-            let segment = from
-                .unwrap_or(storage)
-                .read_segment(&name)
-                .and_then(|bytes| segment::decode(&name, &bytes));
+            let read = from.unwrap_or(storage).read_segment(&name);
+            let segment = read.and_then(|bytes| {
+                let segment = segment::decode(&name, &bytes);
+                if known.is_some() && from.is_none() {
+                    log.fetched.insert(name.clone(), bytes);
+                }
+                segment
+            });
             match segment {
                 Ok(s) => {
                     for (id, e) in s.entries {

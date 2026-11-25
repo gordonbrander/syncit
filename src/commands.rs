@@ -465,7 +465,10 @@ pub fn receive(ctx: &Context, v: &mut Vault, from: &Vault, sum: &mut Summary) ->
         if have.contains(&name) {
             continue;
         }
-        let read = from.storage.read_segment(&name);
+        let read = match from.log.fetched.get(&name) {
+            Some(bytes) => Ok(bytes.clone()),
+            None => from.storage.read_segment(&name),
+        };
         match read.and_then(|bytes| Ok((segment::decode(&name, &bytes)?, bytes))) {
             Ok((segment, bytes)) => {
                 if !ctx.dry_run {
