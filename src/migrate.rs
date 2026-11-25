@@ -7,44 +7,22 @@
 //! `VERSION`. `every_step_survives_a_stop` then tests it.
 
 use crate::backend::Backend;
+use crate::format::Format;
 use crate::output::{Context, Message, print_stderr};
 use anyhow::{Context as _, Result, bail, ensure};
 
 /// The layout this build reads and writes.
 pub const VERSION: u32 = 2;
 
-/// The file that says what a vault is: a JSON object whose `syncit` is the
-/// layout version. It is plaintext on every backend, so it can be read
-/// before anything else is understood; a sealed vault's also has the `check`
-/// of its key (`sealed.rs`).
-pub const FORMAT: &str = "format";
-
-/// The fields of the vault's `format`; none if it has no such file.
-fn format(b: &impl Backend) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let Some(bytes) = b.read(FORMAT)? else {
-        return Ok(Default::default());
-    };
-    serde_json::from_slice(&bytes).context("corrupt format")
-}
-
 /// The layout version of the vault on `b`: the `syncit` of its `format`. A
-/// vault made before that was there is at version 1.
+/// vault made before every vault had one is at version 1.
 pub fn version(b: &impl Backend) -> Result<u32> {
-    match format(b)?.get("syncit") {
-        None => Ok(1),
-        Some(version) => {
-            let version = version.as_u64().and_then(|v| u32::try_from(v).ok());
-            version.filter(|v| *v > 0).context("corrupt format")
-        }
-    }
+    Ok(Format::read(b)?.map_or(1, |format| format.syncit))
 }
 
-/// Canonical JSON: keys in alphabetical order, one line.
-fn set_version(b: &impl Backend, version: u32) -> Result<()> {
-    let mut format = format(b)?;
-    format.insert("syncit".to_string(), version.into());
-    let text = serde_json::to_string(&format)? + "\n";
-    b.write(FORMAT, text.as_bytes())
+fn set_version(b: &impl Backend, syncit: u32) -> Result<()> {
+    let check = Format::read(b)?.and_then(|format| format.check);
+    Format { check, syncit }.write(b)
 }
 
 /// Mark the new vault on `b` as having this build's layout.
@@ -124,6 +102,7 @@ fn to_2(b: &impl Backend) -> Result<()> {
 mod tests {
     use super::*;
     use crate::backend::Fs;
+    use crate::format::FORMAT;
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;

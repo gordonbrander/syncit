@@ -110,6 +110,7 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 |---|---|
 | `src/backend.rs` | the `Backend` trait, bytes at paths, and `Fs`, a vault folder's `.syncit/`, which holds the vault's lock |
 | `src/storage.rs` | `Store<B>`: a vault's config, log and blobs, and where each is on its backend |
+| `src/format.rs` | `Format`: the `format` file, and the only code that reads or writes it (section 14) |
 | `src/migrate.rs` | the layout version, and every change from one layout to the next (section 14) |
 | `src/remote.rs` | `Bucket`, the object-storage backend, the credentials for it, and `backend(url)`, which makes a remote's `Sealed<Bucket>` |
 | `src/sealed.rs` | `Sealed`, a backend that encrypts names and contents on top of another, and the `format` file |
@@ -453,8 +454,9 @@ A vault's **layout** is which files it has on its backend and what is in them. I
 ```
 
 - `format` is a JSON object in canonical form, at the backend's root, and plaintext on every backend, so that it can be read before anything else about the vault is understood: by a build that does not know the layout, and before the key is known.
+- It is one type, `Format { check: Option<String>, syncit: u32 }` in `format.rs`, and nothing else reads or writes the file. Parsing is strict: `syncit` is required and is not 0, and an unknown field is an error. `check` is there only in a sealed vault.
 - **One number versions everything in the vault**: the files above the backend, and in a sealed vault the sealing too (section 6).
-- A vault with no `format`, or one without `syncit`, is at layout 1. A folder at layout 1 has none; a remote at layout 1 has `"syncit":1`.
+- A vault with no `format` is at layout 1. A folder at layout 1 has none; a remote at layout 1 has `"syncit":1`.
 - A segment header's `syncit` is a different thing: the version of the segment format (`CRDT.md`). Segments are immutable and replicated, so they are never rewritten in place, and a new segment format is read beside the old.
 
 **Every layout change is in `migrate.rs`**, and nowhere else. No other code reads an old layout.

@@ -8,6 +8,7 @@ pub mod config;
 pub mod crypt;
 pub mod dirstate;
 pub mod entry;
+pub mod format;
 #[cfg(feature = "remote")]
 pub mod keys;
 pub mod log;

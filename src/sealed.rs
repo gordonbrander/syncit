@@ -4,33 +4,21 @@
 
 use crate::backend::{Backend, Unreadable};
 use crate::crypt::{self, Key};
-use crate::migrate::FORMAT;
+use crate::format::{FORMAT, Format};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 /// The `check` in the `format` of the vault stored on `inner`, which tells
-/// its key from another. `format` is the one file read before the key is
-/// known, so it is the one file that is not encrypted. `name` is the
-/// vault's, for errors.
+/// its key from another. `name` is the vault's, for errors.
 pub fn check(inner: &impl Backend, name: &str) -> Result<String> {
-    let Some(bytes) = inner.read(FORMAT)? else {
+    let Some(format) = Format::read(inner).with_context(|| name.to_string())? else {
         bail!("no vault at {name}: run syncit init {name}");
     };
-    let format: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
-    let check = format
-        .as_ref()
-        .and_then(|format| format.get("check")?.as_str());
-    let check = check.with_context(|| format!("{name}: corrupt format"))?;
-    Ok(check.to_string())
-}
-
-/// Write the `format` of a new vault whose key is `key`: its `check`. The
-/// layout version is added to it when the vault is made (`Store::create`).
-pub fn create(inner: &impl Backend, key: &Key) -> Result<()> {
-    let format = serde_json::json!({ "check": crypt::check(key) });
-    inner.write(FORMAT, (format.to_string() + "\n").as_bytes())
+    format
+        .check
+        .with_context(|| format!("{name}: corrupt format"))
 }
 
 /// The backend `B`, with every name and every file encrypted with `key`.
@@ -258,27 +246,25 @@ mod tests {
         let inner = Fs::at(tmp.path());
         let none = check(&inner, "there").unwrap_err().to_string();
         assert_eq!(none, "no vault at there: run syncit init there");
-        create(&inner, &key(1)).unwrap();
+        let format = Format {
+            check: Some(crypt::check(&key(1))),
+            syncit: 1,
+        };
+        format.write(&inner).unwrap();
         assert_eq!(check(&inner, "there").unwrap(), crypt::check(&key(1)));
-        let format = tmp.path().join(".syncit/format");
-        let text = fs::read_to_string(&format).unwrap();
-        assert!(text.starts_with("{\"check\":\"") && text.ends_with("\"}\n"));
-        // It is the one file a sealed backend stores as it is, and the
-        // layout version goes into it beside the check.
+        // It is the one file a sealed backend stores as it is.
+        let file = tmp.path().join(".syncit/format");
+        let text = fs::read_to_string(&file).unwrap();
         let s = Sealed::new(Fs::at(tmp.path()), key(1));
         assert_eq!(s.read(FORMAT).unwrap().unwrap(), text.as_bytes());
-        crate::migrate::create(&s).unwrap();
-        let text = fs::read_to_string(&format).unwrap();
-        let version = crate::migrate::VERSION;
-        assert!(
-            text.ends_with(&format!("\",\"syncit\":{version}}}\n")),
-            "{text}"
-        );
-        assert_eq!(check(&inner, "there").unwrap(), crypt::check(&key(1)));
+        assert_eq!(Format::read(&s).unwrap(), Some(format));
         assert!(s.list("").unwrap().contains(FORMAT));
         assert_eq!(s.size(FORMAT).unwrap(), Some(text.len() as u64));
+        // A new version is written beside the check, not over it.
+        crate::migrate::create(&s).unwrap();
+        assert_eq!(check(&inner, "there").unwrap(), crypt::check(&key(1)));
         for junk in ["junk", "{\"syncit\":2}"] {
-            fs::write(&format, junk).unwrap();
+            fs::write(&file, junk).unwrap();
             assert!(check(&inner, "there").is_err(), "{junk}");
         }
     }

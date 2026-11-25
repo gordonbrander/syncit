@@ -110,7 +110,11 @@ pub fn init_remote(
         autocompact: false,
         ..Config::new(String::new(), nickname)
     };
-    crate::sealed::create(&bucket, &key)?;
+    let format = crate::format::Format {
+        check: Some(crypt::check(&key)),
+        syncit: VERSION,
+    };
+    format.write(&bucket)?;
     let sealed = crate::sealed::Sealed::new(bucket, key.clone());
     Store::create(url, sealed, &config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
