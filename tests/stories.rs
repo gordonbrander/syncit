@@ -2512,7 +2512,7 @@ mod remote {
         let backend = syncit::remote::backend(o, url).unwrap();
         let vr = Vault::bare(o, url, backend, Some(&va.store)).unwrap();
         assert_eq!(cmd::excluded(&va, &vr), ["music/m.mp3"]);
-        assert!(vr.work.rows.contains_key("docs/a.txt"));
+        assert!(vr.worktree.rows.contains_key("docs/a.txt"));
         // A vault that pulls gets only what the remote has.
         let c = tmp.path().join("c");
         fs::create_dir(&c).unwrap();

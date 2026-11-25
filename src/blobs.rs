@@ -76,7 +76,7 @@ fn fetch_from(
     dest: &Path,
     traffic: Option<&mut Traffic>,
 ) -> io::Result<bool> {
-    for src in v.work.files(hash) {
+    for src in v.worktree.files(hash) {
         if copy_verified(src, dest, hash)? {
             return Ok(true);
         }
@@ -111,7 +111,7 @@ fn read_from(
     max: u64,
     traffic: Option<&mut Traffic>,
 ) -> Option<Vec<u8>> {
-    let file = v.work.files(hash).iter().find_map(|src| {
+    let file = v.worktree.files(hash).iter().find_map(|src| {
         let small = src.metadata().is_ok_and(|m| m.is_file() && m.len() <= max);
         let bytes = small.then(|| fs::read(src).ok()).flatten()?;
         (sha256(&bytes) == hash).then_some(bytes)
@@ -140,7 +140,7 @@ fn available_from(
     hash: &str,
     traffic: Option<&mut Traffic>,
 ) -> bool {
-    if v.work.files(hash).iter().any(|src| src.is_file()) {
+    if v.worktree.files(hash).iter().any(|src| src.is_file()) {
         return true;
     }
     let stored = v.store.has_blob(hash);
@@ -185,7 +185,7 @@ pub fn retain<W: Worktree>(
     } else if !ctx.dry_run && (W::BARE || v.config.keep_history != Some(0)) {
         let missing = v.store.missing(&keep);
         if !missing.is_empty() {
-            let root = v.work.root().or(peer.and_then(|p| p.work.root()));
+            let root = v.worktree.root().or(peer.and_then(|p| p.worktree.root()));
             let tmp = root.context("no vault here to move files through")?;
             let tmp = tmp.join(".syncit/tmp");
             fs::create_dir_all(&tmp)?;

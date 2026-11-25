@@ -96,7 +96,7 @@ pub fn materialise(
 ) -> Result<()> {
     // To save the dirstate only if this changes it. Compared, not tracked:
     // a change made anywhere below cannot then go unsaved.
-    let before = v.work.dirstate.clone();
+    let before = v.worktree.dirstate.clone();
     let states: Vec<(String, PathState)> = (v.log.paths.keys())
         .map(|p| (p.clone(), v.log.resolve(p)))
         .collect();
@@ -104,7 +104,11 @@ pub fn materialise(
     for (p, state) in &states {
         if let PathState::Resolved { winner, .. } = state
             && let Some(h) = &v.log.entries[winner].hash
-            && v.work.dirstate.rows.get(p).is_none_or(|row| &row.hash != h)
+            && v.worktree
+                .dirstate
+                .rows
+                .get(p)
+                .is_none_or(|row| &row.hash != h)
             && v.takes(p)
         {
             pass.needed.insert(h.clone());
@@ -141,10 +145,10 @@ pub fn materialise(
             None => v.event(ctx, sum, kind, path, ""),
         }
     }
-    if ctx.dry_run || v.work.dirstate == before {
+    if ctx.dry_run || v.worktree.dirstate == before {
         return Ok(());
     }
-    v.work.dirstate.save(&v.work.root)
+    v.worktree.dirstate.save(&v.worktree.root)
 }
 
 /// What one materialise collects as it goes over the paths.
@@ -168,19 +172,19 @@ fn delete(
     heads: Vec<Id>,
     pass: &mut Pass,
 ) -> Result<()> {
-    if let Some(row) = v.work.dirstate.rows.get(p) {
+    if let Some(row) = v.worktree.dirstate.rows.get(p) {
         let hash = row.hash.clone();
         safe(v, p)?;
         if !ctx.dry_run {
-            let file = v.work.root.join(p);
+            let file = v.worktree.root.join(p);
             fs::remove_file(&file)?;
-            prune(&v.work.root, &file);
+            prune(&v.worktree.root, &file);
         }
-        v.work.dirstate.rows.remove(p);
+        v.worktree.dirstate.rows.remove(p);
         pass.deleted.push((p.to_string(), hash));
     }
     // No file here now reflects every head: this vault has seen them.
-    v.work.dirstate.deleted.insert(p.to_string(), heads);
+    v.worktree.dirstate.deleted.insert(p.to_string(), heads);
     Ok(())
 }
 
@@ -208,11 +212,11 @@ fn one(
             ..
         } => (heads, winner, losers),
     };
-    let row = v.work.dirstate.rows.get(p).cloned();
+    let row = v.worktree.dirstate.rows.get(p).cloned();
     if !v.takes(p) {
         return Ok(());
     }
-    let (file, w) = (v.work.root.join(p), v.log.entries[&winner].clone());
+    let (file, w) = (v.worktree.root.join(p), v.log.entries[&winner].clone());
     let Some(h) = w.hash else {
         // A file whose content another path is about to take is removed last:
         // until then it is a source for it, and nothing is fetched.
@@ -243,8 +247,8 @@ fn one(
             v.store.write_segment(&name, &bytes)?;
             placed
         };
-        v.work.dirstate.deleted.remove(p);
-        v.work.dirstate.rows.insert(
+        v.worktree.dirstate.deleted.remove(p);
+        v.worktree.dirstate.rows.insert(
             p.to_string(),
             Row {
                 size,
@@ -274,7 +278,7 @@ fn one(
         });
         if let Some(c) = &copy {
             ensure!(
-                v.work.root.join(c).symlink_metadata().is_err(),
+                v.worktree.root.join(c).symlink_metadata().is_err(),
                 "the conflict copy name {c} is taken"
             );
         }
@@ -291,16 +295,16 @@ fn one(
                 return Ok(());
             };
             if let (Some(c), Some(row)) = (&copy, &row) {
-                if let Err(e) = fs::rename(&file, v.work.root.join(c)) {
+                if let Err(e) = fs::rename(&file, v.worktree.root.join(c)) {
                     let _ = fs::remove_file(&tmp);
                     return Err(e.into());
                 }
-                v.work.hint(&row.hash, v.work.root.join(c));
+                v.worktree.hint(&row.hash, v.worktree.root.join(c));
             }
             place(v, &tmp, p, &h)?
         };
-        v.work.dirstate.deleted.remove(p);
-        v.work.dirstate.rows.insert(
+        v.worktree.dirstate.deleted.remove(p);
+        v.worktree.dirstate.rows.insert(
             p.to_string(),
             Row {
                 size,
@@ -322,7 +326,7 @@ fn one(
         if !ctx.dry_run {
             set_exec(&file, w.exec)?;
         }
-        if let Some(row) = v.work.dirstate.rows.get_mut(p) {
+        if let Some(row) = v.worktree.dirstate.rows.get_mut(p) {
             row.exec = w.exec;
         }
         v.event(ctx, sum, "updated", p, "");
@@ -348,7 +352,7 @@ fn copies_and_base(
     let mut visible = vec![h];
     for l in losers {
         let c = copy_name(p, &l.hash);
-        let file = v.work.root.join(&c);
+        let file = v.worktree.root.join(&c);
         let surfaced = if v.log.paths.contains_key(&c) || renamed.as_ref() == Some(&c) {
             true // surfaced before; a copy the user deleted stays deleted
         } else if file.symlink_metadata().is_ok() {
@@ -376,7 +380,7 @@ fn copies_and_base(
             .is_none_or(|x| visible.contains(&x))
     };
     let base: Vec<Id> = heads.into_iter().filter(shown).collect();
-    if let Some(row) = v.work.dirstate.rows.get_mut(p) {
+    if let Some(row) = v.worktree.dirstate.rows.get_mut(p) {
         row.base = base;
     }
 }
@@ -409,7 +413,7 @@ fn write_copy(
 /// becomes a deletion record of the tombstones, and the next scan writes the
 /// entry. Whether any was kept.
 pub fn unremove(ctx: &Context, v: &mut Vault<impl Backend, Dir>, sum: &mut Summary) -> bool {
-    let rows: Vec<String> = v.work.dirstate.rows.keys().cloned().collect();
+    let rows: Vec<String> = v.worktree.dirstate.rows.keys().cloned().collect();
     let mut kept = false;
     for path in rows {
         if !v.takes(&path) {
@@ -418,8 +422,8 @@ pub fn unremove(ctx: &Context, v: &mut Vault<impl Backend, Dir>, sum: &mut Summa
         let Some(heads) = deleted_heads(&v.log, &path) else {
             continue;
         };
-        v.work.dirstate.rows.remove(&path);
-        v.work.dirstate.deleted.insert(path.clone(), heads);
+        v.worktree.dirstate.rows.remove(&path);
+        v.worktree.dirstate.deleted.insert(path.clone(), heads);
         v.event(ctx, sum, "added", &path, "kept");
         kept = true;
     }
@@ -428,8 +432,8 @@ pub fn unremove(ctx: &Context, v: &mut Vault<impl Backend, Dir>, sum: &mut Summa
 
 /// Segments come from other vaults and must not write outside this one.
 pub fn no_symlinked_parent(v: &Vault<impl Backend, Dir>, p: &str) -> Result<()> {
-    let mut dir = v.work.root.join(p);
-    while dir.pop() && dir != v.work.root {
+    let mut dir = v.worktree.root.join(p);
+    while dir.pop() && dir != v.worktree.root {
         if dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
             bail!("a parent folder is a symbolic link");
         }
@@ -440,10 +444,10 @@ pub fn no_symlinked_parent(v: &Vault<impl Backend, Dir>, p: &str) -> Result<()> 
 /// The safety checks before a write, rename or delete at `p`.
 fn safe(v: &Vault<impl Backend, Dir>, p: &str) -> Result<()> {
     no_symlinked_parent(v, p)?;
-    let file = v.work.root.join(p);
-    match v.work.dirstate.rows.get(p) {
+    let file = v.worktree.root.join(p);
+    match v.worktree.dirstate.rows.get(p) {
         Some(row) => ensure!(
-            v.work.dirstate.matches(row, &file),
+            v.worktree.dirstate.matches(row, &file),
             "changed since it was scanned"
         ),
         None => ensure!(
@@ -477,7 +481,7 @@ fn stage(
     exec: bool,
     fill: impl FnOnce(&Path) -> io::Result<bool>,
 ) -> Result<Option<PathBuf>> {
-    let file = v.work.root.join(p);
+    let file = v.worktree.root.join(p);
     let dir = file.parent().context("no parent folder")?;
     let (mut top, mut d) = (None, dir); // the topmost folder this call creates
     while !d.exists() {
@@ -524,13 +528,13 @@ fn place(
     p: &str,
     h: &str,
 ) -> Result<(Option<u64>, i64)> {
-    let file = v.work.root.join(p);
+    let file = v.worktree.root.join(p);
     if let Err(e) = fs::rename(tmp, &file) {
         let _ = fs::remove_file(tmp);
         return Err(e.into());
     }
     let meta = file.symlink_metadata()?;
-    v.work.hint(h, file);
+    v.worktree.hint(h, file);
     Ok((Some(meta.len()), mtime_ms(&meta)))
 }
 
@@ -538,7 +542,7 @@ fn place(
 /// must be unchanged since it was scanned, as for any write; a row whose
 /// file is gone is no obstacle. False if no source has the content.
 pub fn write_now(v: &mut Vault<impl Backend, Dir>, p: &str, h: &str, exec: bool) -> Result<bool> {
-    if v.work.root.join(p).symlink_metadata().is_ok() {
+    if v.worktree.root.join(p).symlink_metadata().is_ok() {
         safe(v, p)?;
     } else {
         no_symlinked_parent(v, p)?;

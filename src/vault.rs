@@ -24,7 +24,7 @@ pub struct Vault<B: Backend, W: Worktree> {
     pub store: Store<B>,
     pub config: Config,
     pub log: Log,
-    pub work: W,
+    pub worktree: W,
 }
 
 /// A working dir: the files a person edits.
@@ -182,7 +182,7 @@ impl Worktree for Bare {
                 rows.insert(path.clone(), row);
             }
         }
-        v.work.rows = rows;
+        v.worktree.rows = rows;
     }
 }
 
@@ -303,22 +303,26 @@ impl Vault<Fs, Dir> {
         let dirstate = Dirstate::load(&root)?;
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
-        let mut work = Dir {
+        let mut worktree = Dir {
             hints: HashMap::new(),
             root,
             dirstate,
             ignore,
         };
-        for (path, row) in &work.dirstate.rows {
-            let file = work.root.join(path);
-            work.hints.entry(row.hash.clone()).or_default().push(file);
+        for (path, row) in &worktree.dirstate.rows {
+            let file = worktree.root.join(path);
+            worktree
+                .hints
+                .entry(row.hash.clone())
+                .or_default()
+                .push(file);
         }
         Ok(Vault {
             log: Log::load(ctx, &store, None, local)?,
-            name: work.root.display().to_string(),
+            name: worktree.root.display().to_string(),
             store,
             config,
-            work,
+            worktree,
         })
     }
 }
@@ -341,7 +345,7 @@ impl<B: Backend> Vault<B, Bare> {
             log: Log::load(ctx, &store, known, false)?,
             store,
             config,
-            work: Bare::default(),
+            worktree: Bare::default(),
         };
         Bare::retained(&mut vault, &BTreeSet::new());
         Ok(vault)
@@ -396,7 +400,7 @@ impl<B: Backend, W: Worktree> Vault<B, W> {
     /// never recorded and never written.
     pub fn skips(&self, path: &str) -> bool {
         let name = path.rsplit('/').next().unwrap_or(path);
-        self.work.skips(path)
+        self.worktree.skips(path)
             || name.starts_with(TMP_PREFIX)
             || path.split('/').any(|c| c.eq_ignore_ascii_case(".syncit"))
     }

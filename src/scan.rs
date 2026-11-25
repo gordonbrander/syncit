@@ -61,16 +61,16 @@ pub fn moves(deleted: &[(String, String)], added: &[(String, String)]) -> Vec<(S
 pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Result<Scan> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let (mut files, mut odd) = (BTreeSet::new(), 0);
-    walk(ctx, v, &v.work.root, "", dry, &mut files, &mut odd)?;
+    walk(ctx, v, &v.worktree.root, "", dry, &mut files, &mut odd)?;
     if odd > 0 {
-        let root = v.work.root.display();
+        let root = v.worktree.root.display();
         warn(
             ctx,
             format!("skipped {odd} symbolic links or special files in {root}"),
         );
     }
 
-    let mut dirstate = v.work.dirstate.clone();
+    let mut dirstate = v.worktree.dirstate.clone();
     let mut out = Scan::default();
     // Files on disk that the config does not include yet.
     let mut excluded = vec![];
@@ -88,7 +88,7 @@ pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Resul
         if !v.config.includes(path) {
             excluded.push(path);
         }
-        let file = v.work.root.join(path);
+        let file = v.worktree.root.join(path);
         let row = dirstate.rows.get(path).cloned();
         let meta = file.symlink_metadata().ok();
         if let (Some(row), Some(meta)) = (&row, &meta)
@@ -107,7 +107,7 @@ pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Resul
             out.skipped.push(path.clone());
             continue;
         };
-        v.work.hint(&hash, file);
+        v.worktree.hint(&hash, file);
         let size = Some(size);
         let (parents, kind) = match row {
             Some(row) if row.hash == hash && row.exec == exec => {
@@ -239,14 +239,14 @@ pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Resul
         // A scan that found the folder as the dirstate has it writes
         // nothing; the file keeps its older `scanned`, which is only more
         // cautious. `learned`: some row is the same but newly trusted.
-        let same =
-            dirstate.rows == v.work.dirstate.rows && dirstate.deleted == v.work.dirstate.deleted;
+        let same = dirstate.rows == v.worktree.dirstate.rows
+            && dirstate.deleted == v.worktree.dirstate.deleted;
         if !same || learned {
-            dirstate.save(&v.work.root)?;
+            dirstate.save(&v.worktree.root)?;
         }
     } else if learned || !smudged.is_empty() {
-        // `v.work.dirstate` is still the one the scan began with.
-        let mut cache = std::mem::take(&mut v.work.dirstate);
+        // `v.worktree.dirstate` is still the one the scan began with.
+        let mut cache = std::mem::take(&mut v.worktree.dirstate);
         for (path, size, mtime) in refreshed {
             if let Some(row) = cache.rows.get_mut(&path) {
                 (row.size, row.mtime) = (size, mtime);
@@ -260,7 +260,7 @@ pub fn scan(ctx: &Context, v: &mut Vault<impl Backend, Dir>, dry: bool) -> Resul
         cache.scanned = now;
         out.cache = Some(cache);
     }
-    v.work.dirstate = dirstate;
+    v.worktree.dirstate = dirstate;
     Ok(out)
 }
 
@@ -303,7 +303,7 @@ fn walk(
         let kind = item.file_type()?;
         if name.eq_ignore_ascii_case(".syncit") {
             if !prefix.is_empty() {
-                let (inner, outer) = (dir.display(), v.work.root.display());
+                let (inner, outer) = (dir.display(), v.worktree.root.display());
                 warn(
                     ctx,
                     format!(
@@ -313,7 +313,7 @@ fn walk(
             }
             continue;
         }
-        if v.work.ignore.matches(&path) {
+        if v.worktree.ignore.matches(&path) {
             continue;
         }
         if kind.is_dir() {

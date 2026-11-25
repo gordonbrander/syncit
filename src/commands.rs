@@ -238,7 +238,7 @@ fn open_dir(ctx: &Context, v: &Local, dir: &Path) -> Result<Local> {
         dir.display()
     );
     ensure!(
-        !nested(&find_root(dir)?, &v.work.root),
+        !nested(&find_root(dir)?, &v.worktree.root),
         "cannot sync a vault with itself or with a vault inside it"
     );
     Vault::open(ctx, dir, false)
@@ -342,7 +342,12 @@ pub fn excluded(
     to: &Vault<impl Backend, impl Worktree>,
 ) -> Vec<String> {
     let excluded = |p: &&String| !to.config.includes(p) && !to.skips(p);
-    from.work.rows().keys().filter(excluded).cloned().collect()
+    from.worktree
+        .rows()
+        .keys()
+        .filter(excluded)
+        .cloned()
+        .collect()
 }
 
 /// The files `from` has that `to` ignores.
@@ -351,7 +356,12 @@ pub fn ignored(
     to: &Vault<impl Backend, impl Worktree>,
 ) -> Vec<String> {
     let ignored = |p: &&String| to.skips(p);
-    from.work.rows().keys().filter(ignored).cloned().collect()
+    from.worktree
+        .rows()
+        .keys()
+        .filter(ignored)
+        .cloned()
+        .collect()
 }
 
 /// The part of a run after both vaults are scanned.
@@ -644,7 +654,7 @@ fn state(
     conflict: bool,
     changes: &BTreeMap<String, &'static str>,
 ) -> &'static str {
-    let (row, change) = (v.work.rows().get(path), changes.get(path));
+    let (row, change) = (v.worktree.rows().get(path), changes.get(path));
     if v.skips(path) {
         return "ignored";
     }
@@ -737,7 +747,7 @@ pub fn status(
         ..ctx.clone()
     };
     let mut v = Vault::open(ctx, cwd, true)?;
-    let mut scopes = prefixes(&v.work.root, cwd, paths)
+    let mut scopes = prefixes(&v.worktree.root, cwd, paths)
         .context("paths are in this vault; to compare with another, add `--vs <vault>`")?;
     if scopes.is_empty() {
         scopes.push(String::new());
@@ -761,7 +771,7 @@ pub fn status(
 /// without failing `status`.
 fn dry_scan<W: Worktree>(ctx: &Context, v: &mut Vault<impl Backend, W>) -> Result<Scan> {
     let scanned = W::scan(ctx, v, true)?;
-    if let (Some(cache), Some(root)) = (&scanned.cache, v.work.root()) {
+    if let (Some(cache), Some(root)) = (&scanned.cache, v.worktree.root()) {
         let _ = cache.save(root);
     }
     Ok(scanned)
@@ -893,7 +903,7 @@ pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
     {
         let mut v = Vault::open(ctx, cwd, true)?;
         ensure!(
-            !nested(&source, &v.work.root),
+            !nested(&source, &v.worktree.root),
             "{} is in this vault: give a path in the vault to get it from",
             first.display()
         );
@@ -921,7 +931,7 @@ pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Res
         let mut v = Vault::open(ctx, cwd, true)?;
         if let Target::Dir(dir) = Target::parse(from, Some(&v.config.remotes)) {
             ensure!(
-                !nested(&find_root(&dir)?, &v.work.root),
+                !nested(&find_root(&dir)?, &v.worktree.root),
                 "cannot get files from this vault or a vault inside it"
             );
         }
@@ -974,7 +984,7 @@ fn add(
             root.display()
         );
         ensure!(
-            !nested(&root, &v.work.root),
+            !nested(&root, &v.worktree.root),
             "a vault cannot be its own remote"
         );
         (root.display().to_string(), Config::load(&root)?, None)
@@ -1058,7 +1068,7 @@ fn save_found(_: &Context, _: &str, _: Found, _: bool) -> Result<()> {
 /// exclude them here. Nothing is removed unless every file is confirmed.
 pub fn move_to(ctx: &Context, cwd: &Path, paths: &[PathBuf], target: &Path) -> Result<Summary> {
     let mut v = Vault::open(ctx, cwd, true)?;
-    let prefixes = prefixes(&v.work.root, cwd, paths)?;
+    let prefixes = prefixes(&v.worktree.root, cwd, paths)?;
     match Target::parse(target, Some(&v.config.remotes)) {
         Target::Dir(dir) => {
             let t = open_dir(ctx, &v, &dir)?;
@@ -1084,7 +1094,14 @@ fn move_with(
     record(ctx, &mut t, Some(&*v), &mut sum)?;
 
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
-    let present: Vec<String> = v.work.dirstate.rows.keys().filter(under).cloned().collect();
+    let present: Vec<String> = v
+        .worktree
+        .dirstate
+        .rows
+        .keys()
+        .filter(under)
+        .cloned()
+        .collect();
     ensure!(
         !present.is_empty(),
         "nothing to move: no files here under the given paths"
@@ -1103,7 +1120,7 @@ fn move_with(
 
     exchange(ctx, v, &mut t, Mode::Push, &mut sum)?;
     let arrived = |p: &&String| {
-        t.work.rows().get(*p).map(|row| &row.hash) == Some(&v.work.dirstate.rows[*p].hash)
+        t.worktree.rows().get(*p).map(|row| &row.hash) == Some(&v.worktree.dirstate.rows[*p].hash)
     };
     let target = t.name.clone();
     let missing: Vec<String> = present
@@ -1139,7 +1156,7 @@ pub fn drop(
     force: bool,
 ) -> Result<Summary> {
     let mut v = Vault::open(ctx, cwd, true)?;
-    let prefixes = prefixes(&v.work.root, cwd, paths)?;
+    let prefixes = prefixes(&v.worktree.root, cwd, paths)?;
     match check.map(|check| Target::parse(check, Some(&v.config.remotes))) {
         None => drop_with(ctx, &mut v, prefixes, None::<Local>, force),
         Some(Target::Dir(dir)) => {
@@ -1174,17 +1191,25 @@ fn drop_with(
     }
 
     let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
-    let present: Vec<String> = v.work.dirstate.rows.keys().filter(under).cloned().collect();
+    let present: Vec<String> = v
+        .worktree
+        .dirstate
+        .rows
+        .keys()
+        .filter(under)
+        .cloned()
+        .collect();
     if !force {
         let elsewhere = |hash: &String| {
             v.store.has_blob(hash)
                 || check.as_ref().is_some_and(|c| {
-                    c.work.rows().values().any(|row| &row.hash == hash) || c.store.has_blob(hash)
+                    c.worktree.rows().values().any(|row| &row.hash == hash)
+                        || c.store.has_blob(hash)
                 })
         };
         let sole: Vec<&str> = present
             .iter()
-            .filter(|p| !elsewhere(&v.work.dirstate.rows[*p].hash))
+            .filter(|p| !elsewhere(&v.worktree.dirstate.rows[*p].hash))
             .map(String::as_str)
             .collect();
         let hint = match check {
@@ -1223,20 +1248,20 @@ fn remove_here(
     // scan, but a row with no file would be recorded as a deletion.
     let rows: Vec<_> = present
         .into_iter()
-        .filter_map(|path| v.work.dirstate.rows.remove_entry(&path))
+        .filter_map(|path| v.worktree.dirstate.rows.remove_entry(&path))
         .collect();
     if !ctx.dry_run {
-        v.work.dirstate.save(&v.work.root)?;
+        v.worktree.dirstate.save(&v.worktree.root)?;
     }
     for (path, row) in rows {
-        let file = v.work.root.join(&path);
-        if !v.work.dirstate.matches(&row, &file) {
+        let file = v.worktree.root.join(&path);
+        if !v.worktree.dirstate.matches(&row, &file) {
             v.event(ctx, sum, "skipped", &path, "changed since it was scanned");
             continue;
         }
         if !ctx.dry_run {
             fs::remove_file(&file)?;
-            prune(&v.work.root, &file);
+            prune(&v.worktree.root, &file);
         }
         v.event(ctx, sum, kind, &path, "");
     }
@@ -1251,7 +1276,7 @@ fn remove_here(
 pub fn cp(ctx: &Context, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Result<Summary> {
     let dest = resolve_path(&cwd.join(dest))?;
     let mut v = Vault::open(ctx, &dest, true)?;
-    let into = relative(&v.work.root, &dest)?;
+    let into = relative(&v.worktree.root, &dest)?;
     let mut sum = Summary::default();
     announce(ctx);
     // What is about to be replaced is recorded first, as `restore` does.
@@ -1275,7 +1300,7 @@ pub fn cp(ctx: &Context, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Result
             hash_file(&src).with_context(cannot)?,
             is_exec(&src.metadata().with_context(cannot)?),
         );
-        let file = v.work.root.join(&path);
+        let file = v.worktree.root.join(&path);
         let theirs = file
             .symlink_metadata()
             .ok()
@@ -1305,7 +1330,7 @@ pub fn cp(ctx: &Context, cwd: &Path, sources: &[PathBuf], dest: &Path) -> Result
         );
     }
     if ignored > 0 {
-        let root = v.work.root.display();
+        let root = v.worktree.root.display();
         warn(
             ctx,
             format!("{root} ignores {ignored} files; they were not copied"),
@@ -1360,7 +1385,7 @@ fn collect(
 /// recorded is nobody's yet. Returns what it printed, as (path, nicknames).
 pub fn blame(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(String, Vec<String>)>> {
     let v = Vault::open(ctx, cwd, true)?;
-    let mut prefixes = prefixes(&v.work.root, cwd, paths)?;
+    let mut prefixes = prefixes(&v.worktree.root, cwd, paths)?;
     if prefixes.is_empty() {
         prefixes.push(String::new());
     }
@@ -1391,7 +1416,7 @@ pub fn blame(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<(String
 /// Returns what it printed.
 pub fn log(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>> {
     let v = Vault::open(ctx, cwd, true)?;
-    let mut prefixes = prefixes(&v.work.root, cwd, paths)?;
+    let mut prefixes = prefixes(&v.worktree.root, cwd, paths)?;
     if prefixes.is_empty() {
         prefixes.push(String::new());
     }
@@ -1441,7 +1466,7 @@ pub fn restore(
     in_place: bool,
 ) -> Result<String> {
     let mut v = Vault::open(ctx, cwd, true)?;
-    let p = relative(&v.work.root, &resolve_path(&cwd.join(path))?)?;
+    let p = relative(&v.worktree.root, &resolve_path(&cwd.join(path))?)?;
     let mut sum = Summary::default();
     if in_place {
         record(ctx, &mut v, NO_PEER, &mut sum)?;
@@ -1457,7 +1482,7 @@ pub fn restore(
         (None, _) => bail!("no version of {p} has a hash starting with {hash}; see `syncit log`"),
         (Some(_), Some(_)) => bail!("several versions of {p} have a hash starting with {hash}"),
     };
-    let present = v.work.dirstate.rows.get(&p).map(|row| row.hash.clone());
+    let present = v.worktree.dirstate.rows.get(&p).map(|row| row.hash.clone());
     let dest = if in_place {
         p.clone()
     } else {
@@ -1483,7 +1508,7 @@ pub fn restore(
         );
     } else {
         ensure!(!v.skips(&dest), "the copy name {dest} is ignored");
-        let file = v.work.root.join(&dest);
+        let file = v.worktree.root.join(&dest);
         if file.symlink_metadata().is_ok() {
             ensure!(
                 hash_file(&file).is_ok_and(|x| x == h),

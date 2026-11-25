@@ -177,7 +177,7 @@ and these operations: `load_config`, `save_config`; `segment_names`, `read_segme
 
 **Scratch files.** `Sealed` puts ciphertext on its way in or out beside the local file it was given, as `<file>.sealed`, and removes it. That file is in a vault's `.syncit/tmp` or is a `.syncit-tmp-` file of a working folder, so it is never in the system temp directory and a scan never takes it for a file of the vault.
 
-**A vault is `Vault<B, W>`**: a name for people, a `Store<B>`, the config and log read from it, and `work: W`, its files.
+**A vault is `Vault<B, W>`**: a name for people, a `Store<B>`, the config and log read from it, and `worktree: W`, its files.
 
 | | Type |
 |---|---|
