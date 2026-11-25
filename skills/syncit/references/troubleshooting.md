@@ -42,7 +42,7 @@ Symbolic links, empty folders, and file permissions other than the executable bi
 ## Scripts and scheduled backups
 
 - Results go to stdout; warnings and errors go to stderr.
-- `--json` makes every line a JSON object with a `type`: `event`, `conflict`, `summary`, `version`, `state`, `setting`, `blame`, `remote`, `info` on stdout, `warning` and `error` on stderr. A run that completes ends with one `summary`. Prefer `--json` when you need to parse output, for example `syncit --json log` or `syncit --json status`.
+- `--json` makes every line a JSON object with a `type`: `event`, `conflict`, `summary`, `version`, `state`, `config`, `blame`, `remote`, `info` on stdout, `warning` and `error` on stderr. A run that completes ends with one `summary`. Prefer `--json` when you need to parse output, for example `syncit --json log` or `syncit --json status`.
 - Exit codes: `0` done, `1` failed, `2` done but something needs a look. A script should treat `2` as "tell someone", not as failure to retry.
 - There is no built-in schedule. A scheduled backup is `push` from cron or launchd:
 

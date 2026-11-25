@@ -167,8 +167,8 @@ pub struct Loser { pub hash: String, pub mtime: i64, pub exec: bool }
 ```
 <vault>/
   .syncit/
-    format    # what the vault is: {"syncit":2}, its layout version
-    config    # JSON, local
+    format       # what the vault is: {"syncit":2}, its layout version
+    config.toml  # TOML, local, the user's to edit
     dirstate     # JSON, local
     lock      # empty file, locked while a command runs
     log/      # segments, named by hash; the only replicated part
@@ -181,30 +181,32 @@ Every file written under `.syncit/` is written to `.syncit/tmp/` first and renam
 
 ### format
 
-`{"syncit":2}`: the number of the layout, which is which files there are and what is in them (`R25`). This document describes layout 2. A vault with no `format` is at layout 1, which kept the number in the config as `"syncit": 1`. The number is in a file of its own so that every other file, the config included, can change format. A remote's `format` is the same file with one more field (`store.md`, section 5).
+`{"syncit":2}`: the number of the layout, which is which files there are and what is in them (`R25`). This document describes layout 2. A vault with no `format` is at layout 1, which kept the number in a JSON config, as `"syncit": 1`. The number is in a file of its own so that every other file, the config included, can change format, and because the config is the user's to edit and holds only settings. A remote's `format` is the same file with one more field (`store.md`, section 5).
 
 - **The vault a command runs in** (the one at the current directory, or the folder `--vault` names) is brought up to the build's layout when it is opened, under its lock, by `status` and a dry run too. One `info` line on stderr says so.
 - **Any other vault** (the peer of a run, or a remote) that is behind is refused, with a message that names `syncit migrate <vault>`. It may be used by machines with an older syncit, which a migration locks out, so it is changed only on purpose.
 - **A vault ahead of the build** is refused: `upgrade syncit`.
 - How a layout is changed, and the rules a change follows, are in `store.md`, section 14.
 
-### config
+### config.toml
 
-```json
-{
-  "include": [""],
-  "exclude": [],
-  "keep_history": 1,
-  "autocompact": true,
-  "nickname": "notes"
-}
+```toml
+nickname = "notes"
+keep-history = 1
+autocompact = true
+include = ["."]
+exclude = []
+
+[remotes]
 ```
 
-- `include`, `exclude`: the filter's prefixes, vault-relative, `/`-separated. `""` is the vault root.
-- `keep_history`: how many versions back from a head this vault keeps the content of in `.syncit/blobs/` (`R15`; section 8, "Retaining"). `0` keeps no history, `null` keeps every version, and a new vault has `1`. Local history is whatever blobs are there; it is never required to be complete.
-- `autocompact`: whether the end of every run drops the blobs `keep_history` no longer covers (section 8, "Compaction"). A new vault has `true`. With `false` they are dropped only by `syncit compact`.
+- `include`, `exclude`: the filter's prefixes, vault-relative, `/`-separated. `"."` is the vault root, which the code holds as `""`.
+- `keep-history`: how many versions back from a head this vault keeps the content of in `.syncit/blobs/` (`R15`; section 8, "Retaining"). `0` keeps no history, `"all"` keeps every version (`None` in the code), and a new vault has `1`. Local history is whatever blobs are there; it is never required to be complete.
+- `autocompact`: whether the end of every run drops the blobs `keep-history` no longer covers (section 8, "Compaction"). A new vault has `true`. With `false` they are dropped only by `syncit compact`.
 - `nickname`: the label written into the header of every segment this vault records (`CRDT.md`, "Nickname"). `init` and `clone` set it to the folder's name, with whitespace and control characters replaced by `-`, cut to 64 bytes, or to `vault` if that leaves nothing. It is a label only: `blame` prints it and no other code reads it.
-- Written pretty-printed. Unknown fields are an error. `keep_history`, `autocompact` and `nickname` are changed with `syncit config` (section 11). Remote vaults add a `remotes` field (`store.md`, section 9).
+- `remotes`: the vault's address book (`store.md`, section 9).
+- **The file is the user's to edit.** Every key is required and no other is allowed, so a misspelt key is an error that names it, not a setting silently ignored. A path must be `"."` or valid (section 5), `keep-history` a number or `"all"`, and `nickname` a valid nickname; each error names the key. When a command saves the config it rewrites only the values that changed: comments, the order of keys and the layout of every other value stay as the user wrote them (`Config::to_toml`).
+- Editing `include` or `exclude` changes what the vault fetches from then on and nothing else: no file is removed or fetched until a command runs. A path added to `exclude` whose files are still here is `undropped` (section 7), and `drop` removes them; a path added to `include` arrives with the next `pull` or `sync`. `get`, `drop` and `move` remain the commands that change the filter and the files together.
 - No vault is special and there is no default peer: any vault syncs with any other, and a command that involves another vault names it. A vault may remember others by nickname in `remotes`, its address book (`store.md`, section 9). Nothing else is recorded about them, and a folder that moves breaks only its own entry.
 
 **Included** (`PRD.md`, "What a vault has"): a prefix matches a path if it is `""`, equals the path, or is followed in the path by `/`. Among all matching prefixes in both lists, the longest decides: included if it came from `include`. If none matches, the path is excluded. A prefix is never in both lists.
@@ -714,13 +716,13 @@ With `--dry-run` the first line is `dry run: nothing is changed`, nothing is rem
 
 ### config
 
-- `syncit config` prints the vault's settings, as `setting` messages: `keep-history: <n>|all`, `autocompact: on|off`, then `nickname: <nickname>`. For the vault here it locks the vault and reads its config only, not its log or dirstate, and writes nothing; so do `syncit remote` and `syncit remote remove`, which then saves the config.
-- `syncit config keep-history <n>|all` sets `keep_history`: a number of versions, or `all` for `null`.
+- `syncit config` prints the vault's config as TOML: what `Config::to_toml` writes for a new file, so every key in a fixed order and no comments. With `--json` it is one `config` message with the same keys and values (`"keep-history": "all"`, `"include": ["."]`). For the vault here it locks the vault and reads its config only, not its log or dirstate, and writes nothing; so do `syncit remote` and `syncit remote remove`, which then saves the config.
+- `syncit config keep-history <n>|all` sets `keep-history`: a number of versions, or `all`.
 - `syncit config autocompact on|off` sets `autocompact`.
 - A change deletes nothing by itself. If blobs are stored that `keep_history` no longer covers, an `info` line after the settings gives their number and says what will drop them: the next sync or snapshot with `autocompact` on, `syncit compact` with it off.
 - `syncit config nickname <name>` sets `nickname`, and fails if the name is not a valid nickname (section 5). Segments already written keep the old one.
 
-Each form prints the settings afterwards and exits 0. Remote vaults add `--vault <target>`, to show or change another vault's settings (`store.md`, section 9).
+Each form prints the config afterwards and exits 0. Remote vaults add `--vault <target>`, to show or change another vault's settings (`store.md`, section 9).
 
 ## 12. Output and exit codes
 
@@ -745,7 +747,7 @@ How it is built:
 |---|---|---|---|
 | `event` | `kind`, `vault`, `path`, `note`, and `from` for `renamed` | a marker, a letter and the path, below | stdout |
 | `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
-| `setting` | `name`, `value` | `<name>: <value>` | stdout |
+| `config` | `include`, `exclude`, `keep-history`, `autocompact`, `nickname`, `remotes`: the values of `config.toml` | the config as TOML | stdout |
 | `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
 | `state` | `path`, `files`, `ours`, `theirs` when there are two vaults, `conflict` (the copies) when a vault is in that state, and `from` when ours is `renamed` | `<mark>[ <mark>]`, the path (`<from> -> <path>` when renamed) padded to the widest of the listing, each vault's state as a word padded to 10, then `<n> files` for a folder or the conflict's copies; two spaces between columns, none at the end. The states and marks are in `status`, section 11 | stdout |
 | `version` | `path`, `hash`, `exec`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`, `executable`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
@@ -908,7 +910,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `get_exclude` | `get` of a folder with `--exclude` of a sub-folder fetches the folder without it; a plain `get` later brings the sub-folder; excluding what is already here removes nothing and shows it as `undropped`; an exclude outside the paths got is refused |
 | `drop_keep` | `drop` of a folder with `--keep` of a sub-folder removes the rest and leaves the kept files untouched; the kept folder still syncs and the dropped one stays away; a keep outside the paths dropped is refused and nothing is dropped |
 | `cp_from_plain_folder` | `cp` from a folder that is not a vault adds what the vault lacks, replaces what differs and leaves the rest; the vault is scanned first; ignored files, links and the source's `.syncit` are not copied; a read-only executable arrives executable; the copies show in `status` as unrecorded; `.` copies contents and a named source lands under its name in a folder that need not exist; a missing source copies nothing; a dry run writes nothing and returns the real run's `Summary` |
-| `config_command` | `config` prints the settings; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
+| `toml_cases` | a config written and read back is the same; `"all"` and `"."`; a file's comments, order and layout survive a save that changes one value; an unknown key, a missing key, a bad path, a bad `keep-history` and a bad nickname are each named |
+| `config_command` | `config` prints the config; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | (remote vaults) | the tests listed in `store.md`, section 12: `crypt_*`, `names_open`, the backend and `sealed_*` tests, `phrase_round_trip`, `key_lookup_order`, `secrets_file`, `credentials_match` and `credentials_errors` in `src/`, the rest in the `remote` module of `tests/stories.rs` and in `cli_smoke` |
 | `version_mismatch` | a vault whose `format` is ahead of the build is refused, as a peer and as the vault a command runs in |
@@ -982,7 +985,8 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Object-store client | the `object_store` crate, driven from a private single-thread async runtime. No external tools. OpenDAL was ruled out because it needs a newer Rust than 1.89 |
 | Store encryption | always on. XChaCha20-Poly1305 in 64 KiB chunks. Every name is encrypted with AES-SIV, which the key turns back, so the provider learns neither the content nor whether a known file is stored |
 | Store keys | one 32-byte key for each remote vault, written as a 24-word BIP39 phrase and shown once, at creation. Kept in the OS keychain when there is one; otherwise given in `SYNCIT_SECRET_KEY` or, if the user chooses, saved in `~/.config/syncit/secrets.toml` |
-| Settings | changed with `syncit config`, not by editing the file |
+| Settings | in `.syncit/config.toml`, which the user may edit; `syncit config` prints it and changes single settings. TOML because it is the format of the other files a person writes (`credentials.toml`), with comments. Editing the filter moves no files: a scan never rewrites the filter to match the disk or the disk to match the filter, and `get`, `drop` and `move` change both together |
+| Format version | in `.syncit/format`, not in the config: a file the user edits holds only settings |
 | Attribution | each vault has a nickname, by default its folder's name, written into the header of the segments it records; `blame` prints it. A label: not unique, not verified, read by no rule. Hostnames and absolute paths are not recorded, since the log is permanent and replicated |
 | Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
 | `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target includes every file and, after the push, has the same content at every path |
@@ -997,7 +1001,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Seeing a partial vault | `status --all`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
 | Terms for partial replication | three independent facts, one word each: included or excluded (the filter), present (the disk, which the dirstate records), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
 | Merging conflicting files | text only (`.md`, `.markdown`, `.txt`), only in a run where a receiving vault keeps history, so the versions replaced can be restored, and only when a line-by-line three-way merge from their common ancestor is clean; otherwise copies. The merge is an entry with both versions as parents. `PRD.md` first listed merging as a non-goal |
-| History | a depth, not a switch: `keep_history` is how many versions back from a head a vault keeps the content of; 0 is none and `null` is all. A new vault keeps 1, which is enough for most merges of text, at the cost of a second copy of every current file |
+| History | a depth, not a switch: `keep_history` is how many versions back from a head a vault keeps the content of; 0 is none and `"all"` is all. A new vault keeps 1, which is enough for most merges of text, at the cost of a second copy of every current file |
 | Compaction | Compaction keeps the whole log and drops only old blobs. As CouchDB's does: it drops the bodies of revisions that are not leaves and keeps the revision tree. Automatic at the end of a run unless `autocompact` is off; then `syncit compact`. Per vault, with nothing to coordinate: a vault collects only what it keeps, so a peer that keeps more does not fill it up again |
 | Tie-break timestamp | file mtime |
 | Empty directories | not tracked; directories emptied by a deletion are removed |
@@ -1027,7 +1031,7 @@ Record here anything built differently from these documents, with the reason.
   - `remote add` with a path needs the root of a vault. A target that is no nickname, no URL and no existing path fails with `no vault at <target>: not a folder, a URL or the name of a remote`, where it used to fail in the nesting check.
   - A remote segment that cannot be decrypted is listed like any other, so the run reports it as `rejected` as it would a corrupt segment. An object under a name the key did not make is not the vault's, and is ignored.
   - **One store, on a backend (2026-11-25).** As first built, storage was a `Storage` trait with two whole implementations, a folder and an encrypted bucket, and a remote's object names were a one-way keyed hash. A listing could then not be read back, so the remote implementation was handed the local vault, fetched every segment it did not know in order to name it, and borrowed the local `.syncit/tmp`. Names are now encrypted reversibly, which let encryption become a backend like any other and left one `Store` for every vault (`store.md`, sections 4 to 6). A folder vault is stored exactly as before. The layout of a remote changed, and one made before this cannot be read. `corrupt config` and a missing config are reported by the vault's folder, not the config file's path.
-  - **Migrations (2026-11-25).** The layout version was `"syncit": 1` in the config, checked where the config was read, and a vault at any other version was refused for good. It is now the `syncit` of the `format` file, which every vault has and a remote already had, and `migrate.rs` holds every change from one layout to the next (`store.md`, section 14). Layout 2 is that change. A build from before this reports a layout 2 folder as `corrupt config`, and a layout 2 remote as `format version 2, not 1`; from layout 2 on, an older build says `upgrade syncit`.
+  - **Migrations (2026-11-25).** The layout version was `"syncit": 1` in the config, checked where the config was read, and a vault at any other version was refused for good. It is now the `syncit` of the `format` file, which every vault has and a remote already had, and `migrate.rs` holds every change from one layout to the next (`store.md`, section 14). Layout 2 is that change and the config's move from JSON `config` to `config.toml`, in one migration. A build from before this reports a layout 2 folder as having no config, and a layout 2 remote as `format version 2, not 1`; from layout 2 on, an older build says `upgrade syncit`.
   - **Vaults as types (2026-11-25).** `Store` first held its backend in a `Box<dyn Backend>`, and `Vault` was one struct for every vault, with a `bare` flag, placeholder working-folder fields in a bare vault, its side of the run and its traffic counts. A vault is now `Vault<B, W>`: its backend and its working dir, or none, are its types, and nothing is boxed (`store.md`, section 4). The lock belongs to `Fs`. Nothing on disk and nothing printed changed, but for one line: a dry run now counts the segment its scan would write, so `would send … N segments` equals what the real run reports.
   - The `sent …` and `received …` lines count distinct blobs and segments. In a dry run, received files are those a dry run finds only in the remote; history that a real `retain` would download is not counted.
 

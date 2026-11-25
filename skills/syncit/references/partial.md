@@ -84,6 +84,18 @@ syncit drop --check /Volumes/Backup/Archive music
 
 `syncit get` brings moved or dropped paths back.
 
+## Read or edit the rules
+
+`syncit config` prints the vault's `include` and `exclude` lists, as they are in `.syncit/config.toml`. `"."` is the whole vault, and the longest matching path decides.
+
+The user may edit that file by hand. An edit moves no files:
+
+- A path added to `include` arrives with the next `pull` or `sync`.
+- A path added to `exclude` whose files are here shows as undropped (above). Nothing is removed until `syncit drop`.
+- An excluded file deleted by hand is removed here only; no deletion is sent.
+
+A misspelt key or a bad value stops every command with an error naming it: fix the file, do not delete it.
+
 ## Pushing to a partial vault
 
 A partial vault takes only what it keeps. `push` warns about the rest:

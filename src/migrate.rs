@@ -87,15 +87,41 @@ fn step(b: &impl Backend, from: u32) -> Result<()> {
     }
 }
 
-/// 1 to 2: the version leaves the config, where it was the field `syncit`,
-/// for `format`, so that the config's own format can change.
+/// 1 to 2: the config, JSON in `config`, becomes TOML in `config.toml`,
+/// which is its owner's to edit. Its version, the field `syncit`, is left
+/// out: the version is in `format`.
 fn to_2(b: &impl Backend) -> Result<()> {
-    let bytes = b.read("config")?.context("it has no config")?;
-    let mut config: serde_json::Value = serde_json::from_slice(&bytes).context("corrupt config")?;
-    let fields = config.as_object_mut().context("corrupt config")?;
-    fields.remove("syncit");
-    let text = serde_json::to_string_pretty(&config)? + "\n";
-    b.write("config", text.as_bytes())
+    let Some(bytes) = b.read("config")? else {
+        // Stopped after the old file went and before the version was written.
+        ensure!(b.size("config.toml")?.is_some(), "it has no config");
+        return Ok(());
+    };
+    let old: serde_json::Value = serde_json::from_slice(&bytes).context("corrupt config")?;
+    let text = |v: &serde_json::Value| v.as_str().map(str::to_string).context("corrupt config");
+    // The root of the vault was "", and is ".".
+    let paths = |key: &str| -> Result<toml_edit::Array> {
+        let list = old[key].as_array().context("corrupt config")?;
+        let dotted = |path: String| if path.is_empty() { ".".into() } else { path };
+        list.iter().map(|path| text(path).map(dotted)).collect()
+    };
+    let mut new = toml_edit::DocumentMut::new();
+    new["nickname"] = toml_edit::value(text(&old["nickname"])?);
+    // Every version was null, and is "all".
+    new["keep-history"] = match &old["keep_history"] {
+        serde_json::Value::Null => toml_edit::value("all"),
+        depth => toml_edit::value(depth.as_i64().context("corrupt config")?),
+    };
+    new["autocompact"] = toml_edit::value(old["autocompact"].as_bool().context("corrupt config")?);
+    new["include"] = toml_edit::value(paths("include")?);
+    new["exclude"] = toml_edit::value(paths("exclude")?);
+    let mut remotes = toml_edit::Table::new();
+    // A config from before there were remotes has no `remotes`.
+    for (name, at) in old["remotes"].as_object().into_iter().flatten() {
+        remotes[name] = toml_edit::value(text(at)?);
+    }
+    new["remotes"] = toml_edit::Item::Table(remotes);
+    b.write("config.toml", new.to_string().as_bytes())?;
+    b.remove("config")
 }
 
 #[cfg(test)]
@@ -155,6 +181,7 @@ mod tests {
     const CONFIG_1: &str = r#"{
   "syncit": 1,
   "include": [
+    "",
     "docs"
   ],
   "exclude": [
@@ -167,6 +194,17 @@ mod tests {
     "origin": "s3://bucket/notes"
   }
 }
+"#;
+
+    /// What that config is at version 2.
+    const CONFIG_2: &str = r#"nickname = "laptop"
+keep-history = "all"
+autocompact = false
+include = [".", "docs"]
+exclude = ["docs/tmp"]
+
+[remotes]
+origin = "s3://bucket/notes"
 "#;
 
     /// A version 1 vault, written as that version wrote it.
@@ -217,14 +255,12 @@ mod tests {
             after[FORMAT],
             format!("{{\"syncit\":{VERSION}}}\n").as_bytes()
         );
-        let json = |text: &[u8]| serde_json::from_slice::<serde_json::Value>(text).unwrap();
-        let mut expected = json(CONFIG_1.as_bytes());
-        expected.as_object_mut().unwrap().remove("syncit");
-        assert_eq!(
-            json(&after["config"]),
-            expected,
-            "every setting, and no version"
-        );
+        assert!(!after.contains_key("config"));
+        let config = std::str::from_utf8(&after["config.toml"]).unwrap();
+        assert_eq!(config, CONFIG_2, "every setting, and no version");
+        // It is a config of this build.
+        let config = crate::config::Config::parse(config).unwrap();
+        assert_eq!(config.include, ["", "docs"]);
         assert_eq!(after["log/abc"], b"a segment");
         assert_eq!(after["blobs/ab/abcd"], b"a blob");
         // Again: nothing to do.
@@ -242,6 +278,14 @@ mod tests {
         assert_eq!(files(&b), before);
         b.write(FORMAT, b"{\"syncit\":\"two\"}").unwrap();
         assert!(check(&b, "v").is_err() && migrate(&b, "v").is_err());
+
+        // Stopped after its last change, before the version was written.
+        let (_tmp, b) = at(1);
+        step(&b, 1).unwrap();
+        let done = files(&b);
+        assert_eq!(migrate(&b, "v").unwrap(), 1);
+        assert_eq!(files(&b), after);
+        assert_eq!(done.len(), after.len() - 1, "all but the version");
 
         // Not a vault.
         let (_tmp, b) = new();

@@ -116,7 +116,7 @@ Short guides to everything else are at **[gordonbrander.github.io/syncit](https:
 | `syncit blame [path]...` | show which vault recorded the current version of each file |
 | `syncit log [path]...` | list the recorded versions of each file, newest first |
 | `syncit restore <path> <hash>` | bring back an old version as a copy beside the file; `--in-place` replaces the file |
-| `syncit config` | show this vault's settings |
+| `syncit config` | show this vault's settings, as the TOML of `.syncit/config.toml`, which you may also edit |
 | `syncit config keep-history <n>\|all` | how many old versions of each file to keep inside the vault |
 | `syncit config autocompact on\|off` | drop older versions after every sync, or only on `syncit compact` |
 | `syncit compact [--dry-run]` | drop the old versions `keep-history` no longer covers |

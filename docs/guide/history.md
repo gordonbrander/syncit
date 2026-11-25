@@ -14,13 +14,19 @@ Each vault keeps the content of old versions in `.syncit/blobs/`, as far back as
 syncit config
 ```
 
-```
-keep-history: 1
-autocompact: on
-nickname: Documents
+```toml
+nickname = "Documents"
+keep-history = 1
+autocompact = true
+include = ["."]
+exclude = []
+
+[remotes]
 ```
 
-(`nickname` is explained under [Who changed what](#who-changed-what).)
+This is the vault's config file, `.syncit/config.toml`. You can change a setting with `syncit config`, as below, or edit the file: syncit keeps your comments and layout when it writes to it, and tells you by name if a key is misspelt.
+
+(`nickname` is explained under [Who changed what](#who-changed-what); `include` and `exclude` under [Partial sync](partial-sync.md#the-rules-in-the-config-file); `remotes` under [Remotes](remotes.md).)
 
 ## How much history to keep
 

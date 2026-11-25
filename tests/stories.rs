@@ -1903,17 +1903,25 @@ fn nested_vault_is_ordinary_files() {
     );
 }
 
-/// Make the vault on `b` what version 1 made: the version in the config,
-/// and a `format` only if it is sealed, which says version 1.
+/// Make the vault on `b` what version 1 made: a JSON `config` with the
+/// version in it, and a `format` only if it is sealed, which says version 1.
 fn to_version_1(b: &impl Backend) {
-    let json = |path: &str| -> serde_json::Value {
-        serde_json::from_slice(&b.read(path).unwrap().unwrap()).unwrap()
-    };
-    let mut config = json("config");
-    config["syncit"] = 1.into();
+    let text = String::from_utf8(b.read("config.toml").unwrap().unwrap()).unwrap();
+    let c = Config::parse(&text).unwrap();
+    let config = serde_json::json!({
+        "syncit": 1,
+        "include": c.include,
+        "exclude": c.exclude,
+        "keep_history": c.keep_history,
+        "autocompact": c.autocompact,
+        "nickname": c.nickname,
+        "remotes": c.remotes,
+    });
     let text = serde_json::to_string_pretty(&config).unwrap();
     b.write("config", text.as_bytes()).unwrap();
-    let mut format = json("format");
+    b.remove("config.toml").unwrap();
+    let format = b.read("format").unwrap().unwrap();
+    let mut format: serde_json::Value = serde_json::from_slice(&format).unwrap();
     match format.get("check") {
         None => b.remove("format").unwrap(),
         Some(_) => {
@@ -1933,6 +1941,8 @@ fn migrates_own_vault() {
     assert!(status(&a).is_empty());
     let format = fs::read_to_string(a.join(".syncit/format")).unwrap();
     assert_eq!(format, "{\"syncit\":2}\n");
+    let dot = a.join(".syncit");
+    assert!(dot.join("config.toml").exists() && !dot.join("config").exists());
     let after = Config::load(&a).unwrap();
     assert_eq!(
         (after.include, after.keep_history),
@@ -2260,7 +2270,7 @@ fn cp_from_plain_folder() {
     put(&plain, "old.txt", "v2", 5);
     put(&plain, "d/new.txt", "n", 5);
     put(&plain, "secret.txt", "x", 5);
-    put(&plain, ".syncit/config", "not a config", 5);
+    put(&plain, ".syncit/config.toml", "not a config", 5);
     put(&plain, "run.sh", "#!", 5);
     chmod(&plain, "run.sh", 0o555);
     std::os::unix::fs::symlink("old.txt", plain.join("link")).unwrap();
@@ -2359,7 +2369,7 @@ mod remote {
         let words = words.expect("a generated key is printed");
         assert_eq!(words.split(' ').count(), 24);
         let key = keys::parse_phrase(&words).unwrap();
-        let config = syncit::crypt::seal_name(&key, "config");
+        let config = syncit::crypt::seal_name(&key, "config.toml");
         assert_eq!(names(&r), BTreeSet::from([config.clone(), "format".into()]));
         let format = fs::read_to_string(r.join("format")).unwrap();
         let check = format
@@ -2627,7 +2637,7 @@ mod remote {
         assert!(is(&c, "good.txt", "good") && !c.join("cut.bin").exists());
         assert_eq!(sum.exit_code(), 2);
         // A garbage config is an error, not a panic.
-        fs::write(at(&r, "config"), b"garbage").unwrap();
+        fs::write(at(&r, "config.toml"), b"garbage").unwrap();
         assert!(cmd::pull(o, &c, &origin).is_err());
     }
 

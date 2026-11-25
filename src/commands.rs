@@ -1671,19 +1671,8 @@ pub enum Setting {
 }
 
 fn print_settings(ctx: &Context, config: &Config) {
-    let depth = config.keep_history;
-    let auto = if config.autocompact { "on" } else { "off" };
-    let settings = [
-        (
-            "keep-history",
-            depth.map_or("all".to_string(), |n| n.to_string()),
-        ),
-        ("autocompact", auto.to_string()),
-        ("nickname", config.nickname.clone()),
-    ];
-    for (name, value) in settings {
-        print_stdout(ctx, &Message::Setting { name, value });
-    }
+    let (config, toml) = (config.clone(), config.to_toml(None));
+    print_stdout(ctx, &Message::Config { config, toml });
 }
 
 /// Print this vault's settings, after changing one if asked. Returns the
