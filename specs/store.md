@@ -28,7 +28,7 @@ Every difference in behaviour must follow from one of the two properties:
 | No lock | remote: object storage has none. Safe because log and blob objects are immutable and named by hash |
 | A secret key is needed | remote |
 
-Everything else is the same as for any vault: a `config` with `nickname`, `include`, `exclude`, `keep_history` and `autocompact`; a log; blobs; validation of every segment (`CRDT.md`, "Validation") and blob received. The log format does not change.
+Everything else is the same as for any vault: a config with `nickname`, `include`, `exclude`, `keep-history` and `autocompact`; a log; blobs; validation of every segment (`CRDT.md`, "Validation") and blob received. The log format does not change.
 
 **Out of scope.** Key rotation. Signed segments. Reading `~/.aws/credentials` (credentials come from `credentials.toml` and the environment, section 5). Parallel transfers. A bare vault on a plain local path.
 
@@ -80,7 +80,7 @@ These are added to the dependencies the crate has today. Everything this documen
 Rules for the features:
 
 - `cargo install` gives the whole tool. `--no-default-features` gives the small one, and `--no-default-features --features remote` a build for a machine with no keychain.
-- `Store`, the `Backend` trait, `Fs`, `config.remotes`, the `remote` commands and targets that are paths or nicknames of paths are **not** behind a feature. The config format is the same in every build, so a vault made by one build opens in another.
+- `Store`, the `Backend` trait, `Fs`, `config.remotes`, the `remote` commands and targets that are paths or nicknames of paths are **not** behind a feature. The config format is the same in every build, so a vault made by one build opens in another; `toml_edit`, which reads and writes it, is therefore not behind a feature.
 - The gates are few and at the edges: the bucket and sealed backends and the two modules beside them, the place a URL target is opened, `init <url>`, and the keychain entry in the key search. No `#[cfg]` inside the run, the log or the blob code.
 - There is no feature for each cloud. S3, GCS and Azure share nearly all their dependencies.
 
@@ -110,6 +110,8 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 |---|---|
 | `src/backend.rs` | the `Backend` trait, bytes at paths, and `Fs`, a vault folder's `.syncit/`, which holds the vault's lock |
 | `src/storage.rs` | `Store<B>`: a vault's config, log and blobs, and where each is on its backend |
+| `src/format.rs` | `Format`: the `format` file, and the only code that reads or writes it (section 14) |
+| `src/migrate.rs` | the layout version, and every change from one layout to the next (section 14) |
 | `src/remote.rs` | `Bucket`, the object-storage backend, the credentials for it, and `backend(url)`, which makes a remote's `Sealed<Bucket>` |
 | `src/sealed.rs` | `Sealed`, a backend that encrypts names and contents on top of another, and the `format` file |
 | `src/crypt.rs` | key derivation, name encryption, stream encryption. No I/O beyond `Read` and `Write` |
@@ -118,7 +120,7 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 | `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.store`; functions are generic over the vaults they are given |
 | `src/config.rs` | `remotes` |
 | `src/output.rs` | `Context.secret_key` |
-| `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--only` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
+| `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--include` and `--exclude` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
 
 ## 4. Storage: one store, on a backend
 
@@ -159,12 +161,13 @@ A read that finds something other than what was written (changed, cut short, or 
 **`Store<B>` is a vault's state on the backend `B`.** There is one, for every vault, and it owns its backend. It holds the layout, which is the same everywhere:
 
 ```
-config              the vault's config
+format              what the vault is: its layout version (section 14)
+config.toml         the vault's config
 log/<name>          a segment, named by its SHA-256
 blobs/<ab>/<hash>   a blob, in a folder named by the first 2 chars of its hash
 ```
 
-and these operations: `load_config`, `save_config`; `segment_names`, `read_segment`, `write_segment`; `has_blob`, `missing`, `get_blob`, `read_blob`, `put_blob`, `drop_blobs_except`. These rules hold:
+and these operations: `open`, which refuses a vault that is not at this build's layout, and `create`, which makes a new one; `load_config`, `save_config`; `segment_names`, `read_segment`, `write_segment`; `has_blob`, `missing`, `get_blob`, `read_blob`, `put_blob`, `drop_blobs_except`. These rules hold:
 
 - **A folder vault is `Store` on `Fs`; a remote vault is `Store` on `Sealed` on `Bucket`.** Nothing above the backend knows which. A remote is another vault with a different backend, as the idea in section 1 says.
 - **Listed once.** The log and the blobs are each listed on first need and the lists are kept for the rest of the run, added to as the store writes. `has_blob` is a lookup in the list of blobs if there is one, and a look at that one blob (`size`) if not: `missing` and compaction list, and opening a remote lists, so a command that asks about a few blobs of a folder vault, as `log` does, reads no folders. A file under `blobs/` that is not at `<ab>/<hash>` is not a blob.
@@ -195,8 +198,8 @@ and these operations: `load_config`, `save_config`; `segment_names`, `read_segme
 ## 5. Layout of a remote vault
 
 ```
-<url>/format                          plaintext, one line: {"check":"<64 hex>","syncit":1}
-<url>/E(config)                       the vault's config
+<url>/format                          plaintext, one line: {"check":"<64 hex>","syncit":2}
+<url>/E(config.toml)                  the vault's config
 <url>/E(log)/E(<name>)                a segment
 <url>/E(blobs)/E(<ab>)/E(<hash>)      a blob
 ```
@@ -205,8 +208,8 @@ This is the layout of section 4 on a sealed backend: `E(x)` is the name `x`, enc
 
 - A name that the vault's key did not make is not one of the vault's files. It is left out of every listing and never touched.
 - Segments and blobs are immutable and written whole. A blob that exists is not written again.
-- `config` is the same JSON as `.syncit/config`, and is the one file that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
-- `format` is canonical JSON, keys in alphabetical order. `syncit` other than 1 is refused. `check` lets a wrong key be told from a damaged store. It is the one file read before the key is known, so it is the one file `Sealed` does not encrypt.
+- `config.toml` is the same TOML as `.syncit/config.toml`, and is the one file that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
+- `format` is canonical JSON, keys in alphabetical order. `syncit` is the layout version (section 14), as in every vault. `check` lets a wrong key be told from a damaged store. It is the one file read before the key is known, so it is the one file `Sealed` does not encrypt: `Sealed` stores it under its own name, as it is.
 - A prefix with objects but no `format` is not a vault and is refused, untouched.
 - syncit never creates a bucket or a directory. A `file://` directory that does not exist is an error, and syncit must check for it itself (section 2).
 - A remote made before names were encrypted this way (2026-11-25) cannot be read: make a new one with `init` and push to it.
@@ -246,7 +249,7 @@ Everything is derived from `K` with HKDF-SHA256 `expand` (`Hkdf::from_prk(K)`):
 | key for names | `"syncit names"` | 64 |
 | key for the file at `path` | `"syncit content " + path` | 32 |
 
-`path` is the plaintext path of section 4, such as `log/<name>` or `config`.
+`path` is the plaintext path of section 4, such as `log/<name>` or `config.toml`.
 
 **Names.** Each name in a path is encrypted on its own with AES-256-SIV (RFC 5297, `aes-siv`), with no associated data, and written in lowercase hex: 16 bytes longer than the name, so 160 characters for a hash.
 
@@ -275,7 +278,7 @@ A vault opened by URL is a `Vault<_, Bare>` (section 4). In a bare vault:
 - **No lock, no ignore file.** `takes(path)` is `includes(path)` and the `.syncit` and scratch-name rules.
 - **Compaction** is the same code: `drop_blobs_except(Log::keep(keep_history, |_| true))`.
 
-A remote vault created by `init` has `keep_history: null` (all) and `autocompact: false`, so by default it never drops anything. Both can be changed (section 9).
+A remote vault created by `init` has `keep-history = "all"` and `autocompact = false`, so by default it never drops anything. Both can be changed (section 9).
 
 **A known race.** Compacting a remote while another vault pushes to it can drop a blob whose segment has not arrived yet. The path then reads as `pending` to others, and the pusher's next push uploads the blob again, because `retain` asks the storage what it lacks on every run. This is not guarded.
 
@@ -327,7 +330,7 @@ A folder that shares a remote's nickname is reached as `./name`. A URL may be us
 **`syncit init <url>`** makes a remote vault. The prefix must be reachable and empty.
 
 1. `K` is the key in `Context.secret_key` if set, otherwise new random bytes.
-2. Write `format`, then `config`: `include: [""]`, `keep_history: null`, `autocompact: false`, `nickname` from `--nickname <name>`, default `origin`.
+2. Write `format`, then `config.toml`: `include = ["."]`, `keep-history = "all"`, `autocompact = false`, `nickname` from `--nickname <name>`, default `origin`.
 3. If the key was generated, print it, then save it (section 8):
 
 ```
@@ -359,10 +362,10 @@ read this vault from another computer, and they are not shown again.
 
 A URL with no `format` fails with `no vault at <url>: run syncit init <url>`.
 
-**`syncit clone <vault> <dir> [--only <path>]…`.** `<vault>` is a target: a nickname in the vault the command runs in, a URL or a path. Two forms, told apart by the flag, as for `get`:
+**`syncit clone <vault> <dir> [--include <path>]… [--exclude <path>]…`.** `<vault>` is a target: a nickname in the vault the command runs in, a URL or a path. Two forms, told apart by the flags, as for `get`:
 
-- Without `--only`: unchanged for a path. The vault is found by walking up from it, and the new vault includes the sub-folder the path names, or everything if the path is the vault's root. A URL is always a whole vault, so the new vault includes everything.
-- With `--only`, which may be given more than once: `<vault>` is a URL or the root of a vault, and the new vault includes exactly the paths given, each from that vault's root, written with `/` and validated with `entry::valid_path`. A path below a vault's root together with `--only` is an error that says to give the root. This is how part of a remote vault is cloned: `syncit clone s3://bucket/archive ~/Archive --only photos/2024 --only music`.
+- With neither flag: unchanged for a path. The vault is found by walking up from it, and the new vault includes the sub-folder the path names, or everything if the path is the vault's root. A URL is always a whole vault, so the new vault includes everything.
+- With `--include` or `--exclude`, each of which may be given more than once: `<vault>` is a URL or the root of a vault. The new vault includes the paths given to `--include`, or everything if there are none, and excludes the paths given to `--exclude`. Each path is from that vault's root, written with `/` and validated with `entry::valid_path`. Each excluded path must lie inside an included one and not be one (`SPEC.md`, section 11, "Flags that narrow a command"). A path below a vault's root together with either flag is an error that says to give the root. This is how part of a remote vault is cloned: `syncit clone s3://bucket/archive ~/Archive --include photos/2024 --include music`.
 
 Either way: create the vault in `<dir>`, record the source in `remotes` under its nickname if that name is free (for a URL this is `remote add`, which finds or asks for the key), then `pull` from it. `get --from` adds more later.
 
@@ -371,7 +374,7 @@ Either way: create the vault in `<dir>`, record the source in `remotes` under it
 - `syncit get <paths>…`: unchanged. Each argument is a filesystem path inside another vault's folder, and the vault is found by walking up from it.
 - `syncit get <paths>… --from <target>`: the vault is the target (a nickname, a URL or a path), and each argument is a path from that vault's root, written with `/` and validated with `entry::valid_path`. This is the only form that reaches a remote vault.
 
-The rest is `get` as it is: include the prefixes, then pull.
+Both take `--exclude <path>`, written as the paths of that form are. The rest is `get` as it is: include the prefixes, then pull.
 
 **`sync`, `push`, `pull`, `move`, `status --vs`, `drop --check`** take a target. No other change: they run the same code with a bare peer (section 7). The target stays required.
 
@@ -410,14 +413,14 @@ No test uses the real keychain or the network. Tests pass a phrase in `Context.s
 | `secrets_file` | mode 0600, in a folder saving makes; two remotes give two entries; saving again replaces; comments and other keys written by hand stay; a missing file gives no key; bad TOML, a `remotes` that is not a table and a phrase that is not a string are each `corrupt secrets` |
 | `credentials_match` | an entry's `url` applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; the entries that apply come from the shortest prefix to the longest, whatever their order in the file; `url` is not among the settings; a URL no entry covers gets none |
 | `credentials_errors` | a missing file gives no settings; bad TOML, a `remotes` that is not `[[remotes]]` entries, an entry with no `url` or a `url` that is not a string, a setting that is not a string, and two entries with the same `url` are each `corrupt credentials <path>`, naming the entry |
-| `init_remote` | writes `format` and the encrypted `config`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses `format` version 2 |
+| `init_remote` | writes `format` and the encrypted `config.toml`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses a `format` ahead of the build |
 | `remote_add` | records the target's nickname and location for a URL and for a path; a taken name needs `--nickname`; a wrong phrase is refused and `config` is unchanged; `remote remove` forgets it |
 | `story_c2_sync_through_remote` | two vaults that never sync with each other converge through one remote, in either order, including a conflict; a vault with no history supplies its current files; a third machine `clone`s the URL and has everything |
 | `remote_is_opaque` | no object in the remote's directory contains a known line of a file, a path, a nickname or a plaintext hash, and no name in the tree is a plaintext hash or a plaintext name |
 | `remote_hostile` | a garbage object, a valid object copied to another name, and a truncated blob are rejected or left pending; objects under names the key did not make are ignored; the rest of the run completes |
 | `known_segments_stay_put` | a vault that has a remote's segments syncs with it though the remote's copies cannot be read; a vault that lacks them reports them `rejected` |
 | `remote_by_nickname` | `sync origin`, `sync <url>` and `sync ./origin` (a folder) each reach the right vault; `clone`, run in the vault, resolves the nickname of a remote and of a folder vault |
-| `clone_only` | `clone <url> <dir> --only a --only b/c` gives a vault that includes those two paths and has only their files; the same against a folder vault's root; a later `get --from` adds a third; a path below a vault's root with `--only` is refused and nothing is created |
+| `clone_include_exclude` | `clone <url> <dir> --include a --include b/c` gives a vault that includes those two paths and has only their files; the same against a folder vault's root; a later `get --from` adds a third; `--exclude b` alone gives everything else, and `--include b --exclude b/d` a folder less a sub-folder, with nothing excluded fetched; an exclude outside the includes, or equal to one, is refused; a path below a vault's root with either flag is refused and nothing is created |
 | `get_from_remote` | a partial vault runs `get music --from origin`; the folder arrives and stays included; nothing else is downloaded. `--from` with a folder vault's path gives the same result as the inferred form |
 | `move_to_remote` | files are removed here only when the remote has their content; a remote that excludes them refuses |
 | `partial_remote` | a remote whose `include` is one folder takes only that folder's blobs, and `push` warns about the rest as it does for a folder |
@@ -437,11 +440,60 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_file`.
 4. **The remote backends and `init <url>`.** `Bucket`, `Sealed`, `format`, the encrypted `config`. Test: `init_remote`.
 5. **Bare vaults in a run.** `Bare`, the derived rows, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
-6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
+6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --include`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_include_exclude`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
 7. **A real bucket.** Run `cloud_remote` against MinIO or a real bucket and fix what differs from `file://`.
 8. **Documents.** `SPEC.md`, `PRD.md` and `CRDT.md` already describe this design as not built. When it is built: in `SPEC.md`, remove the "Not built" notes in sections 8, 10 and 14, tick milestone 9, drop the "not built yet" entry in section 17 and record there anything built differently; in `PRD.md`, remove "Stores are not built yet". Add a README section: remotes, the phrase and its warning, credentials by environment variable, the macOS keychain prompt after reinstalling, the multipart lifecycle rule.
 
-## 14. Building this
+## 14. Migrations (`migrate.rs`)
+
+A vault's **layout** is which files it has on its backend and what is in them. It has one number, the `syncit` of its `format` file:
+
+```
+.syncit/format     {"syncit":2}                       a vault in a folder
+<url>/format       {"check":"<64 hex>","syncit":2}    a sealed vault
+```
+
+- `format` is a JSON object in canonical form, at the backend's root, and plaintext on every backend, so that it can be read before anything else about the vault is understood: by a build that does not know the layout, and before the key is known.
+- It is one type, `Format { check: Option<String>, syncit: u32 }` in `format.rs`, and nothing else reads or writes the file. Parsing is strict: `syncit` is required and is not 0, and an unknown field is an error. `check` is there only in a sealed vault.
+- **One number versions everything in the vault**: the files above the backend, and in a sealed vault the sealing too (section 6).
+- A vault with no `format` is at layout 1. A folder at layout 1 has none; a remote at layout 1 has `"syncit":1`.
+- A segment header's `syncit` is a different thing: the version of the segment format (`CRDT.md`). Segments are immutable and replicated, so they are never rewritten in place, and a new segment format is read beside the old.
+
+**Every layout change is in `migrate.rs`**, and nowhere else. No other code reads an old layout.
+
+```rust
+pub const VERSION: u32 = 2;                              // the layout this build reads and writes
+pub fn version(b: &impl Backend) -> Result<u32>          // what the vault is at
+pub fn check(b: &impl Backend, name: &str) -> Result<()> // refuse a vault that is not at VERSION
+pub fn migrate(b: &impl Backend, name: &str) -> Result<u32>   // bring it to VERSION; the version it was at
+fn step(b: &impl Backend, from: u32) -> Result<()>       // one `match`: 1 => to_2(b), …
+```
+
+- **A migration is a function on a backend**: `fn to_N(b: &impl Backend) -> Result<()>`. A change to the sealing is not built: it would need the backend below `Sealed`, and the key. It has the whole backend (section 4), so it can rework anything `Store` or the dirstate reads, and it is the same function for a folder and a remote. A file only a folder has, such as `dirstate`, is reached the same way; a migration takes a missing one as nothing to do.
+- **It reads old files as bytes or untyped JSON**, never through `Config`, `Store` or another type of the current build, so it keeps working when those change.
+- **It is safe to stop at any change and run again from the top.** Two things hold it to that:
+  - Only the runner writes the version, after a step returns. A run that stops leaves the vault at the version whose step it was in.
+  - The test `every_step_survives_a_stop` takes every step in turn, stops it at its first change, its second, and so on (a test backend that fails at the `n`th write, move or remove), runs it again, and requires the same files as a run that was not stopped. A new step is tested by it as soon as it has an arm in `step`.
+- **To change the layout**: write `to_N`, add its arm to `step`, raise `VERSION`.
+- **There is no way back** to an older layout.
+- `// ponytail:` a step is rerun, not replayed. If one cannot be made safe to rerun, have steps return a plan that the runner journals and replays.
+
+**Who migrates** (the rule is in `SPEC.md`, section 5, "version"):
+
+- `Store::open` calls `check`, so no code reads an existing vault's files at the wrong layout. `Store::create` writes the config, then the version.
+- The vault a command runs in is migrated before its store is opened: in `Vault::open` when `local`, and in `own_store` for the commands that read only settings. It holds its lock.
+- A peer or a remote is opened without migrating, so one that is behind is refused by `check`. `syncit migrate <vault>` migrates it. A folder is locked first. A remote has no lock: two machines migrating it at once write the same bytes, since a step depends only on what is there and every file is written whole.
+
+**Layouts.**
+
+| Layout | Change |
+|---|---|
+| 1 | as first built. The version is the config's `syncit` field |
+| 2 | the version is in `format`, in every vault. The config is TOML in `config.toml`, with no `syncit`: `""` in a list of paths is written `"."`, and a `keep_history` of `null` is `keep-history = "all"` |
+
+Tests: `every_step_survives_a_stop` and `every_step_survives_a_stop_sealed` (the rules above, on a folder and on a sealed folder: a layout 1 vault migrates and keeps every setting; again is nothing; a newer vault is refused untouched; no step is harmed by a stop), `migrates_own_vault`, `migrate_other_vault`, `migrate_remote` (an old remote is refused by `sync`, `clone` and `config --vault` and not changed; migrated from outside any vault; then they work).
+
+## 15. Building this
 
 `SPEC.md`, "Working rules for the implementer", applies. In addition:
 
@@ -456,7 +508,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 - **Never print, log or put in an error the phrase or the key**, outside the one `init` message. Tests assert on output; none may contain a real key in a failure message.
 - **No test may touch the real keychain or the network** (section 12).
 
-## 15. Known limits
+## 16. Known limits
 
 - If every copy of the phrase is lost, the remote cannot be read.
 - On macOS, a rebuilt binary is asked once for keychain access.

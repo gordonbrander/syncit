@@ -90,7 +90,8 @@ A vault is a folder containing a `.syncit/` directory. There is no other kind of
 ```
 b/
   .syncit/
-    config     # format version, include and exclude prefixes, keep_history, autocompact, nickname, remotes
+    format       # the layout version
+    config.toml  # include and exclude prefixes, keep-history, autocompact, nickname, remotes
     log/       # immutable log segments, named by their hash
     dirstate      # local: path -> (size, mtime, hash, base), and deletions seen
     blobs/     # optional: content-addressed file copies
@@ -285,7 +286,7 @@ A vault does have a nickname: a label, by default its folder's name, written int
 | `syncit init [dir]` | Make a folder a vault. |
 | `syncit init <url>` | Make a store at a URL, and show its secret key. |
 | `syncit remote [add <location> \| remove <name>]` | List, remember or forget other vaults and stores by nickname. |
-| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another, or from a store's URL. For a path, the vault root is found by walking up from it, and the sub-path is recorded as included. `--only <path>`, which may be repeated, names what to include from the vault's root instead; it is how part of a store is cloned. The source is remembered under its nickname. |
+| `syncit clone <vault>[/<subpath>] <dir>` | Create a vault from another, or from a store's URL. For a path, the vault root is found by walking up from it, and the sub-path is recorded as included. `--include <path>`, which may be repeated, names what to include from the vault's root instead; it is how part of a store is cloned. `--exclude <path>` names what to leave out. The source is remembered under its nickname. |
 | `syncit sync <target>` | Sync both ways with another vault or a store, named by path, URL or nickname. |
 | `syncit push <target>` / `syncit pull <target>` | Sync one way. |
 | `syncit snapshot` | Scan and record a snapshot. Does not contact a peer. |
@@ -312,7 +313,7 @@ No vault is special. Every command that involves a second vault names it, by pat
 |---|---|---|
 | A.1, A.2 | R2, R3 | scan writes entries; `push` delivers them and the archive materialises |
 | A.3 | R5, R7 | `move` removes dirstate rows, so absence is "not present" |
-| A.4 | R4, R5, R27 | `clone` of a sub-path, or `clone --only` from a store; same directory structure; `status --all` shows what is present and what is excluded |
+| A.4 | R4, R5, R27 | `clone` of a sub-path, or `clone --include` from a store; same directory structure; `status --all` shows what is present and what is excluded |
 | A.5 | R4, R6 | `get` for further folders; present files are always recorded and become included |
 | B.1 | R1, R8, R9, R10 | parent hashes, the ordering key, conflict copies |
 | C.1 | R12 | log union relays through any vault; vaults have no identity to collide |

@@ -6,7 +6,13 @@ A partial vault keeps only some folders of a larger one. Use it when the archive
 
 ```sh
 # several folders: the source must be the vault's root
-syncit clone /Volumes/Backup/Archive ~/Archive --only photos/2024 --only music
+syncit clone /Volumes/Backup/Archive ~/Archive --include photos/2024 --include music
+
+# everything except some folders: they are never downloaded
+syncit clone /Volumes/Backup/Archive ~/Archive --exclude video
+
+# a folder without part of it: the excluded path must be inside an included one
+syncit clone /Volumes/Backup/Archive ~/Archive --include photos --exclude photos/raw
 
 # one folder: name it directly
 syncit clone /Volumes/Backup/Archive/photos/2024 ~/Archive
@@ -22,12 +28,22 @@ syncit status --all --vs /Volumes/Backup/Archive
 
 `-` (excluded) means "not kept here by choice". It is not a deletion and nothing is lost.
 
+`-` (undropped) means the path is excluded but its files are still here, after an interrupted `move` or `drop` or a hand-edited config. They keep syncing, and each run warns about them. Ask the user which they want: `syncit drop <path>` (dry-run first) removes them here, `syncit get <path>` keeps them.
+
 ## Get more
 
 ```sh
 syncit get /Volumes/Backup/Archive/music   # a path into the other vault
 syncit get music --from origin             # a path from the root of a named vault or URL
 ```
+
+To get a folder without part of it, add `--exclude`, written the same way as the paths:
+
+```sh
+syncit get photos --from origin --exclude photos/raw
+```
+
+`--exclude` removes nothing: files already here under it show as undropped. A plain `get photos` later brings the excluded part in too, so repeat the `--exclude` if it should stay out.
 
 `get` also pulls everything else that changed in the other vault, as `pull` does. It has no `--dry-run`; run `syncit pull --dry-run <vault>` first if the user wants a preview of the rest.
 
@@ -64,8 +80,21 @@ syncit drop --check /Volumes/Backup/Archive music
 - **A dry-run refusal is a stop.** The real `drop` can go ahead where the dry run refused, even with `--check`: it counts a copy in this vault's own history as enough. A file changed since the last sync then survives only in that history, which compaction later discards. If the dry run says `nothing dropped`, do what its message says (usually: sync or push first) and dry-run again. Never run the real command to "see if it works".
 - `drop --force` skips every check and may remove the only copy. Ask the user first, and say that in the question.
 - Dropping a folder that is not here yet means "never fetch this".
+- `--keep <path>` keeps part of a dropped folder: `syncit drop --check <vault> photos --keep photos/2024`. The kept files are not touched or re-downloaded. Prefer it to `drop` followed by `get`.
 
 `syncit get` brings moved or dropped paths back.
+
+## Read or edit the rules
+
+`syncit config` prints the vault's `include` and `exclude` lists, as they are in `.syncit/config.toml`. `"."` is the whole vault, and the longest matching path decides.
+
+The user may edit that file by hand. An edit moves no files:
+
+- A path added to `include` arrives with the next `pull` or `sync`.
+- A path added to `exclude` whose files are here shows as undropped (above). Nothing is removed until `syncit drop`.
+- An excluded file deleted by hand is removed here only; no deletion is sent.
+
+A misspelt key or a bad value stops every command with an error naming it: fix the file, do not delete it.
 
 ## Pushing to a partial vault
 

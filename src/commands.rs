@@ -8,6 +8,7 @@ use crate::dirstate::is_exec;
 use crate::entry::valid_path;
 use crate::log::PathState;
 use crate::materialise::{copy_name, no_symlinked_parent, prune, write_now};
+use crate::migrate::{self, VERSION};
 use crate::output::{
     Context, Event, Message, State, Summary, Traffic, Version, print_states, print_stdout, warn,
 };
@@ -41,19 +42,21 @@ enum Mode {
     Pull,
 }
 
-/// Make `dir` a vault that includes `include`, nicknamed after the folder.
-fn create(dir: &Path, include: Vec<String>) -> Result<Config> {
+/// Make `dir` a vault that includes `include` and excludes `exclude`,
+/// nicknamed after the folder.
+fn create(dir: &Path, include: Vec<String>, exclude: Vec<String>) -> Result<Config> {
     let folder = resolve_path(dir)?;
     let folder = folder.file_name().unwrap_or_default().to_string_lossy();
     let config = Config {
         include,
+        exclude,
         ..Config::new(String::new(), default_nickname(&folder))
     };
     for sub in ["log", "blobs", "tmp"] {
         fs::create_dir_all(dir.join(".syncit").join(sub))?;
     }
     File::create(dir.join(".syncit/lock"))?;
-    config.save(dir)?;
+    Store::create(&dir.display().to_string(), Fs::at(dir), &config)?;
     Ok(config)
 }
 
@@ -63,7 +66,7 @@ pub fn init(ctx: &Context, dir: &Path) -> Result<()> {
         "{} is already a vault",
         dir.display()
     );
-    let config = create(dir, vec![String::new()])?;
+    let config = create(dir, vec![String::new()], vec![])?;
     let message = format!(
         "Vault initialized: {}\nNickname: {}",
         resolve_path(dir)?.display(),
@@ -109,9 +112,13 @@ pub fn init_remote(
         autocompact: false,
         ..Config::new(String::new(), nickname)
     };
-    crate::sealed::create(&bucket, &key)?;
+    let format = crate::format::Format {
+        check: Some(crypt::check(&key)),
+        syncit: VERSION,
+    };
+    format.write(&bucket)?;
     let sealed = crate::sealed::Sealed::new(bucket, key.clone());
-    Store::new(url, sealed).save_config(&config)?;
+    Store::create(url, sealed, &config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
     print_stdout(ctx, &Message::Info { message });
     if !generated {
@@ -145,26 +152,47 @@ fn vault_paths(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Each of `inner`, the paths given to `flag`, must lie inside one of `outer`
+/// and not be one of them.
+fn inside(flag: &str, inner: &[String], outer: &[String]) -> Result<()> {
+    for path in inner {
+        let holds = |o: &String| o != path && prefix_matches(o, path);
+        ensure!(
+            outer.iter().any(holds),
+            "{flag} {path} is not inside a path it applies to"
+        );
+    }
+    Ok(())
+}
+
 /// Make `dir` a vault with the files of the vault `src`: a URL, a path in a
-/// vault, or a nickname in the vault at `cwd`. Without `only`, it includes
-/// the sub-folder the path names, or everything. With it, `src` is a URL or
-/// a vault's root, and it includes exactly those paths. The source is
-/// remembered in `remotes`, then pulled.
+/// vault, or a nickname in the vault at `cwd`. With neither `include` nor
+/// `exclude`, it includes the sub-folder the path names, or everything. With
+/// either, `src` is a URL or a vault's root, and it includes those paths, or
+/// everything, less the excluded ones. The source is remembered in
+/// `remotes`, then pulled.
 pub fn clone(
     ctx: &Context,
     cwd: &Path,
     src: &Path,
     dir: &Path,
-    only: &[String],
+    include: &[String],
+    exclude: &[String],
     save_key: bool,
 ) -> Result<Summary> {
-    vault_paths(only)?;
+    vault_paths(include)?;
+    vault_paths(exclude)?;
+    let filtered = !include.is_empty() || !exclude.is_empty();
+    let given = match include.is_empty() {
+        true => vec![String::new()],
+        false => include.to_vec(),
+    };
+    inside("--exclude", exclude, &given)?;
     let local = Vault::open(ctx, cwd, true).ok();
     let src = Target::parse(src, local.as_ref().map(|v| &v.config.remotes));
     std::mem::drop(local); // it may be the source, which is locked
     let (source, include) = match src {
-        Target::Url(url) if only.is_empty() => (PathBuf::from(url), vec![String::new()]),
-        Target::Url(url) => (PathBuf::from(url), only.to_vec()),
+        Target::Url(url) => (PathBuf::from(url), given),
         Target::Dir(src) => {
             let src = resolve_path(&src)?;
             let root = find_root(&src)?;
@@ -174,20 +202,20 @@ pub fn clone(
                 "cannot clone a vault into itself"
             );
             ensure!(
-                only.is_empty() || sub.is_empty(),
-                "{} is inside the vault {}: with --only, give the vault's root",
+                !filtered || sub.is_empty(),
+                "{} is inside the vault {}: with --include or --exclude, give the vault's root",
                 src.display(),
                 root.display()
             );
-            match only.is_empty() {
-                true => (root, vec![sub]),
-                false => (root, only.to_vec()),
+            match filtered {
+                false => (root, vec![sub]),
+                true => (root, given),
             }
         }
     };
     let empty = !dir.exists() || dir.read_dir()?.next().is_none();
     ensure!(empty, "{} exists and is not empty", dir.display());
-    create(dir, include)?;
+    create(dir, include, exclude.to_vec())?;
     let location = source.to_str().context("the source is not UTF-8")?;
     let added =
         Vault::open(ctx, dir, true).and_then(|mut v| add(ctx, &mut v, location, None, save_key));
@@ -310,6 +338,8 @@ fn run_with(
     announce(ctx);
     record(ctx, a, Some(&b), &mut sum)?;
     record(ctx, &mut b, Some(&*a), &mut sum)?;
+    undropped(ctx, a);
+    undropped(ctx, &b);
     exchange(ctx, a, &mut b, mode, &mut sum)?;
     autocompact(ctx, a)?;
     autocompact(ctx, &b)?;
@@ -350,6 +380,37 @@ pub fn excluded(
         .collect()
 }
 
+/// The top-level names of some files, for a warning: at most five.
+fn tops(files: &[String]) -> String {
+    let top = |p: &String| match p.split_once('/') {
+        Some((dir, _)) => format!("{dir}/"),
+        None => p.clone(),
+    };
+    let tops: BTreeSet<String> = files.iter().map(top).collect();
+    let mut names: Vec<String> = tops.iter().take(5).cloned().collect();
+    if tops.len() > 5 {
+        names.push(format!("and {} more", tops.len() - 5));
+    }
+    names.join(", ")
+}
+
+/// Say which files a vault has that its filter excludes: a config edited by
+/// hand, or a `move` or `drop` stopped partway. They sync as before.
+fn undropped(ctx: &Context, v: &Vault<impl Backend, impl Worktree>) {
+    let files = excluded(v, v);
+    if !files.is_empty() {
+        warn(
+            ctx,
+            format!(
+                "{} files in {} are excluded but still here ({}); `syncit drop` removes them, `syncit get` keeps them",
+                files.len(),
+                v.name,
+                tops(&files)
+            ),
+        );
+    }
+}
+
 /// The files `from` has that `to` ignores.
 pub fn ignored(
     from: &Vault<impl Backend, impl Worktree>,
@@ -379,22 +440,13 @@ fn exchange<WA: Worktree, WB: Worktree>(
         if mode != Mode::Push || files.is_empty() {
             continue;
         }
-        let top = |p: &String| match p.split_once('/') {
-            Some((dir, _)) => format!("{dir}/"),
-            None => p.clone(),
-        };
-        let tops: BTreeSet<String> = files.iter().map(top).collect();
-        let mut names: Vec<String> = tops.iter().take(5).cloned().collect();
-        if tops.len() > 5 {
-            names.push(format!("and {} more", tops.len() - 5));
-        }
         warn(
             ctx,
             format!(
                 "{} {verb} {} files ({}); they were not copied",
                 b.name,
                 files.len(),
-                names.join(", ")
+                tops(&files)
             ),
         );
     }
@@ -661,6 +713,9 @@ fn state(
     if row.is_none() && change.is_none() && !v.config.includes(path) {
         return "excluded";
     }
+    if row.is_some() && !v.config.includes(path) {
+        return "undropped";
+    }
     let Some(winner) = winner else {
         return "incomplete";
     };
@@ -888,8 +943,9 @@ fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
 
 /// Add paths of another vault to this one. Each path lies inside that vault,
 /// whose root is found by walking up, as `clone` does. The paths become
-/// included here, and a pull from that vault fetches them.
-pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
+/// included here, less the paths in `exclude`, which are given the same way,
+/// and a pull from that vault fetches them.
+pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf], exclude: &[PathBuf]) -> Result<Summary> {
     let first = paths.first().context("no path given")?;
     let source = find_root(&cwd.join(first))?;
     for path in paths {
@@ -907,26 +963,41 @@ pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
             "{} is in this vault: give a path in the vault to get it from",
             first.display()
         );
-        include(&mut v, prefixes(&source, cwd, paths)?)?;
+        let exclude = prefixes(&source, cwd, exclude)?;
+        include(&mut v, prefixes(&source, cwd, paths)?, exclude)?;
     }
     run(ctx, cwd, &source, Mode::Pull)
 }
 
-/// Include `prefixes` in the vault, and save its config.
-fn include(v: &mut Vault<impl Backend, impl Worktree>, prefixes: Vec<String>) -> Result<()> {
+/// Include `prefixes` in the vault, less `exclude`, and save its config.
+/// Nothing is removed: a file already here under `exclude` is undropped.
+fn include(
+    v: &mut Vault<impl Backend, impl Worktree>,
+    prefixes: Vec<String>,
+    exclude: Vec<String>,
+) -> Result<()> {
+    inside("--exclude", &exclude, &prefixes)?;
     for prefix in prefixes {
         v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
         v.config.include.retain(|x| !prefix_matches(&prefix, x));
         v.config.include.push(prefix);
     }
+    v.config.exclude.extend(exclude);
     v.store.save_config(&v.config)
 }
 
 /// `get --from`: add paths of the vault `from`, a target, each given from
 /// that vault's root. This is the form that reaches a remote vault.
-pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Result<Summary> {
+pub fn get_from(
+    ctx: &Context,
+    cwd: &Path,
+    paths: &[String],
+    exclude: &[String],
+    from: &Path,
+) -> Result<Summary> {
     ensure!(!paths.is_empty(), "no path given");
     vault_paths(paths)?;
+    vault_paths(exclude)?;
     {
         let mut v = Vault::open(ctx, cwd, true)?;
         if let Target::Dir(dir) = Target::parse(from, Some(&v.config.remotes)) {
@@ -935,14 +1006,63 @@ pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Res
                 "cannot get files from this vault or a vault inside it"
             );
         }
-        include(&mut v, paths.to_vec())?;
+        include(&mut v, paths.to_vec(), exclude.to_vec())?;
     }
     run(ctx, cwd, from, Mode::Pull)
 }
 
+/// The store of the vault at or above `cwd`, which a command runs in:
+/// locked, and brought up to this build's layout if it is behind. For a
+/// command that needs the vault's settings and not its log.
+fn own_store(ctx: &Context, cwd: &Path) -> Result<Store<Fs>> {
+    let fs = Fs::open(cwd)?;
+    let name = fs.root().display().to_string();
+    migrate::upgrade(ctx, &fs, &name)?;
+    Store::open(&name, fs)
+}
+
+/// Bring a vault up to this build's layout: the one `vault` names, or the
+/// one here. Any command does this for the vault it runs in; this is for a
+/// vault that others use too, a remote or a folder on a drive, which no
+/// other command changes the layout of. Returns the version it was at.
+pub fn migrate(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<u32> {
+    let done = |name: &str, from: u32| {
+        let message = match from {
+            VERSION => format!("{name} is at format version {VERSION}"),
+            _ => format!("migrated {name} from format version {from} to {VERSION}"),
+        };
+        print_stdout(ctx, &Message::Info { message });
+        from
+    };
+    let dir = |start: &Path| -> Result<u32> {
+        let fs = Fs::open(start)?;
+        let name = fs.root().display().to_string();
+        Ok(done(&name, migrate::migrate(&fs, &name)?))
+    };
+    let Some(target) = vault else {
+        return dir(cwd);
+    };
+    // A nickname is one of the vault here, if there is a vault here.
+    let remotes = own_store(ctx, cwd).and_then(|store| Ok(store.load_config()?.remotes));
+    match Target::parse(target, remotes.as_ref().ok()) {
+        Target::Dir(start) => dir(&start),
+        Target::Url(url) => Ok(done(&url, migrate_url(ctx, &url)?)),
+    }
+}
+
+#[cfg(feature = "remote")]
+fn migrate_url(ctx: &Context, url: &str) -> Result<u32> {
+    migrate::migrate(&crate::remote::backend(ctx, url)?, url)
+}
+
+#[cfg(not(feature = "remote"))]
+fn migrate_url(_: &Context, _: &str) -> Result<u32> {
+    Err(no_remote())
+}
+
 /// List the remotes this vault remembers. Returns them, as printed.
 pub fn remotes(ctx: &Context, cwd: &Path) -> Result<Vec<(String, String)>> {
-    let config = Store::dir(Fs::open(cwd)?).load_config()?;
+    let config = own_store(ctx, cwd)?.load_config()?;
     for (nickname, location) in &config.remotes {
         let message = Message::Remote {
             nickname: nickname.clone(),
@@ -1011,7 +1131,7 @@ fn add(
 /// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
 /// other vaults on this machine may use them.
 pub fn remote_remove(ctx: &Context, cwd: &Path, nickname: &str) -> Result<()> {
-    let store = Store::dir(Fs::open(cwd)?);
+    let store = own_store(ctx, cwd)?;
     let mut config = store.load_config()?;
     let location = config.remotes.remove(nickname);
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
@@ -1045,7 +1165,7 @@ fn find_remote(ctx: &Context, url: &str) -> Result<(Config, Found)> {
         Err(_) => (keys::prompt(url, &check)?, Source::New),
     };
     let sealed = crate::sealed::Sealed::new(bucket, found.0.clone());
-    let config = Store::new(url, sealed).load_config()?;
+    let config = Store::open(url, sealed)?.load_config()?;
     Ok((config, found))
 }
 
@@ -1140,7 +1260,7 @@ fn move_with(
         missing.join(", ")
     );
 
-    remove_here(ctx, v, prefixes, present, "moved", &mut sum)?;
+    remove_here(ctx, v, prefixes, vec![], present, "moved", &mut sum)?;
     report(ctx, &sum, &t);
     Ok(sum)
 }
@@ -1152,20 +1272,23 @@ pub fn drop(
     ctx: &Context,
     cwd: &Path,
     paths: &[PathBuf],
+    keep: &[PathBuf],
     check: Option<&Path>,
     force: bool,
 ) -> Result<Summary> {
     let mut v = Vault::open(ctx, cwd, true)?;
+    let keep = prefixes(&v.worktree.root, cwd, keep)?;
     let prefixes = prefixes(&v.worktree.root, cwd, paths)?;
+    inside("--keep", &keep, &prefixes)?;
     match check.map(|check| Target::parse(check, Some(&v.config.remotes))) {
-        None => drop_with(ctx, &mut v, prefixes, None::<Local>, force),
+        None => drop_with(ctx, &mut v, prefixes, keep, None::<Local>, force),
         Some(Target::Dir(dir)) => {
             let check = open_dir(ctx, &v, &dir)?;
-            drop_with(ctx, &mut v, prefixes, Some(check), force)
+            drop_with(ctx, &mut v, prefixes, keep, Some(check), force)
         }
         Some(Target::Url(url)) => {
             let check = open_url(ctx, Some(&v), &url)?;
-            drop_with(ctx, &mut v, prefixes, Some(check), force)
+            drop_with(ctx, &mut v, prefixes, keep, Some(check), force)
         }
     }
 }
@@ -1174,6 +1297,7 @@ fn drop_with(
     ctx: &Context,
     v: &mut Local,
     prefixes: Vec<String>,
+    keep: Vec<String>,
     mut check: Option<Vault<impl Backend, impl Worktree>>,
     force: bool,
 ) -> Result<Summary> {
@@ -1190,15 +1314,10 @@ fn drop_with(
         record(ctx, c, Some(&*v), &mut sum)?;
     }
 
-    let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
-    let present: Vec<String> = v
-        .worktree
-        .dirstate
-        .rows
-        .keys()
-        .filter(under)
-        .cloned()
-        .collect();
+    let any = |list: &[String], path: &str| list.iter().any(|p| prefix_matches(p, path));
+    let under = |path: &&String| any(&prefixes, path) && !any(&keep, path);
+    let rows = v.worktree.dirstate.rows.keys();
+    let present: Vec<String> = rows.filter(under).cloned().collect();
     if !force {
         let elsewhere = |hash: &String| {
             v.store.has_blob(hash)
@@ -1222,16 +1341,18 @@ fn drop_with(
             sole.join(", ")
         );
     }
-    remove_here(ctx, v, prefixes, present, "dropped", &mut sum)?;
+    remove_here(ctx, v, prefixes, keep, present, "dropped", &mut sum)?;
     Ok(sum)
 }
 
-/// Exclude `prefixes` and remove the `present` files under them from this
-/// vault only, reporting each as `kind`. No deletion is recorded.
+/// Exclude `prefixes`, less the paths in `keep`, and remove the `present`
+/// files from this vault only, reporting each as `kind`. No deletion is
+/// recorded.
 fn remove_here(
     ctx: &Context,
     v: &mut Local,
     prefixes: Vec<String>,
+    keep: Vec<String>,
     present: Vec<String>,
     kind: &'static str,
     sum: &mut Summary,
@@ -1241,6 +1362,7 @@ fn remove_here(
         v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
         v.config.exclude.push(prefix);
     }
+    v.config.include.extend(keep);
     if !ctx.dry_run {
         v.store.save_config(&v.config)?;
     }
@@ -1549,19 +1671,8 @@ pub enum Setting {
 }
 
 fn print_settings(ctx: &Context, config: &Config) {
-    let depth = config.keep_history;
-    let auto = if config.autocompact { "on" } else { "off" };
-    let settings = [
-        (
-            "keep-history",
-            depth.map_or("all".to_string(), |n| n.to_string()),
-        ),
-        ("autocompact", auto.to_string()),
-        ("nickname", config.nickname.clone()),
-    ];
-    for (name, value) in settings {
-        print_stdout(ctx, &Message::Setting { name, value });
-    }
+    let (config, toml) = (config.clone(), config.to_toml(None));
+    print_stdout(ctx, &Message::Config { config, toml });
 }
 
 /// Print this vault's settings, after changing one if asked. Returns the
@@ -1576,7 +1687,7 @@ pub fn config(
         return match change {
             // To show the settings of the vault here, its config is enough.
             None => {
-                let config = Store::dir(Fs::open(cwd)?).load_config()?;
+                let config = own_store(ctx, cwd)?.load_config()?;
                 print_settings(ctx, &config);
                 Ok(config)
             }

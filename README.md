@@ -99,7 +99,8 @@ Short guides to everything else are at **[gordonbrander.github.io/syncit](https:
 | `syncit init [dir]` | make a folder a vault |
 | `syncit init <url> [--nickname <name>]` | make a remote vault in an empty place in cloud storage |
 | `syncit clone <vault, remote or sub-folder> <dir>` | make a new vault from another, or from part of one |
-| `syncit clone <vault> <dir> --only <path>...` | make a new vault with only these paths of a vault or remote |
+| `syncit clone <vault> <dir> --include <path>...` | make a new vault with only these paths of a vault or remote |
+| `syncit clone <vault> <dir> --exclude <path>...` | make a new vault without these paths; with `--include`, leave out parts of an included path |
 | `syncit sync <vault>` | sync both ways with another vault; `--dry-run` only shows what would happen; `--no-remove` keeps deleted files |
 | `syncit push <vault>` | send changes only; takes `--dry-run` and `--no-remove` |
 | `syncit pull <vault>` | receive changes only; takes `--dry-run` and `--no-remove` |
@@ -107,18 +108,21 @@ Short guides to everything else are at **[gordonbrander.github.io/syncit](https:
 | `syncit snapshot` | record the current state without syncing |
 | `syncit get <path in another vault>...` | add those files to this vault, and fetch them |
 | `syncit get <path>... --from <vault>` | the same, with paths from the root of a vault or remote |
+| `syncit get <path>... --exclude <path>...` | the same, leaving out parts of those paths |
 | `syncit move <path>... <vault>` | send these files to another vault, then remove them here; takes `--dry-run` |
 | `syncit cp <path>... <folder in a vault>` | copy files from anywhere into a vault; takes `--dry-run` |
 | `syncit drop [--check <vault>] [--force] <path>...` | remove these files here only, sending nothing; takes `--dry-run` |
+| `syncit drop <path>... --keep <path>...` | the same, keeping parts of those paths here, untouched |
 | `syncit blame [path]...` | show which vault recorded the current version of each file |
 | `syncit log [path]...` | list the recorded versions of each file, newest first |
 | `syncit restore <path> <hash>` | bring back an old version as a copy beside the file; `--in-place` replaces the file |
-| `syncit config` | show this vault's settings |
+| `syncit config` | show this vault's settings, as the TOML of `.syncit/config.toml`, which you may also edit |
 | `syncit config keep-history <n>\|all` | how many old versions of each file to keep inside the vault |
 | `syncit config autocompact on\|off` | drop older versions after every sync, or only on `syncit compact` |
 | `syncit compact [--dry-run]` | drop the old versions `keep-history` no longer covers |
 | `syncit config nickname <name>` | name this vault in the changes it records |
 | `syncit config --vault <vault> ...`, `syncit compact --vault <vault>` | act on another vault, such as a remote |
+| `syncit migrate [<vault>]` | update a vault made by an older syncit; needed only for a remote or another folder, when a command says so |
 | `syncit remote` | list the vaults this one remembers by nickname |
 | `syncit remote add [--nickname <name>] <url or folder>` | remember a vault; for a remote, find or ask for its key |
 | `syncit remote remove <nickname>` | forget a remote |

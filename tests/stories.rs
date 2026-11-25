@@ -19,7 +19,7 @@ static O: LazyLock<Context> = LazyLock::new(|| Context {
     ours: None,
 });
 use std::sync::LazyLock;
-use syncit::backend::Fs;
+use syncit::backend::{Backend, Fs};
 use syncit::blobs::NO_PEER;
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
@@ -80,7 +80,7 @@ fn pair(files: &[(&str, &str)]) -> (TempDir, PathBuf, PathBuf) {
     let (tmp, a) = vault(files);
     let b = tmp.path().join("b");
     assert_eq!(
-        cmd::clone(&O, Path::new("/"), &a, &b, &[], false)
+        cmd::clone(&O, Path::new("/"), &a, &b, &[], &[], false)
             .unwrap()
             .exit_code(),
         0
@@ -97,12 +97,16 @@ fn has(found: &[State], state: &str, path: &str) -> bool {
     found.iter().any(|h| h.ours == state && h.path == path)
 }
 
+fn s(list: &[&str]) -> Vec<String> {
+    list.iter().map(|p| p.to_string()).collect()
+}
+
 fn paths(list: &[&str]) -> Vec<PathBuf> {
     list.iter().map(PathBuf::from).collect()
 }
 
 fn log(dir: &Path) -> Log {
-    Log::load(&O, &Store::dir(Fs::at(dir)), None, true).unwrap()
+    Log::load(&O, &Store::open("v", Fs::at(dir)).unwrap(), None, true).unwrap()
 }
 
 fn names(dir: &Path) -> BTreeSet<String> {
@@ -210,7 +214,7 @@ fn story_a3_move() {
     assert_eq!((report.exit_code(), report.recorded), (0, 0));
     assert!(is(&a, "x/1.txt", "one") && is(&a, "y/2.txt", "two"));
     assert!(!b.join("x").exists() && !b.join("y").exists());
-    cmd::get(&O, &b, &[a.join("x"), a.join("y/2.txt")]).unwrap();
+    cmd::get(&O, &b, &[a.join("x"), a.join("y/2.txt")], &[]).unwrap();
     assert!(is(&b, "x/1.txt", "one") && is(&b, "y/2.txt", "two"));
     assert_eq!(tree(&a), tree(&b));
 }
@@ -282,7 +286,7 @@ fn story_a4_clone_subfolder() {
         ("other/y.txt", "y"),
     ]);
     let b = tmp.path().join("b");
-    cmd::clone(&O, Path::new("/"), &a.join("foo/bar"), &b, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("foo/bar"), &b, &[], &[], false).unwrap();
     assert_eq!(tree(&b).keys().collect::<Vec<_>>(), ["foo/bar/x.txt"]);
     put(&b, "foo/bar/x.txt", "x2", 1);
     put(&b, "foo/bar/new.txt", "n", 1);
@@ -301,10 +305,10 @@ fn story_a5_get_and_new_folder() {
         ("other/y.txt", "y"),
     ]);
     let b = tmp.path().join("b");
-    cmd::clone(&O, Path::new("/"), &a.join("foo/bar"), &b, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("foo/bar"), &b, &[], &[], false).unwrap();
     cmd::move_to(&O, &b, &paths(&["foo/bar/big"]), &a).unwrap();
     // A second folder.
-    cmd::get(&O, &b, &[a.join("other")]).unwrap();
+    cmd::get(&O, &b, &[a.join("other")], &[]).unwrap();
     assert!(is(&b, "other/y.txt", "y") && !b.join("foo/bar/big").exists());
     // New files outside the included paths: the three examples of section 7.
     put(&b, "zap/x/y.txt", "new", 1);
@@ -470,7 +474,7 @@ fn merge_falls_back() {
 fn story_c1_three_vaults() {
     let (tmp, a, b) = pair(&[("f.txt", "v1")]);
     let c = tmp.path().join("c");
-    cmd::clone(&O, Path::new("/"), &b, &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &b, &c, &[], &[], false).unwrap();
     // A change relays through b between two vaults that never meet.
     put(&a, "f.txt", "from a", 1);
     put(&c, "new.txt", "from c", 2);
@@ -638,7 +642,7 @@ fn compact_command() {
     assert!(blobs(&a).is_superset(&hashes(&["c1", "c2", "c3", "theirs"])));
     // Set to keep nothing back, the current versions stay: among them a file
     // dropped from this vault, whose only copy may be here.
-    cmd::drop(&O, &a, &paths(&["d.txt"]), None, false).unwrap();
+    cmd::drop(&O, &a, &paths(&["d.txt"]), &[], None, false).unwrap();
     cmd::config(&O, &a, None, Some(Setting::KeepHistory(Some(0)))).unwrap();
     cmd::compact(&O, &a, None).unwrap();
     let left = blobs(&a);
@@ -677,7 +681,7 @@ fn story_d3_snapshot() {
     assert_eq!(names(&a.join(".syncit/log")).len(), 2);
     // A later sync delivers both.
     let b = tmp.path().join("b");
-    cmd::clone(&O, Path::new("/"), &a, &b, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a, &b, &[], &[], false).unwrap();
     assert_eq!(log(&b).entries, entries);
     assert!(is(&b, "f.txt", "v2"));
 }
@@ -850,7 +854,7 @@ fn recreate_against_unseen_recreation() {
     // re-creations conflict and both are kept.
     let (tmp, a, b) = pair(&[("f.txt", "v1"), ("sub/s.txt", "s")]);
     let c = tmp.path().join("c");
-    cmd::clone(&O, Path::new("/"), &a.join("sub"), &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("sub"), &c, &[], &[], false).unwrap();
     fs::remove_file(b.join("f.txt")).unwrap();
     cmd::sync(&O, &b, &a).unwrap();
     put(&a, "f.txt", "other", 1);
@@ -989,7 +993,7 @@ fn restore_version() {
     refused(restore(&a, "f.txt", "v1", false), "is taken");
     // c has only k.txt: f.txt is not on disk there.
     let c = a.parent().unwrap().join("c");
-    cmd::clone(&O, Path::new("/"), &a.join("k.txt"), &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("k.txt"), &c, &[], &[], false).unwrap();
     refused(restore(&c, "f.txt", "v1", true), "not on disk");
     assert!(!c.join("f.txt").exists());
 }
@@ -1015,7 +1019,7 @@ fn same_edit_no_conflict() {
 fn new_file_at_existing_path() {
     let (tmp, a) = vault(&[("sub/s.txt", "s"), ("f.txt", "F"), ("g.txt", "G")]);
     let b = tmp.path().join("b");
-    cmd::clone(&O, Path::new("/"), &a.join("sub"), &b, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("sub"), &b, &[], &[], false).unwrap();
     assert!(!b.join("f.txt").exists());
     // Equal content is adopted silently.
     put(&b, "f.txt", "F", 5);
@@ -1167,7 +1171,7 @@ fn restored_backup() {
     cmd::snapshot(&O, &a).unwrap();
     let (backup, b) = (tmp.path().join("backup"), tmp.path().join("b"));
     copy_dir(&a, &backup);
-    cmd::clone(&O, Path::new("/"), &a, &b, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a, &b, &[], &[], false).unwrap();
     put(&a, "f.txt", "v2", 1);
     cmd::sync(&O, &a, &b).unwrap();
     put(&a, "f.txt", "v3", 2);
@@ -1195,7 +1199,7 @@ fn restored_backup() {
 fn pending_then_edit() {
     let (tmp, a, b) = pair(&[("f.txt", "v1"), ("sub/s.txt", "s")]);
     let c = tmp.path().join("c");
-    cmd::clone(&O, Path::new("/"), &a.join("sub"), &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("sub"), &c, &[], &[], false).unwrap();
     // c carries the news of v2 but not its content.
     put(&a, "f.txt", "v2", 1);
     cmd::sync(&O, &c, &a).unwrap();
@@ -1539,7 +1543,7 @@ fn corrupt_blob_source() {
     // Same size and mtime: a's scan does not see the change.
     put(&a, "f.txt", "evil", 0);
     let b = tmp.path().join("b");
-    let report = cmd::clone(&O, Path::new("/"), &a, &b, &[], false).unwrap();
+    let report = cmd::clone(&O, Path::new("/"), &a, &b, &[], &[], false).unwrap();
     assert_eq!(report.recorded, 0);
     assert_eq!((report.pending, report.exit_code()), (1, 2));
     assert_eq!(tree(&b).keys().collect::<Vec<_>>(), ["ok.txt"]);
@@ -1572,7 +1576,7 @@ fn move_refuses() {
     };
     // The target excludes the path: nothing is sent, nothing removed.
     let c = tmp.path().join("c");
-    cmd::clone(&O, Path::new("/"), &a.join("d"), &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("d"), &c, &[], &[], false).unwrap();
     put(&b, "f.txt", "edit", 1);
     let error = err(&b, &["d", "f.txt"], &c);
     assert!(
@@ -1617,7 +1621,7 @@ fn drop_refuses_sole_copy() {
     no_history(&[&a, &b]);
     let both = paths(&["d", "f.txt"]);
     // No vault to check against and no history: nothing vouches for a copy.
-    let error = cmd::drop(&O, &b, &both, None, false)
+    let error = cmd::drop(&O, &b, &both, &[], None, false)
         .unwrap_err()
         .to_string();
     assert!(
@@ -1627,7 +1631,7 @@ fn drop_refuses_sole_copy() {
     // An unrecorded edit is recorded, and then blocks the drop even against
     // a vault. With two paths given, nothing is dropped.
     put(&b, "f.txt", "edit", 1);
-    let error = cmd::drop(&O, &b, &both, Some(&a), false)
+    let error = cmd::drop(&O, &b, &both, &[], Some(&a), false)
         .unwrap_err()
         .to_string();
     assert!(
@@ -1641,29 +1645,29 @@ fn drop_refuses_sole_copy() {
     cmd::push(&O, &b, &a).unwrap();
     // The checked vault is scanned: a file it has since lost does not count.
     fs::remove_file(a.join("d/g.txt")).unwrap();
-    let error = cmd::drop(&O, &b, &both, Some(&a), false)
+    let error = cmd::drop(&O, &b, &both, &[], Some(&a), false)
         .unwrap_err()
         .to_string();
     assert!(error.contains("d/g.txt"), "{error}");
     put(&a, "d/g.txt", "g", 2);
-    let report = cmd::drop(&O, &b, &both, Some(&a), false).unwrap();
+    let report = cmd::drop(&O, &b, &both, &[], Some(&a), false).unwrap();
     assert!(report.has("dropped", "f.txt") && report.has("dropped", "d/g.txt"));
     assert!(tree(&b).is_empty() && is(&a, "f.txt", "edit"));
     // Nothing reads as deleted afterwards.
     assert_eq!(cmd::sync(&O, &b, &a).unwrap().recorded, 0);
     assert!(is(&a, "f.txt", "edit") && is(&a, "d/g.txt", "g"));
     // A path with no files here is excluded all the same.
-    cmd::drop(&O, &b, &paths(&["later"]), None, false).unwrap();
+    cmd::drop(&O, &b, &paths(&["later"]), &[], None, false).unwrap();
     assert!(!Config::load(&b).unwrap().includes("later/x.txt"));
     // Local history is another copy; --force skips the check.
-    assert!(cmd::drop(&O, &a, &paths(&["f.txt"]), None, false).is_err());
+    assert!(cmd::drop(&O, &a, &paths(&["f.txt"]), &[], None, false).is_err());
     cmd::config(&O, &a, None, Some(Setting::KeepHistory(None))).unwrap();
     cmd::snapshot(&O, &a).unwrap();
-    cmd::drop(&O, &a, &paths(&["f.txt"]), None, false).unwrap();
+    cmd::drop(&O, &a, &paths(&["f.txt"]), &[], None, false).unwrap();
     assert!(!a.join("f.txt").exists() && blob_path(&a, &sha256(b"edit")).exists());
     cmd::config(&O, &a, None, Some(Setting::KeepHistory(Some(0)))).unwrap();
-    assert!(cmd::drop(&O, &a, &paths(&["d"]), Some(&a), false).is_err());
-    cmd::drop(&O, &a, &paths(&["d"]), None, true).unwrap();
+    assert!(cmd::drop(&O, &a, &paths(&["d"]), &[], Some(&a), false).is_err());
+    cmd::drop(&O, &a, &paths(&["d"]), &[], None, true).unwrap();
     assert!(tree(&a).is_empty());
 }
 
@@ -1673,15 +1677,22 @@ fn interrupted_move() {
     // files: the folder is excluded and its files are still present.
     let (_tmp, a, b) = pair(&[("d/g.txt", "g"), ("d/h.txt", "h"), ("f.txt", "f")]);
     configure(&b, |c| c.exclude.push("d".into()));
-    // The next scan includes what is on disk: nothing is lost.
+    // The next scan leaves the filter and the files as they are: nothing is
+    // lost, and `status` says the files are excluded but still here.
     assert_eq!(cmd::snapshot(&O, &b).unwrap().recorded, 0);
-    let config = Config::load(&b).unwrap();
-    assert!(config.includes("d/g.txt") && config.includes("d/h.txt"));
+    let filter = |dir: &Path| {
+        let config = Config::load(dir).unwrap();
+        (config.include, config.exclude)
+    };
+    assert_eq!(filter(&b), (vec![String::new()], vec!["d".to_string()]));
     assert!(is(&b, "d/g.txt", "g") && is(&b, "d/h.txt", "h"));
+    assert!(has(&status(&b), "undropped", "d/"));
     // The files are synced as before, in both directions.
     put(&a, "d/g.txt", "edit", 1);
+    put(&b, "d/h.txt", "ours", 1);
     assert_eq!(cmd::sync(&O, &b, &a).unwrap().exit_code(), 0);
-    assert!(is(&b, "d/g.txt", "edit") && is(&a, "d/h.txt", "h"));
+    assert!(is(&b, "d/g.txt", "edit") && is(&a, "d/h.txt", "ours"));
+    assert_eq!(filter(&b), (vec![String::new()], vec!["d".to_string()]));
     // Moving again finishes the job and leaves one exclude.
     let report = cmd::move_to(&O, &b, &paths(&["d"]), &a).unwrap();
     assert!(report.has("moved", "d/g.txt") && report.has("moved", "d/h.txt"));
@@ -1690,7 +1701,88 @@ fn interrupted_move() {
         (config.include, config.exclude),
         (vec![String::new()], vec!["d".to_string()])
     );
-    assert!(!b.join("d").exists() && is(&a, "d/g.txt", "edit") && is(&a, "d/h.txt", "h"));
+    assert!(!b.join("d").exists() && is(&a, "d/g.txt", "edit") && is(&a, "d/h.txt", "ours"));
+    assert!(status(&b).is_empty());
+}
+
+#[test]
+fn get_exclude() {
+    // A folder less a sub-folder, which is never fetched.
+    let files = [("p/1.txt", "1"), ("p/raw/2.txt", "2"), ("q/3.txt", "3")];
+    let (tmp, a) = vault(&files);
+    let b = tmp.path().join("b");
+    cmd::clone(&O, Path::new("/"), &a.join("q"), &b, &[], &[], false).unwrap();
+    cmd::get(&O, &b, &[a.join("p")], &[a.join("p/raw")]).unwrap();
+    let have: Vec<String> = tree(&b).into_keys().collect();
+    assert_eq!(have, ["p/1.txt", "q/3.txt"]);
+    let config = Config::load(&b).unwrap();
+    assert_eq!(
+        (config.include, config.exclude),
+        (s(&["q", "p"]), s(&["p/raw"]))
+    );
+    // A later get of the folder alone brings the sub-folder too.
+    cmd::get(&O, &b, &[a.join("p")], &[]).unwrap();
+    assert!(is(&b, "p/raw/2.txt", "2"));
+    // Excluding what is already here removes nothing: it is undropped.
+    cmd::get(&O, &b, &[a.join("p")], &[a.join("p/raw")]).unwrap();
+    assert!(is(&b, "p/raw/2.txt", "2") && has(&status(&b), "undropped", "p/raw/2.txt"));
+    // An exclude outside the paths got is refused.
+    let err = cmd::get(&O, &b, &[a.join("p")], &[a.join("q")]).unwrap_err();
+    assert!(err.to_string().contains("not inside"), "{err}");
+}
+
+#[test]
+fn drop_keep() {
+    // Drop a folder and keep a sub-folder: its files are not touched.
+    let files = [("p/1.txt", "1"), ("p/keep/2.txt", "2"), ("q/3.txt", "3")];
+    let (_tmp, a, b) = pair(&files);
+    let before = fs::metadata(b.join("p/keep/2.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let report = cmd::drop(&O, &b, &paths(&["p"]), &paths(&["p/keep"]), Some(&a), false).unwrap();
+    assert!(report.has("dropped", "p/1.txt") && !report.has("dropped", "p/keep/2.txt"));
+    let have: Vec<String> = tree(&b).into_keys().collect();
+    assert_eq!(have, ["p/keep/2.txt", "q/3.txt"]);
+    let after = fs::metadata(b.join("p/keep/2.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(before, after);
+    let config = Config::load(&b).unwrap();
+    assert_eq!(
+        (config.include, config.exclude),
+        (s(&["", "p/keep"]), s(&["p"]))
+    );
+    // The kept folder syncs; the dropped one stays away.
+    put(&a, "p/keep/2.txt", "edit", 1);
+    put(&a, "p/new.txt", "new", 1);
+    assert_eq!(cmd::sync(&O, &b, &a).unwrap().exit_code(), 0);
+    assert!(is(&b, "p/keep/2.txt", "edit") && !b.join("p/new.txt").exists());
+    assert!(status(&b).is_empty() && is(&a, "p/1.txt", "1"));
+    // A keep outside the paths dropped is refused, and nothing is dropped.
+    let err = cmd::drop(&O, &b, &paths(&["q"]), &paths(&["p/keep"]), Some(&a), false).unwrap_err();
+    assert!(err.to_string().contains("not inside"), "{err}");
+    assert!(is(&b, "q/3.txt", "3"));
+}
+
+#[test]
+fn hand_exclude_then_delete_is_local() {
+    // A folder excluded by editing the config, then deleted by hand: it is
+    // gone from this vault only. No deletion is recorded or sent.
+    let (_tmp, a, b) = pair(&[("d/g.txt", "g"), ("d/h.txt", "h"), ("f.txt", "f")]);
+    configure(&b, |c| c.exclude.push("d".into()));
+    fs::remove_dir_all(b.join("d")).unwrap();
+    assert!(status(&b).is_empty());
+    let report = cmd::sync(&O, &b, &a).unwrap();
+    assert_eq!((report.recorded, report.exit_code()), (0, 0));
+    assert!(is(&a, "d/g.txt", "g") && is(&a, "d/h.txt", "h") && !b.join("d").exists());
+    // A later change there stays there; `get` brings the folder back.
+    put(&a, "d/g.txt", "edit", 1);
+    cmd::sync(&O, &b, &a).unwrap();
+    assert!(!b.join("d").exists());
+    cmd::get(&O, &b, &[a.join("d")], &[]).unwrap();
+    assert!(is(&b, "d/g.txt", "edit") && is(&b, "d/h.txt", "h"));
 }
 
 #[test]
@@ -1795,15 +1887,114 @@ fn nested_vault_is_ordinary_files() {
     // Vaults that share files do not sync with each other.
     assert!(cmd::sync(&O, &a, &a.join("inner")).is_err());
     assert!(cmd::pull(&O, &a.join("inner"), &a).is_err());
-    assert!(cmd::clone(&O, Path::new("/"), &a, &a.join("copy"), &[], false).is_err());
+    assert!(cmd::clone(&O, Path::new("/"), &a, &a.join("copy"), &[], &[], false).is_err());
     assert!(!a.join("copy").exists());
-    assert!(cmd::clone(&O, Path::new("/"), &a, &tmp.path().join("c"), &[], false).is_ok());
+    assert!(
+        cmd::clone(
+            &O,
+            Path::new("/"),
+            &a,
+            &tmp.path().join("c"),
+            &[],
+            &[],
+            false
+        )
+        .is_ok()
+    );
+}
+
+/// Make the vault on `b` what version 1 made: a JSON `config` with the
+/// version in it, and a `format` only if it is sealed, which says version 1.
+fn to_version_1(b: &impl Backend) {
+    let text = String::from_utf8(b.read("config.toml").unwrap().unwrap()).unwrap();
+    let c = Config::parse(&text).unwrap();
+    let config = serde_json::json!({
+        "syncit": 1,
+        "include": c.include,
+        "exclude": c.exclude,
+        "keep_history": c.keep_history,
+        "autocompact": c.autocompact,
+        "nickname": c.nickname,
+        "remotes": c.remotes,
+    });
+    let text = serde_json::to_string_pretty(&config).unwrap();
+    b.write("config", text.as_bytes()).unwrap();
+    b.remove("config.toml").unwrap();
+    let format = b.read("format").unwrap().unwrap();
+    let mut format: serde_json::Value = serde_json::from_slice(&format).unwrap();
+    match format.get("check") {
+        None => b.remove("format").unwrap(),
+        Some(_) => {
+            format["syncit"] = 1.into();
+            b.write("format", format.to_string().as_bytes()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn migrates_own_vault() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
+    to_version_1(&Fs::at(&a));
+    let before = Config::load(&b).unwrap();
+    assert!(Config::load(&a).is_err(), "not read as it is");
+    // Any command in the vault brings it up to date, a dry one too.
+    assert!(status(&a).is_empty());
+    let format = fs::read_to_string(a.join(".syncit/format")).unwrap();
+    assert_eq!(format, "{\"syncit\":2}\n");
+    let dot = a.join(".syncit");
+    assert!(dot.join("config.toml").exists() && !dot.join("config").exists());
+    let after = Config::load(&a).unwrap();
+    assert_eq!(
+        (after.include, after.keep_history),
+        (before.include, before.keep_history)
+    );
+    put(&a, "f.txt", "v2", 1);
+    cmd::sync(&O, &a, &b).unwrap();
+    assert!(is(&b, "f.txt", "v2"));
+    // So does one that reads only its settings.
+    to_version_1(&Fs::at(&a));
+    cmd::remotes(&O, &a).unwrap();
+    Config::load(&a).unwrap();
+}
+
+#[test]
+fn migrate_other_vault() {
+    let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
+    to_version_1(&Fs::at(&b));
+    put(&a, "f.txt", "v2", 1);
+    let before = tree(&b.join(".syncit"));
+    // The other vault of a run is not changed without being asked.
+    for result in [
+        cmd::sync(&O, &a, &b).map(|_| ()),
+        cmd::push(&O, &a, &b).map(|_| ()),
+        cmd::status(&O, &a, &[], Some(&b), false).map(|_| ()),
+    ] {
+        let error = result.expect_err("an old peer is refused").to_string();
+        assert!(error.contains("Run: syncit migrate"), "{error}");
+    }
+    assert_eq!(tree(&b.join(".syncit")), before);
+    assert!(is(&b, "f.txt", "v1"));
+    assert_eq!(cmd::migrate(&O, &a, Some(&b)).unwrap(), 1);
+    assert_eq!(
+        cmd::migrate(&O, &a, Some(&b)).unwrap(),
+        2,
+        "nothing more to do"
+    );
+    cmd::sync(&O, &a, &b).unwrap();
+    assert!(is(&b, "f.txt", "v2"));
+    // By nickname, and with no vault named: the one here.
+    cmd::remote_add(&O, &a, b.to_str().unwrap(), Some("backup".into()), false).unwrap();
+    to_version_1(&Fs::at(&b));
+    assert_eq!(cmd::migrate(&O, &a, Some(Path::new("backup"))).unwrap(), 1);
+    to_version_1(&Fs::at(&a));
+    assert_eq!(cmd::migrate(&O, &a, None).unwrap(), 1);
+    assert_eq!(cmd::migrate(&O, &a, None).unwrap(), 2);
 }
 
 #[test]
 fn version_mismatch() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
-    configure(&a, |c| c.syncit = 2);
+    fs::write(a.join(".syncit/format"), "{\"syncit\":3}\n").unwrap();
     put(&a, "f.txt", "v2", 1);
     for result in [
         cmd::sync(&O, &b, &a),
@@ -1812,9 +2003,12 @@ fn version_mismatch() {
         cmd::snapshot(&O, &a),
     ] {
         let error = result
-            .expect_err("a version 2 vault is refused")
+            .expect_err("a vault from a newer syncit is refused")
             .to_string();
-        assert!(error.contains("version 2"), "{error}");
+        assert!(
+            error.contains("version 3") && error.contains("upgrade"),
+            "{error}"
+        );
     }
     assert!(is(&b, "f.txt", "v1"));
     assert!(
@@ -1827,7 +2021,7 @@ fn version_mismatch() {
 fn push_counts_excluded() {
     let (tmp, a) = vault(&[("d/g.txt", "g"), ("music/m.mp3", "m"), ("f.txt", "f")]);
     let c = tmp.path().join("c");
-    cmd::clone(&O, Path::new("/"), &a.join("d"), &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("d"), &c, &[], &[], false).unwrap();
     fs::write(c.join(".syncitignore"), "d/tmp\n.syncitignore\n").unwrap();
     put(&a, "d/tmp/t.txt", "t", 1);
     cmd::snapshot(&O, &a).unwrap();
@@ -1852,7 +2046,7 @@ fn status_states() {
         ("music/n.mp3", "n"),
     ]);
     let c = tmp.path().join("c");
-    cmd::clone(&O, Path::new("/"), &a.join("d"), &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("d"), &c, &[], &[], false).unwrap();
     let line = |path: &str, files, ours, theirs| State {
         path: path.into(),
         files,
@@ -2026,7 +2220,7 @@ fn dry_run_matches_real_run() {
     no_history(&[&b]);
     put(&a, "big/two.bin", "2", 1);
     let c = tmp.path().join("c");
-    cmd::clone(&O, Path::new("/"), &a.join("keep.txt"), &c, &[], false).unwrap();
+    cmd::clone(&O, Path::new("/"), &a.join("keep.txt"), &c, &[], &[], false).unwrap();
     let listing = || {
         let mut out = BTreeMap::new();
         all(tmp.path(), &mut out);
@@ -2042,12 +2236,12 @@ fn dry_run_matches_real_run() {
     assert!(!a.join("big").exists() && is(&b, "big/two.bin", "2"));
     assert_eq!(planned, done);
     // `drop`, refused and then checked against a vault that has the files.
-    let refused = cmd::drop(dry, &b, &paths(&["keep.txt"]), None, false).unwrap_err();
+    let refused = cmd::drop(dry, &b, &paths(&["keep.txt"]), &[], None, false).unwrap_err();
     assert!(refused.to_string().contains("nothing dropped"), "{refused}");
     let before = listing();
-    let planned = cmd::drop(dry, &b, &paths(&["keep.txt"]), Some(&a), false).unwrap();
+    let planned = cmd::drop(dry, &b, &paths(&["keep.txt"]), &[], Some(&a), false).unwrap();
     assert!(before == listing(), "a dry run wrote something");
-    let done = cmd::drop(&O, &b, &paths(&["keep.txt"]), Some(&a), false).unwrap();
+    let done = cmd::drop(&O, &b, &paths(&["keep.txt"]), &[], Some(&a), false).unwrap();
     assert!(done.has("dropped", "keep.txt") && !b.join("keep.txt").exists());
     assert_eq!(planned, done);
 }
@@ -2076,7 +2270,7 @@ fn cp_from_plain_folder() {
     put(&plain, "old.txt", "v2", 5);
     put(&plain, "d/new.txt", "n", 5);
     put(&plain, "secret.txt", "x", 5);
-    put(&plain, ".syncit/config", "not a config", 5);
+    put(&plain, ".syncit/config.toml", "not a config", 5);
     put(&plain, "run.sh", "#!", 5);
     chmod(&plain, "run.sh", 0o555);
     std::os::unix::fs::symlink("old.txt", plain.join("link")).unwrap();
@@ -2175,18 +2369,18 @@ mod remote {
         let words = words.expect("a generated key is printed");
         assert_eq!(words.split(' ').count(), 24);
         let key = keys::parse_phrase(&words).unwrap();
-        let config = syncit::crypt::seal_name(&key, "config");
+        let config = syncit::crypt::seal_name(&key, "config.toml");
         assert_eq!(names(&r), BTreeSet::from([config.clone(), "format".into()]));
         let format = fs::read_to_string(r.join("format")).unwrap();
         let check = format
             .strip_prefix(r#"{"check":""#)
-            .and_then(|f| f.strip_suffix("\",\"syncit\":1}\n"))
+            .and_then(|f| f.strip_suffix("\",\"syncit\":2}\n"))
             .unwrap();
         assert!(syncit::entry::is_hash(check), "{format}");
         let stored = fs::read(r.join(config)).unwrap();
         assert!(!stored.windows(6).any(|w| w == b"origin"));
         let bucket = Bucket::new(&url(&r), vec![]).unwrap();
-        let config = Store::new("r", Sealed::new(bucket, key));
+        let config = Store::open("r", Sealed::new(bucket, key)).unwrap();
         let config = config.load_config().unwrap();
         assert_eq!(
             (config.include, config.keep_history, config.autocompact),
@@ -2210,15 +2404,15 @@ mod remote {
         assert!(cmd::init_remote(&given, &url(&missing), None, false).is_err());
         assert!(!missing.exists(), "syncit never creates a directory");
 
-        // A format other than version 1 is refused.
+        // A vault from a newer syncit is refused.
         fs::write(
             s.join("format"),
-            format.replace("\"syncit\":1", "\"syncit\":2"),
+            format.replace("\"syncit\":2", "\"syncit\":3"),
         )
         .unwrap();
-        let bucket = Bucket::new(&url(&s), vec![]).unwrap();
-        let err = syncit::sealed::check(&bucket, "s").unwrap_err();
-        assert!(err.to_string().contains("format version 2"), "{err}");
+        let s = PathBuf::from(url(&s));
+        let err = cmd::config(&given, tmp.path(), Some(&s), None).unwrap_err();
+        assert!(err.to_string().contains("upgrade syncit"), "{err}");
     }
 
     /// The phrase every remote in these tests is made with.
@@ -2246,7 +2440,7 @@ mod remote {
     fn configure_remote(target: &Path, change: impl FnOnce(&mut Config)) {
         let target = target.to_str().unwrap();
         let bucket = Bucket::new(target, vec![]).unwrap();
-        let r = Store::new(target, Sealed::new(bucket, key()));
+        let r = Store::open(target, Sealed::new(bucket, key())).unwrap();
         let mut config = r.load_config().unwrap();
         change(&mut config);
         r.save_config(&config).unwrap();
@@ -2353,7 +2547,7 @@ mod remote {
         // A third machine clones the URL and has everything.
         let m = tmp.path().join("m");
         assert_eq!(
-            cmd::clone(o, Path::new("/"), origin, &m, &[], false)
+            cmd::clone(o, Path::new("/"), origin, &m, &[], &[], false)
                 .unwrap()
                 .conflicts,
             1
@@ -2443,7 +2637,7 @@ mod remote {
         assert!(is(&c, "good.txt", "good") && !c.join("cut.bin").exists());
         assert_eq!(sum.exit_code(), 2);
         // A garbage config is an error, not a panic.
-        fs::write(at(&r, "config"), b"garbage").unwrap();
+        fs::write(at(&r, "config.toml"), b"garbage").unwrap();
         assert!(cmd::pull(o, &c, &origin).is_err());
     }
 
@@ -2560,6 +2754,38 @@ mod remote {
     }
 
     #[test]
+    fn migrate_remote() {
+        let o = &o();
+        let (tmp, a) = vault(&[("f.txt", "v1")]);
+        let (r, origin) = remote(&tmp, "r");
+        cmd::push(o, &a, &origin).unwrap();
+        let sealed = || {
+            let bucket = Bucket::new(origin.to_str().unwrap(), vec![]).unwrap();
+            Sealed::new(bucket, key())
+        };
+        to_version_1(&sealed());
+        put(&a, "f.txt", "v2", 1);
+        let before = listing(&r);
+        // A remote is not changed without being asked.
+        let c = tmp.path().join("c");
+        for result in [
+            cmd::sync(o, &a, &origin).map(|_| ()),
+            cmd::clone(o, tmp.path(), &origin, &c, &[], &[], false).map(|_| ()),
+            cmd::config(o, tmp.path(), Some(&origin), None).map(|_| ()),
+        ] {
+            let error = result.expect_err("an old remote is refused").to_string();
+            assert!(error.contains("Run: syncit migrate file://"), "{error}");
+        }
+        assert!(before == listing(&r) && !c.join(".syncit").exists());
+        // From anywhere: a remote needs no vault here.
+        assert_eq!(cmd::migrate(o, tmp.path(), Some(&origin)).unwrap(), 1);
+        assert_eq!(syncit::migrate::version(&sealed()).unwrap(), 2);
+        cmd::sync(o, &a, &origin).unwrap();
+        cmd::clone(o, tmp.path(), &origin, &c, &[], &[], false).unwrap();
+        assert!(is(&c, "f.txt", "v2"));
+    }
+
+    #[test]
     fn status_vs_remote() {
         let o = &o();
         let (tmp, a) = vault(&[("same.txt", "s"), ("edit.txt", "e"), ("gone.txt", "g")]);
@@ -2606,7 +2832,7 @@ mod remote {
         // A third machine clones the URL and has everything.
         let m = tmp.path().join("m");
         assert_eq!(
-            cmd::clone(o, Path::new("/"), &origin, &m, &[], false)
+            cmd::clone(o, Path::new("/"), &origin, &m, &[], &[], false)
                 .unwrap()
                 .exit_code(),
             0
@@ -2677,7 +2903,7 @@ mod remote {
         let added = cmd::remote_add(saved, &a, second, Some("two".into()), false);
         assert_eq!(added.unwrap(), "two");
         let copy = tmp.path().join("copy");
-        cmd::clone(saved, &a, Path::new("two"), &copy, &[], false).unwrap();
+        cmd::clone(saved, &a, Path::new("two"), &copy, &[], &[], false).unwrap();
         // remove forgets the remote, not its key.
         cmd::remote_remove(o, &a, "two").unwrap();
         assert!(keys::saved(saved, second).unwrap().is_some());
@@ -2727,7 +2953,7 @@ mod remote {
         .unwrap();
         for (name, location) in [("origin", &origin), ("backup", &folder)] {
             let c = tmp.path().join(format!("clone-{name}"));
-            cmd::clone(o, &a, Path::new(name), &c, &[], false).unwrap();
+            cmd::clone(o, &a, Path::new(name), &c, &[], &[], false).unwrap();
             assert!(is(&c, "f.txt", "f") && is(&c, "g.txt", "g"));
             let remotes = Config::load(&c).unwrap().remotes;
             // A folder is recorded by its canonical path; a URL as it is.
@@ -2740,7 +2966,7 @@ mod remote {
     }
 
     #[test]
-    fn clone_only() {
+    fn clone_include_exclude() {
         let o = &o();
         let files = [
             ("a/1.txt", "1"),
@@ -2755,7 +2981,7 @@ mod remote {
         for (from, dir) in [(origin.clone(), "x"), (src.clone(), "y")] {
             let x = tmp.path().join(dir);
             assert_eq!(
-                cmd::clone(o, Path::new("/"), &from, &x, &only, false)
+                cmd::clone(o, Path::new("/"), &from, &x, &only, &[], false)
                     .unwrap()
                     .exit_code(),
                 0
@@ -2766,11 +2992,40 @@ mod remote {
         }
         // A later get --from adds a third.
         let x = tmp.path().join("x");
-        cmd::get_from(o, &x, &["e.txt".to_string()], Path::new("origin")).unwrap();
+        cmd::get_from(o, &x, &["e.txt".to_string()], &[], Path::new("origin")).unwrap();
         assert!(is(&x, "e.txt", "e") && !x.join("b/d").exists());
-        // A path below a vault's root with --only is refused; nothing is made.
+        // A deny list, and a folder less a sub-folder: what is excluded is
+        // never fetched, from a remote or from a folder.
+        let cases = [
+            (s(&[]), s(&["b"]), vec!["a/1.txt", "e.txt"]),
+            (s(&["b"]), s(&["b/d"]), vec!["b/c/2.txt"]),
+        ];
+        for (i, (include, exclude, want)) in cases.iter().enumerate() {
+            for (j, from) in [&origin, &src].into_iter().enumerate() {
+                let dir = tmp.path().join(format!("deny{i}{j}"));
+                let cwd = Path::new("/");
+                cmd::clone(o, cwd, from, &dir, include, exclude, false).unwrap();
+                let have: Vec<String> = tree(&dir).into_keys().collect();
+                assert_eq!(&have, want, "{i}{j}");
+                assert_eq!(&Config::load(&dir).unwrap().exclude, exclude);
+                assert!(status(&dir).is_empty());
+            }
+        }
+        // An exclude must be inside an include, and not be one.
         let z = tmp.path().join("z");
-        let err = cmd::clone(o, Path::new("/"), &src.join("b"), &z, &only, false).unwrap_err();
+        for (include, exclude) in [(s(&["a"]), s(&["b/c"])), (s(&["a"]), s(&["a"]))] {
+            let err =
+                cmd::clone(o, Path::new("/"), &src, &z, &include, &exclude, false).unwrap_err();
+            assert!(err.to_string().contains("not inside"), "{err}");
+            assert!(!z.exists());
+        }
+        // A path below a vault's root with --include or --exclude is refused;
+        // nothing is made.
+        let below = src.join("b");
+        let err = cmd::clone(o, Path::new("/"), &below, &z, &[], &s(&["b/d"]), false).unwrap_err();
+        assert!(err.to_string().contains("root"), "{err}");
+        let z = tmp.path().join("z");
+        let err = cmd::clone(o, Path::new("/"), &src.join("b"), &z, &only, &[], false).unwrap_err();
         assert!(err.to_string().contains("root"), "{err}");
         assert!(!z.exists());
         assert!(
@@ -2780,6 +3035,7 @@ mod remote {
                 &origin,
                 &z,
                 &["../up".to_string()],
+                &[],
                 false
             )
             .is_err()
@@ -2799,10 +3055,19 @@ mod remote {
         let (_r, origin) = remote(&tmp, "r");
         cmd::push(o, &a, &origin).unwrap();
         let p = tmp.path().join("p");
-        cmd::clone(o, Path::new("/"), &origin, &p, &["docs".to_string()], false).unwrap();
+        cmd::clone(
+            o,
+            Path::new("/"),
+            &origin,
+            &p,
+            &["docs".to_string()],
+            &[],
+            false,
+        )
+        .unwrap();
         let blobs_before = blobs(&p);
         assert_eq!(blobs_before.len(), 1);
-        cmd::get_from(o, &p, &["music".to_string()], Path::new("origin")).unwrap();
+        cmd::get_from(o, &p, &["music".to_string()], &[], Path::new("origin")).unwrap();
         assert!(is(&p, "music/m.mp3", "m") && is(&p, "music/n.mp3", "n"));
         assert_eq!(blobs(&p).len(), 3, "nothing else");
         cmd::sync(o, &p, Path::new("origin")).unwrap();
@@ -2811,14 +3076,14 @@ mod remote {
 
         // --from with a folder vault's path is the inferred form.
         let (q1, q2) = (tmp.path().join("q1"), tmp.path().join("q2"));
-        cmd::clone(o, Path::new("/"), &a.join("docs"), &q1, &[], false).unwrap();
-        cmd::clone(o, Path::new("/"), &a.join("docs"), &q2, &[], false).unwrap();
-        cmd::get(o, &q1, &[a.join("music")]).unwrap();
-        cmd::get_from(o, &q2, &["music".to_string()], &a).unwrap();
+        cmd::clone(o, Path::new("/"), &a.join("docs"), &q1, &[], &[], false).unwrap();
+        cmd::clone(o, Path::new("/"), &a.join("docs"), &q2, &[], &[], false).unwrap();
+        cmd::get(o, &q1, &[a.join("music")], &[]).unwrap();
+        cmd::get_from(o, &q2, &["music".to_string()], &[], &a).unwrap();
         assert_eq!(tree(&q1), tree(&q2));
         let include = |dir: &Path| Config::load(dir).unwrap().include;
         assert_eq!(include(&q1), include(&q2));
-        assert!(cmd::get_from(o, &q2, &["/abs".to_string()], &a).is_err());
+        assert!(cmd::get_from(o, &q2, &["/abs".to_string()], &[], &a).is_err());
     }
 
     #[test]
@@ -2852,7 +3117,7 @@ mod remote {
         let outside = cmd::config(o, tmp.path(), Some(Path::new(&url)), None).unwrap();
         assert_eq!(outside.keep_history, Some(1));
         let m = tmp.path().join("m");
-        cmd::clone(o, Path::new("/"), Path::new(&url), &m, &[], false).unwrap();
+        cmd::clone(o, Path::new("/"), Path::new(&url), &m, &[], &[], false).unwrap();
         assert!(is(&m, "f.txt", "v3"));
     }
 }

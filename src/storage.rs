@@ -2,16 +2,20 @@
 //! each is on the vault's backend (store.md, section 4). The same for every
 //! vault; what differs is the backend.
 
-use crate::backend::{Backend, Fs, Unreadable};
+use crate::backend::{Backend, Unreadable};
 use crate::blobs::hash_file;
 use crate::config::Config;
 use crate::entry::{is_hash, sha256};
-use anyhow::{Context, Result, ensure};
+use crate::migrate;
+use anyhow::{Context, Result};
 use std::cell::{RefCell, RefMut};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
+
+/// Where a vault's config is on its backend.
+const CONFIG: &str = "config.toml";
 
 pub struct Store<B: Backend> {
     /// The vault's folder or URL, for errors.
@@ -38,16 +42,8 @@ fn once<T>(cell: &RefCell<Option<T>>, list: impl FnOnce() -> Result<T>) -> Resul
     Ok(RefMut::map(cell, |listed| listed.as_mut().unwrap()))
 }
 
-impl Store<Fs> {
-    /// The vault in a dir.
-    pub fn dir(fs: Fs) -> Store<Fs> {
-        Store::new(&fs.root().display().to_string(), fs)
-    }
-}
-
 impl<B: Backend> Store<B> {
-    /// The vault called `name`, stored on `backend`.
-    pub fn new(name: &str, backend: B) -> Store<B> {
+    fn on(name: &str, backend: B) -> Store<B> {
         Store {
             name: name.to_string(),
             backend,
@@ -56,21 +52,40 @@ impl<B: Backend> Store<B> {
         }
     }
 
-    pub fn load_config(&self) -> Result<Config> {
-        let name = &self.name;
-        let read = self.backend.read("config");
-        let bytes = read.with_context(|| format!("cannot read the config of {name}"))?;
-        let bytes = bytes.with_context(|| format!("{name} has no config"))?;
-        let config: Config =
-            serde_json::from_slice(&bytes).with_context(|| format!("corrupt config {name}"))?;
-        let version = config.syncit;
-        ensure!(version == 1, "{name} has format version {version}, not 1");
-        Ok(config)
+    /// The vault called `name` that is stored on `backend`. One that does
+    /// not have this build's layout is refused (`migrate::check`).
+    pub fn open(name: &str, backend: B) -> Result<Store<B>> {
+        migrate::check(&backend, name)?;
+        Ok(Store::on(name, backend))
     }
 
+    /// Make a new vault called `name` on `backend`, with `config`.
+    pub fn create(name: &str, backend: B, config: &Config) -> Result<Store<B>> {
+        let store = Store::on(name, backend);
+        store.save_config(config)?;
+        migrate::create(&store.backend)?;
+        Ok(store)
+    }
+
+    pub fn load_config(&self) -> Result<Config> {
+        let name = &self.name;
+        let read = self.backend.read(CONFIG);
+        let bytes = read.with_context(|| format!("cannot read the config of {name}"))?;
+        let bytes = bytes.with_context(|| format!("{name} has no config"))?;
+        let text = std::str::from_utf8(&bytes).map_err(anyhow::Error::from);
+        text.and_then(Config::parse)
+            .with_context(|| format!("corrupt config {name}"))
+    }
+
+    /// Only the values that changed are rewritten: what else is in the file
+    /// is its owner's, and stays.
     pub fn save_config(&self, config: &Config) -> Result<()> {
-        let text = serde_json::to_string_pretty(config)? + "\n";
-        self.backend.write("config", text.as_bytes())
+        let existing = self.backend.read(CONFIG)?;
+        let existing = existing
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        self.backend
+            .write(CONFIG, config.to_toml(existing).as_bytes())
     }
 
     fn log(&self) -> Result<RefMut<'_, BTreeSet<String>>> {
@@ -193,6 +208,7 @@ impl<B: Backend> Store<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Fs;
 
     #[test]
     fn missing_blobs() {
@@ -206,7 +222,8 @@ mod tests {
             store.put_blob(hash, &src).unwrap();
             assert!(!src.exists(), "consumed");
         };
-        let store = Store::dir(Fs::at(tmp.path()));
+        let config = Config::new(String::new(), "v".into());
+        let store = Store::create("v", Fs::at(tmp.path()), &config).unwrap();
         assert_eq!(store.missing(&both), both, "no blobs folder yet");
         put(&store, &a, "a");
         put(&store, &a, "a");
@@ -220,7 +237,7 @@ mod tests {
         // What a fresh look finds: a blob that is not what its name says
         // is there, but is not to be had.
         fs::write(blobs.join(&a[..2]).join(&a), "x").unwrap();
-        let store = Store::dir(Fs::at(tmp.path()));
+        let store = Store::open("v", Fs::at(tmp.path())).unwrap();
         assert!(store.has_blob(&a) && store.read_blob(&a, 1).is_none());
         assert!(!store.get_blob(&a, &out).unwrap() && !out.exists());
         assert_eq!(store.drop_blobs_except(&both, false).unwrap(), (0, 0));
@@ -238,6 +255,9 @@ mod tests {
         fs::create_dir_all(blobs.join(&b[..2]).join(&b)).unwrap();
         fs::create_dir_all(blobs.join("zz")).unwrap();
         fs::write(blobs.join("zz").join(&a), "a").unwrap();
-        assert_eq!(Store::dir(Fs::at(tmp.path())).missing(&both), both);
+        assert_eq!(
+            Store::open("v", Fs::at(tmp.path())).unwrap().missing(&both),
+            both
+        );
     }
 }

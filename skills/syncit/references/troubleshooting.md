@@ -21,6 +21,8 @@ A `!` line names a file that needs a look. The run otherwise finished.
 - **`cannot sync a vault with itself or with a vault inside it`**: the path given is inside this vault. Name the other vault.
 - **`nothing moved: …` / `nothing dropped: …`**: the command refused and removed nothing. The message says which files and why. See [partial.md](partial.md).
 - **`no key for <url>`**: see [remotes.md](remotes.md).
+- **`<vault> is at format version N; this syncit uses M. Run: syncit migrate <vault>`**: the other vault was made by an older syncit. Migrating it stops older syncits from using it, so ask the user first: every machine that uses that vault needs the new syncit. Then run the command in the message and repeat the one that failed. The vault a command runs in needs none of this; it is updated by the command.
+- **`… this syncit reads up to M: upgrade syncit`**: the vault was made or migrated by a newer syncit. Nothing here can read it until syncit is updated on this machine.
 - **`the content of that version is not in this vault`**: see [history.md](history.md).
 - **A nickname stopped working**: the folder it pointed to was moved or renamed. `syncit remote remove <name>`, then `syncit remote add <new path>`. Vault folders can be moved freely; only remembered nicknames go stale.
 
@@ -40,7 +42,7 @@ Symbolic links, empty folders, and file permissions other than the executable bi
 ## Scripts and scheduled backups
 
 - Results go to stdout; warnings and errors go to stderr.
-- `--json` makes every line a JSON object with a `type`: `event`, `conflict`, `summary`, `version`, `state`, `setting`, `blame`, `remote`, `info` on stdout, `warning` and `error` on stderr. A run that completes ends with one `summary`. Prefer `--json` when you need to parse output, for example `syncit --json log` or `syncit --json status`.
+- `--json` makes every line a JSON object with a `type`: `event`, `conflict`, `summary`, `version`, `state`, `config`, `blame`, `remote`, `info` on stdout, `warning` and `error` on stderr. A run that completes ends with one `summary`. Prefer `--json` when you need to parse output, for example `syncit --json log` or `syncit --json status`.
 - Exit codes: `0` done, `1` failed, `2` done but something needs a look. A script should treat `2` as "tell someone", not as failure to retry.
 - There is no built-in schedule. A scheduled backup is `push` from cron or launchd:
 

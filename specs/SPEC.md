@@ -167,7 +167,8 @@ pub struct Loser { pub hash: String, pub mtime: i64, pub exec: bool }
 ```
 <vault>/
   .syncit/
-    config    # JSON, local
+    format       # what the vault is: {"syncit":2}, its layout version
+    config.toml  # TOML, local, the user's to edit
     dirstate     # JSON, local
     lock      # empty file, locked while a command runs
     log/      # segments, named by hash; the only replicated part
@@ -178,25 +179,34 @@ pub struct Loser { pub hash: String, pub mtime: i64, pub exec: bool }
 
 Every file written under `.syncit/` is written to `.syncit/tmp/` first and renamed into place.
 
-### config
+### format
 
-```json
-{
-  "syncit": 1,
-  "include": [""],
-  "exclude": [],
-  "keep_history": 1,
-  "autocompact": true,
-  "nickname": "notes"
-}
+`{"syncit":2}`: the number of the layout, which is which files there are and what is in them (`R25`). This document describes layout 2. A vault with no `format` is at layout 1, which kept the number in a JSON config, as `"syncit": 1`. The number is in a file of its own so that every other file, the config included, can change format, and because the config is the user's to edit and holds only settings. A remote's `format` is the same file with one more field (`store.md`, section 5).
+
+- **The vault a command runs in** (the one at the current directory, or the folder `--vault` names) is brought up to the build's layout when it is opened, under its lock, by `status` and a dry run too. One `info` line on stderr says so.
+- **Any other vault** (the peer of a run, or a remote) that is behind is refused, with a message that names `syncit migrate <vault>`. It may be used by machines with an older syncit, which a migration locks out, so it is changed only on purpose.
+- **A vault ahead of the build** is refused: `upgrade syncit`.
+- How a layout is changed, and the rules a change follows, are in `store.md`, section 14.
+
+### config.toml
+
+```toml
+nickname = "notes"
+keep-history = 1
+autocompact = true
+include = ["."]
+exclude = []
+
+[remotes]
 ```
 
-- `syncit`: format version (`R25`). A command refuses to run on a vault, or with a peer, whose version is not 1.
-- `include`, `exclude`: the filter's prefixes, vault-relative, `/`-separated. `""` is the vault root.
-- `keep_history`: how many versions back from a head this vault keeps the content of in `.syncit/blobs/` (`R15`; section 8, "Retaining"). `0` keeps no history, `null` keeps every version, and a new vault has `1`. Local history is whatever blobs are there; it is never required to be complete.
-- `autocompact`: whether the end of every run drops the blobs `keep_history` no longer covers (section 8, "Compaction"). A new vault has `true`. With `false` they are dropped only by `syncit compact`.
+- `include`, `exclude`: the filter's prefixes, vault-relative, `/`-separated. `"."` is the vault root, which the code holds as `""`.
+- `keep-history`: how many versions back from a head this vault keeps the content of in `.syncit/blobs/` (`R15`; section 8, "Retaining"). `0` keeps no history, `"all"` keeps every version (`None` in the code), and a new vault has `1`. Local history is whatever blobs are there; it is never required to be complete.
+- `autocompact`: whether the end of every run drops the blobs `keep-history` no longer covers (section 8, "Compaction"). A new vault has `true`. With `false` they are dropped only by `syncit compact`.
 - `nickname`: the label written into the header of every segment this vault records (`CRDT.md`, "Nickname"). `init` and `clone` set it to the folder's name, with whitespace and control characters replaced by `-`, cut to 64 bytes, or to `vault` if that leaves nothing. It is a label only: `blame` prints it and no other code reads it.
-- Written pretty-printed. Unknown fields are an error. `keep_history`, `autocompact` and `nickname` are changed with `syncit config` (section 11). Remote vaults add a `remotes` field (`store.md`, section 9).
+- `remotes`: the vault's address book (`store.md`, section 9).
+- **The file is the user's to edit.** Every key is required and no other is allowed, so a misspelt key is an error that names it, not a setting silently ignored. A path must be `"."` or valid (section 5), `keep-history` a number or `"all"`, and `nickname` a valid nickname; each error names the key. When a command saves the config it rewrites only the values that changed: comments, the order of keys and the layout of every other value stay as the user wrote them (`Config::to_toml`).
+- Editing `include` or `exclude` changes what the vault fetches from then on and nothing else: no file is removed or fetched until a command runs. A path added to `exclude` whose files are still here is `undropped` (section 7), and `drop` removes them; a path added to `include` arrives with the next `pull` or `sync`. `get`, `drop` and `move` remain the commands that change the filter and the files together.
 - No vault is special and there is no default peer: any vault syncs with any other, and a command that involves another vault names it. A vault may remember others by nickname in `remotes`, its address book (`store.md`, section 9). Nothing else is recorded about them, and a folder that moves breaks only its own entry.
 
 **Included** (`PRD.md`, "What a vault has"): a prefix matches a path if it is `""`, equals the path, or is followed in the path by `/`. Among all matching prefixes in both lists, the longest decides: included if it came from `include`. If none matches, the path is excluded. A prefix is never in both lists.
@@ -292,7 +302,7 @@ Paths are recorded as the operating system returns them, joined with `/`. No Uni
 Let `now` be the time the scan started. For each file found, and for each row whose path was not found and is not ignored, apply the table in `CRDT.md`, "Writing an entry":
 
 - **File and row.** Apply the unchanged test. If the hash and the executable bit equal the row's, refresh the row's size and mtime and write nothing. If either differs, write a file entry with `parents` = the row's base; the row becomes `(size, mtime, exec, hash, [new entry id])`. A change of the bit alone is a new version, as in Git; `chmod` leaves the mtime alone, so that entry has its parent's mtime.
-- **Row, no file.** Write a tombstone with `mtime = now` and `parents` = the row's base. Replace the row with a deletion record whose base is the tombstone.
+- **Row, no file.** If the path is excluded, remove the row and write nothing: the file left this vault only, as after `drop`. Otherwise write a tombstone with `mtime = now` and `parents` = the row's base, and replace the row with a deletion record whose base is the tombstone.
 - **File, deletion record.** Hash it. Write a file entry with `parents` = the record's base, whatever the hash. Replace the record with the row.
 - **File, neither.** Hash it. Then the first of these that applies:
   1. `resolve` gives a winner that is a tombstone (so every head is one): write a file entry with `parents` = the heads and create the row.
@@ -301,7 +311,7 @@ Let `now` be the time the scan started. For each file found, and for each row wh
   4. Otherwise write a file entry with `parents = []` and create the row.
 - **No file, no row.** Nothing. The vault does not have the path, or the path is deleted and stays so.
 
-**Auto-include.** A file on disk is included. When the walk finds a file whose path is excluded, with or without a row, the scan adds an include for it. A folder dragged into a vault is therefore synced from then on, including files later added to it elsewhere, and a file the vault has is never left out of a run (a `move` stopped partway, a config edited by hand): when in doubt, data is kept. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
+**Auto-include.** A file the vault did not know is included. When the walk finds a file with no row whose path is excluded, the scan adds an include for it. A folder dragged into a vault is therefore synced from then on, including files later added to it elsewhere. The prefix added is the shortest of the path's prefixes (its ancestor directories, then the path itself) that is not equal to, or an ancestor of, any prefix already in `include` or `exclude`. Examples, for a vault that includes `foo/bar`:
 
 | New file | Include added | Why not shorter |
 |---|---|---|
@@ -310,6 +320,8 @@ Let `now` be the time the scan started. For each file found, and for each row wh
 | `foo/bar/big/n/a.txt`, with `foo/bar/big` excluded | `foo/bar/big/n` | `foo/bar/big` is already a prefix |
 
 If every prefix is already listed, which happens only when the file's own path is in `exclude` (a moved file put back by hand), the path moves from `exclude` to `include`, as `get` would do. Includes are added after the walk, shortest first, re-checking the filter, so one dragged folder yields one include. The config is saved before the dirstate. A dry scan adds nothing. `move` and `drop` undo it.
+
+**Excluded but still here.** A file with a row whose path is excluded is left as it is: the scan changes neither the config nor the row. This is the state after `exclude` is edited by hand, and after a `move` or `drop` stopped partway. The file is never left out of a run: a path with a row is taken (section 8) whatever the filter says, so it syncs in both directions as before and no data is lost. `status` shows it as `undropped`, and a run warns on stderr: `<n> files in <vault> are excluded but still here (<names>); \`syncit drop\` removes them, \`syncit get\` keeps them`, with the names as in the warning of a push to a partial vault. `drop` or `move` removes the files; `get` includes the path again. If the user deletes such a file, the row goes and nothing is recorded (above).
 
 A file entry's `mtime` is the file's mtime in milliseconds, and its `exec` is the file's executable bit; a tombstone's `exec` is `false`. Stat the file before and after hashing; if size or mtime changed in between, leave the path and its row untouched this scan and report it as `skipped`.
 
@@ -362,7 +374,7 @@ With depth 1 or more, the last content of a deleted file is kept: the tombstone 
 
 A vault retains blobs unless `keep_history` is `0`; then it never writes to `.syncit/blobs/` (`R13`). Local history is whatever blobs are there: it is never required to be complete.
 
-`retain()`: for every hash that `Log::keep` gives for the paths this vault takes (included and not ignored), and that is not already in `.syncit/blobs/`, `fetch` it into `.syncit/blobs/`. Hashes with no source are skipped silently. Two limits follow from the rule, and both are meant:
+`retain()`: for every hash that `Log::keep` gives for the paths this vault takes (included or with a row, and not ignored), and that is not already in `.syncit/blobs/`, `fetch` it into `.syncit/blobs/`. Hashes with no source are skipped silently. Two limits follow from the rule, and both are meant:
 
 - A vault collects only what it keeps. A peer that keeps more, or has not compacted, does not fill it up again.
 - A partial vault does not gather the content of paths it excludes.
@@ -495,7 +507,7 @@ Save the dirstate once, after all paths, if materialise changed it.
 
 `sync`, `push` and `pull` share one procedure. "Receiver" means both vaults for `sync`, the peer for `push`, the local vault for `pull`.
 
-1. Open both vaults. Refuse if they are the same folder, if one is inside the other (a run would copy the outer vault into the inner, one level deeper each time), or if either has a version other than 1. Lock both.
+1. Open both vaults. Refuse if they are the same folder, if one is inside the other (a run would copy the outer vault into the inner, one level deeper each time), or if either is not at this build's layout (section 5, "format"). Lock both.
 2. Scan the local vault, then the peer (section 7). Both scan in every mode, so each vault's changes are recorded from its own dirstate.
 3. Exchange segments: each receiver takes every segment in the other vault's `log/` whose name it lacks. A segment is read, validated as in `CRDT.md`, and only then written into `log/`. A segment that fails is not stored, is reported as `rejected`, and does not stop the run.
 4. Each receiver reloads its log.
@@ -545,7 +557,7 @@ Specified in `store.md`, sections 7 and 10.
 
 ## 11. Commands
 
-The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. Remote vaults widen it to a *target*: a path, a URL or a nickname (`store.md`, section 9). That section also specifies `init <url>`, `remote`, `clone <url>`, `clone --only`, `get --from`, and `--vault` on `config` and `compact`. Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
+The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. Remote vaults widen it to a *target*: a path, a URL or a nickname (`store.md`, section 9). That section also specifies `init <url>`, `remote`, `clone <url>`, `clone --include` and `--exclude`, `get --from`, and `--vault` on `config` and `compact`. Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
 
 | Command | Steps |
 |---|---|
@@ -564,18 +576,21 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit log [path]...` | See below. (`R26`) |
 | `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
 | `syncit compact [--dry-run]` | See below. (`R15`) |
+| `syncit migrate [<vault>]` | Bring a vault up to this build's layout (section 5, "format"): the one named, a path, a URL or a nickname, or else the one here. A folder is locked first. Prints `migrated <vault> from format version N to M`, or `<vault> is at format version M`. (`R25`) |
 | `syncit config [keep-history <n>\|all]` | See below. (`R15`) |
 | `syncit config autocompact on\|off` | See below. (`R15`) |
 | `syncit config nickname <name>` | See below. |
 
 `get`, `move` and `drop` take one or more paths. The steps below run once over all the paths together: `move` and `drop` make their checks for every file before removing anything, so they either remove them all or refuse.
 
+**Flags that narrow a command.** `clone --exclude`, `get --exclude` and `drop --keep` each name paths inside the paths their command applies to (for `clone`, the paths of `--include`, or the vault root). A flag's paths are written as the command's own paths are. Each must lie inside one of the command's paths and not be one; if any does not, the command fails with `<flag> <path> is not inside a path it applies to` before anything is changed. The flags only say in one command what two commands in the right order would: the config they leave is an ordinary `include` and `exclude` list.
+
 ### get
 
 The paths of `get` lie inside the *other* vault, as the source of `clone` does: `syncit get /Volumes/Backup/archive/music`, run in a vault, adds `music` to that vault and fetches it from the vault at `/Volumes/Backup/archive`.
 
 1. Find the vault root above each path. All paths must give the same root `R`, and `R` must not be this vault. Each path relative to `R` is a prefix.
-2. Remove every `exclude` at or under each prefix and every `include` under it. Add the prefix to `include`. Save the config.
+2. Remove every `exclude` at or under each prefix and every `include` under it. Add the prefix to `include`. Add each path of `--exclude` to `exclude`. Save the config. Nothing is removed: a file already here under a new exclude is `undropped` (section 7).
 3. Run `pull` from `R` (section 10).
 
 ### move
@@ -595,12 +610,12 @@ A failure in steps 2, 3 or 5 is exit code 1.
 
 ### drop
 
-`syncit drop [--check <vault>] [--force] <path>...` is the end of `move` without the push: the files are removed from this vault only, and sent nowhere. The paths are in this vault, relative to the current directory, and need not exist on disk. No deletion is recorded.
+`syncit drop [--check <vault>] [--force] [--keep <path>]... <path>...` is the end of `move` without the push: the files are removed from this vault only, and sent nowhere. The paths are in this vault, relative to the current directory, and need not exist on disk. No deletion is recorded.
 
 1. Open and lock this vault, and the vault named by `--check` if there is one, as a run does (section 10). Scan both: unrecorded changes here are recorded before anything is removed, and the checked vault's rows say what it has now.
-2. Collect the paths this vault has a row for under the given prefixes. There may be none: the prefixes are excluded all the same, which is how to say "never fetch this folder".
+2. Collect the paths this vault has a row for under the given prefixes and not under a path of `--keep`. There may be none: the prefixes are excluded all the same, which is how to say "never fetch this folder".
 3. **Copy check**, unless `--force`. For each of those paths, the row's hash must be in this vault's `.syncit/blobs/`, or in the checked vault: a row of its dirstate with that hash, or a file in its `blobs/`. If any is not, fail with `nothing dropped: no other copy is known of <paths>.` and a hint: `Sync with it first` if a vault was named, `Name a vault that has them with --check <vault>` if not; then `, or use --force`. Exit code 1. This prevents dropping the only copy of a file, including a version the scan in step 1 has just recorded.
-4. Steps 6 to 8 of `move`. Each removed file is reported as `dropped`.
+4. Steps 6 to 8 of `move`, adding each path of `--keep` to `include` in step 6. Each removed file is reported as `dropped`. The rows and files under a kept path are not touched.
 
 Nothing is sent to the checked vault; scanning it may write a segment there, as any scan may. `move` is the command for "put it there, then remove it here"; `drop` is for files another vault already has, or that are not wanted at all.
 
@@ -637,6 +652,7 @@ It reads the log only. A vault that receives a file records nothing, so it is ne
    |---|---|---|
    | `ignored` | `·` | the vault ignores the path (`skips`) |
    | `excluded` | `-` | no row, nothing unrecorded, and the path is excluded |
+   | `undropped` | `-` | it has a row, and the path is excluded (section 7, "Excluded but still here") |
    | `incomplete` | `!` | the path is `Incomplete` (and see below) |
    | `conflict` | `≠` | the path has losers, or a deletion lost to a file (section 9) |
    | `new`, `modified`, `removed` | `+`, `✎`, `✗` | the dry scan of this vault would record the path: as new, as modified, or as deleted. This `removed` is unrecorded |
@@ -700,13 +716,13 @@ With `--dry-run` the first line is `dry run: nothing is changed`, nothing is rem
 
 ### config
 
-- `syncit config` prints the vault's settings, as `setting` messages: `keep-history: <n>|all`, `autocompact: on|off`, then `nickname: <nickname>`. For the vault here it locks the vault and reads its config only, not its log or dirstate, and writes nothing; so do `syncit remote` and `syncit remote remove`, which then saves the config.
-- `syncit config keep-history <n>|all` sets `keep_history`: a number of versions, or `all` for `null`.
+- `syncit config` prints the vault's config as TOML: what `Config::to_toml` writes for a new file, so every key in a fixed order and no comments. With `--json` it is one `config` message with the same keys and values (`"keep-history": "all"`, `"include": ["."]`). For the vault here it locks the vault and reads its config only, not its log or dirstate, and writes nothing; so do `syncit remote` and `syncit remote remove`, which then saves the config.
+- `syncit config keep-history <n>|all` sets `keep-history`: a number of versions, or `all`.
 - `syncit config autocompact on|off` sets `autocompact`.
 - A change deletes nothing by itself. If blobs are stored that `keep_history` no longer covers, an `info` line after the settings gives their number and says what will drop them: the next sync or snapshot with `autocompact` on, `syncit compact` with it off.
 - `syncit config nickname <name>` sets `nickname`, and fails if the name is not a valid nickname (section 5). Segments already written keep the old one.
 
-Each form prints the settings afterwards and exits 0. Remote vaults add `--vault <target>`, to show or change another vault's settings (`store.md`, section 9).
+Each form prints the config afterwards and exits 0. Remote vaults add `--vault <target>`, to show or change another vault's settings (`store.md`, section 9).
 
 ## 12. Output and exit codes
 
@@ -731,7 +747,7 @@ How it is built:
 |---|---|---|---|
 | `event` | `kind`, `vault`, `path`, `note`, and `from` for `renamed` | a marker, a letter and the path, below | stdout |
 | `conflict` | `vault`, `path`, `message` | `[<marker> ]U <path> (conflict: <message>)` | stdout |
-| `setting` | `name`, `value` | `<name>: <value>` | stdout |
+| `config` | `include`, `exclude`, `keep-history`, `autocompact`, `nickname`, `remotes`: the values of `config.toml` | the config as TOML | stdout |
 | `blame` | `path`, `nicknames` | `<nickname>[,<nickname>...] <path>` | stdout |
 | `state` | `path`, `files`, `ours`, `theirs` when there are two vaults, `conflict` (the copies) when a vault is in that state, and `from` when ours is `renamed` | `<mark>[ <mark>]`, the path (`<from> -> <path>` when renamed) padded to the widest of the listing, each vault's state as a word padded to 10, then `<n> files` for a folder or the conflict's copies; two spaces between columns, none at the end. The states and marks are in `status`, section 11 | stdout |
 | `version` | `path`, `hash`, `exec`, `mtime`, `nicknames`, `current`, `available` | `<first 8 of hash> <UTC time> <nickname>[,…] <path>`, then in brackets any of `current`, `deleted`, `no content`, `executable`; a deletion's hash is `--------`; the time is `YYYY-MM-DD HH:MMZ` | stdout |
@@ -802,7 +818,7 @@ The same run's first and last lines with `--json`:
 | after replacing files, before saving the dirstate | files newer than their rows | the scan re-records them as entries with the winner's hash and mtime: either the same entry or a head with the same hash, which is the same version. Files with no row are adopted; one written over a deletion record is re-recorded with the winner's hash and mtime, which is again the same version |
 | after renaming a loser to its copy name, before placing the winner | the path is missing, the copy has no row | the scan records a tombstone and the copy; the winner still beats the tombstone, and the losing content is in the copy |
 | after deleting a file, before removing its row | a row with no file | the scan writes a second tombstone; all heads are tombstones. The deletion record names only the second until the next materialise sets it to both |
-| during `move` or `drop`, after saving the config, before saving the dirstate | present files under an excluded prefix | the scan includes each file on disk again, one include per file; nothing is lost, and running the command again completes it and leaves one exclude (`interrupted_move`) |
+| during `move` or `drop`, after saving the config, before saving the dirstate | present files with rows under an excluded prefix | the scan leaves the config and the rows alone; the files sync as before and `status` shows them as `undropped`. Nothing is lost, and running the command again completes it (`interrupted_move`) |
 | during `move` or `drop`, after saving the dirstate | files with no rows | the scan adopts and includes them; nothing is recorded as deleted |
 | while compacting | some of the blobs to drop are gone and others are not | each removal is whole; the next compaction removes the rest. The log was not touched |
 | while uploading to a remote vault (`store.md`, section 10) | some blobs or segments are there and others are not | every object is whole or absent; a reader sees a path as `pending` or `incomplete` and waits; the next run uploads the rest |
@@ -891,15 +907,21 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `copy_deleted_stays_deleted` | deleting a conflict copy and syncing does not bring it back |
 | `move_refuses` | `move` refuses, removing nothing, when the target excludes a path (and then sends nothing), when the target has a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
 | `drop_refuses_sole_copy` | `drop` refuses without `--check` when the vault keeps no history; an unrecorded edit under the path is recorded as an entry, and then blocks the drop against the checked vault until it is pushed; a file the checked vault has lost since its last scan blocks it too; with two paths given, nothing is dropped; nothing reads as deleted afterwards; a path with no files is excluded; local history counts as another copy; a vault cannot check itself; `--force` overrides |
+| `get_exclude` | `get` of a folder with `--exclude` of a sub-folder fetches the folder without it; a plain `get` later brings the sub-folder; excluding what is already here removes nothing and shows it as `undropped`; an exclude outside the paths got is refused |
+| `drop_keep` | `drop` of a folder with `--keep` of a sub-folder removes the rest and leaves the kept files untouched; the kept folder still syncs and the dropped one stays away; a keep outside the paths dropped is refused and nothing is dropped |
 | `cp_from_plain_folder` | `cp` from a folder that is not a vault adds what the vault lacks, replaces what differs and leaves the rest; the vault is scanned first; ignored files, links and the source's `.syncit` are not copied; a read-only executable arrives executable; the copies show in `status` as unrecorded; `.` copies contents and a named source lands under its name in a folder that need not exist; a missing source copies nothing; a dry run writes nothing and returns the real run's `Summary` |
-| `config_command` | `config` prints the settings; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
+| `toml_cases` | a config written and read back is the same; `"all"` and `"."`; a file's comments, order and layout survive a save that changes one value; an unknown key, a missing key, a bad path, a bad `keep-history` and a bad nickname are each named |
+| `config_command` | `config` prints the config; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | (remote vaults) | the tests listed in `store.md`, section 12: `crypt_*`, `names_open`, the backend and `sealed_*` tests, `phrase_round_trip`, `key_lookup_order`, `secrets_file`, `credentials_match` and `credentials_errors` in `src/`, the rest in the `remote` module of `tests/stories.rs` and in `cli_smoke` |
-| `version_mismatch` | a peer with `"syncit": 2` in its config is refused |
+| `version_mismatch` | a vault whose `format` is ahead of the build is refused, as a peer and as the vault a command runs in |
+| `migrates_own_vault` | a command in a layout 1 vault brings it to the current layout, one that reads only settings too |
+| `migrate_other_vault` | a layout 1 peer is refused and not changed; `migrate` brings it up to date, by path and by nickname; `migrate` with no vault is the one here |
 | `cli_smoke` | the built binary runs every command and returns the documented exit codes; results are on stdout and warnings and errors on stderr; with `--json` every line of both streams is an object with a `type`, and the last stdout line of a run is the summary; `push` to a partial vault warns and `sync` does not |
 | `message_forms` | each message type's text form and JSON form; the summary's counts and exit code |
 | `push_counts_excluded` | the files a push would not deliver: those the target excludes, and those it ignores |
-| `interrupted_move` | an exclude over files the vault still has, as a `move` stopped partway leaves: the next scan includes them again, they sync as before, and a second `move` completes and leaves one exclude |
+| `interrupted_move` | an exclude over files the vault still has, as a `move` stopped partway or a config edited by hand leaves: the next scan leaves the config alone, `status` shows the files as `undropped`, they sync as before in both directions, and a second `move` completes and leaves one exclude |
+| `hand_exclude_then_delete_is_local` | an exclude added by hand over files that are then deleted by hand: nothing is recorded, the other vault keeps the files, and `get` brings them back |
 | `dry_run_matches_real_run` | for `sync`, `push` and `pull` over edits, a new file, a deletion, a conflict and a merge of text, and for `move` and `drop`: a dry run leaves every file of both vaults, `.syncit/` included, as it was, and returns the same `Summary` (counts and events) as the real run that follows; a `move` or `drop` that would be refused is refused |
 
 ### Requirement coverage
@@ -957,13 +979,14 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 |---|---|
 | Store | a vault that is bare and remote, not a second kind of thing (`store.md`): one mechanism for keeping history (`R16`) and for syncing through a third place (`R24`). On any object storage the `object_store` crate reaches, and always encrypted (`R28`) |
 | Origin | none. No vault is special and there is no default peer: a command that involves another vault names it, by path, URL or nickname. A vault may remember others in `remotes`, an address book of nickname to location. A folder that moves breaks only its own entry |
-| A partial vault from a store | `clone <vault> <dir> --only <path>`, repeatable, with paths from the vault's root. A URL cannot carry a sub-folder as a path does, so the flag names it. The form that infers the sub-folder from a path stays (`store.md`, section 9) |
+| A partial vault from a store | `clone <vault> <dir> --include <path>`, repeatable, with paths from the vault's root; `--exclude <path>` leaves a path out. A URL cannot carry a sub-folder as a path does, so the flag names it. The form that infers the sub-folder from a path stays (`store.md`, section 9) |
 | Reaching a store | with the ordinary commands and a target. No `store` setting and no upload after every run: a command does what its name says, and backing up on a schedule is `push` in cron |
 | Size of the build | everything remote vaults add is behind two Cargo features, `remote` and `keychain`, on by default. Without them the build is as small as before. No feature for each cloud: they share their dependencies |
 | Object-store client | the `object_store` crate, driven from a private single-thread async runtime. No external tools. OpenDAL was ruled out because it needs a newer Rust than 1.89 |
 | Store encryption | always on. XChaCha20-Poly1305 in 64 KiB chunks. Every name is encrypted with AES-SIV, which the key turns back, so the provider learns neither the content nor whether a known file is stored |
 | Store keys | one 32-byte key for each remote vault, written as a 24-word BIP39 phrase and shown once, at creation. Kept in the OS keychain when there is one; otherwise given in `SYNCIT_SECRET_KEY` or, if the user chooses, saved in `~/.config/syncit/secrets.toml` |
-| Settings | changed with `syncit config`, not by editing the file |
+| Settings | in `.syncit/config.toml`, which the user may edit; `syncit config` prints it and changes single settings. TOML because it is the format of the other files a person writes (`credentials.toml`), with comments. Editing the filter moves no files: a scan never rewrites the filter to match the disk or the disk to match the filter, and `get`, `drop` and `move` change both together |
+| Format version | in `.syncit/format`, not in the config: a file the user edits holds only settings |
 | Attribution | each vault has a nickname, by default its folder's name, written into the header of the segments it records; `blame` prints it. A label: not unique, not verified, read by no rule. Hostnames and absolute paths are not recorded, since the log is permanent and replicated |
 | Ignore list | `.syncitignore` at the vault root, an ordinary file that syncs; names and path prefixes, no wildcards |
 | `move` safety | scans first, so unrecorded changes are sent; removes nothing unless the target includes every file and, after the push, has the same content at every path |
@@ -974,11 +997,11 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Unicode paths | recorded as the OS returns them; names that are not UTF-8 are skipped with a warning |
 | Case-insensitive filesystems | no special handling; a case collision surfaces as "untracked file in the way" and nothing is overwritten |
 | Conflict-copy name clash | the existing file is left alone; the conflict is reported and stays open |
-| A file on disk outside the included paths | added to `include` by the scan, whether new or already with a row (section 7): the filter follows the disk, so data is kept. `move` and `drop` undo it |
+| A file on disk outside the included paths | with no row, added to `include` by the scan (section 7). With a row, left alone: it syncs as before and is shown as `undropped` until `drop`, `move` or `get` settles it, so a config edited by hand is never rewritten by a scan and never deletes a file elsewhere |
 | Seeing a partial vault | `status --all`: each vault's state for every live path, against one merged log; states are per vault, so nothing is pairwise. No sizes, since entries do not record them |
 | Terms for partial replication | three independent facts, one word each: included or excluded (the filter), present (the disk, which the dirstate records), ignored (`.syncitignore`). Messages name the one responsible; no word blends them |
 | Merging conflicting files | text only (`.md`, `.markdown`, `.txt`), only in a run where a receiving vault keeps history, so the versions replaced can be restored, and only when a line-by-line three-way merge from their common ancestor is clean; otherwise copies. The merge is an entry with both versions as parents. `PRD.md` first listed merging as a non-goal |
-| History | a depth, not a switch: `keep_history` is how many versions back from a head a vault keeps the content of; 0 is none and `null` is all. A new vault keeps 1, which is enough for most merges of text, at the cost of a second copy of every current file |
+| History | a depth, not a switch: `keep_history` is how many versions back from a head a vault keeps the content of; 0 is none and `"all"` is all. A new vault keeps 1, which is enough for most merges of text, at the cost of a second copy of every current file |
 | Compaction | Compaction keeps the whole log and drops only old blobs. As CouchDB's does: it drops the bodies of revisions that are not leaves and keeps the revision tree. Automatic at the end of a run unless `autocompact` is off; then `syncit compact`. Per vault, with nothing to coordinate: a vault collects only what it keeps, so a peer that keeps more does not fill it up again |
 | Tie-break timestamp | file mtime |
 | Empty directories | not tracked; directories emptied by a deletion are removed |
@@ -1001,13 +1024,14 @@ Record here anything built differently from these documents, with the reason.
 - **Remote vaults (milestone 9, `store.md`) are built.** MinIO's images could not be pulled, so `store.md` milestone 7 ran `cloud_remote` against Adobe's S3Mock (`adobe/s3mock:3.11.0` in Docker) through `AWS_ENDPOINT_URL` and `AWS_ALLOW_HTTP`, and pushed and cloned a 20 MB file, which goes in 16 MiB parts. Both passed with no change to the code. Both then passed against a real Cloudflare R2 bucket on 2026-11-22, again with no change. GCS and Azure are untested. The crate APIs behaved as `store.md`, section 2, records; nothing had to be adapted, and the default TLS provider built. The CI steps, in all three builds, passed on Linux in a `rust:1.96` container, which also compiled the Linux keychain store, and then in GitHub Actions (PR #12) after one lint that only clippy 1.100 reports was fixed.
 - **`store.md` as built.** Where it left a choice, or where building it showed something:
   - `Log::load` takes a vault's storage instead of its `log/` folder, so the test helper that loads a log passes the folder's `Store`; no assertion changed. A corrupt segment is reported by its name, not its file's path.
-  - Commands take a target as a `&Path`: a URL or a nickname is a valid path string, read back with `to_str`. `clone`, `compact` and `config` gained the parameters for `--only`, `--save-key` and `--vault`; the tests pass the defaults.
+  - Commands take a target as a `&Path`: a URL or a nickname is a valid path string, read back with `to_str`. `clone`, `compact` and `config` gained the parameters for `--include` and `--exclude`, `--save-key` and `--vault`; the tests pass the defaults.
   - `Store::put_blob` consumes its source file, which is a scratch file in every caller.
   - `init <url>` and `clone` take `--save-key` as `remote add` does, since section 8 lets all three save a key. `init --nickname` is for a remote; with a path it is refused.
   - `clone` records its source in `remotes` whether it is a URL or a folder. If that fails (no key for a URL), the new `.syncit/` is removed and nothing is pulled.
   - `remote add` with a path needs the root of a vault. A target that is no nickname, no URL and no existing path fails with `no vault at <target>: not a folder, a URL or the name of a remote`, where it used to fail in the nesting check.
   - A remote segment that cannot be decrypted is listed like any other, so the run reports it as `rejected` as it would a corrupt segment. An object under a name the key did not make is not the vault's, and is ignored.
   - **One store, on a backend (2026-11-25).** As first built, storage was a `Storage` trait with two whole implementations, a folder and an encrypted bucket, and a remote's object names were a one-way keyed hash. A listing could then not be read back, so the remote implementation was handed the local vault, fetched every segment it did not know in order to name it, and borrowed the local `.syncit/tmp`. Names are now encrypted reversibly, which let encryption become a backend like any other and left one `Store` for every vault (`store.md`, sections 4 to 6). A folder vault is stored exactly as before. The layout of a remote changed, and one made before this cannot be read. `corrupt config` and a missing config are reported by the vault's folder, not the config file's path.
+  - **Migrations (2026-11-25).** The layout version was `"syncit": 1` in the config, checked where the config was read, and a vault at any other version was refused for good. It is now the `syncit` of the `format` file, which every vault has and a remote already had, and `migrate.rs` holds every change from one layout to the next (`store.md`, section 14). Layout 2 is that change and the config's move from JSON `config` to `config.toml`, in one migration. A build from before this reports a layout 2 folder as having no config, and a layout 2 remote as `format version 2, not 1`; from layout 2 on, an older build says `upgrade syncit`.
   - **Vaults as types (2026-11-25).** `Store` first held its backend in a `Box<dyn Backend>`, and `Vault` was one struct for every vault, with a `bare` flag, placeholder working-folder fields in a bare vault, its side of the run and its traffic counts. A vault is now `Vault<B, W>`: its backend and its working dir, or none, are its types, and nothing is boxed (`store.md`, section 4). The lock belongs to `Fs`. Nothing on disk and nothing printed changed, but for one line: a dry run now counts the segment its scan would write, so `would send … N segments` equals what the real run reports.
   - The `sent …` and `received …` lines count distinct blobs and segments. In a dry run, received files are those a dry run finds only in the remote; history that a real `retain` would download is not counted.
 

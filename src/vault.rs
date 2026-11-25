@@ -164,7 +164,8 @@ impl Worktree for Bare {
 
     fn retained(v: &mut Vault<impl Backend, Self>, arrived: &BTreeSet<String>) {
         let mut rows = BTreeMap::new();
-        for path in v.log.paths.keys().filter(|p| v.takes(p)) {
+        let wanted = |p: &&String| v.config.includes(p) && !v.skips(p);
+        for path in v.log.paths.keys().filter(wanted) {
             let PathState::Resolved { winner, .. } = v.log.resolve(path) else {
                 continue;
             };
@@ -294,11 +295,17 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
 
 impl Vault<Fs, Dir> {
     /// Find, lock and load the vault at or above `start`. `local` is for the
-    /// vault a command runs in; a peer's log is read leniently.
+    /// vault a command runs in, which is brought up to this build's layout
+    /// if it is behind; a peer is refused if it is, and its log is read
+    /// leniently.
     pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault<Fs, Dir>> {
         let fs = Fs::open(start)?;
         let root = fs.root().to_path_buf();
-        let store = Store::dir(fs);
+        let name = root.display().to_string();
+        if local {
+            crate::migrate::upgrade(ctx, &fs, &name)?;
+        }
+        let store = Store::open(&name, fs)?;
         let config = store.load_config()?;
         let dirstate = Dirstate::load(&root)?;
         let ignore =
@@ -319,7 +326,7 @@ impl Vault<Fs, Dir> {
         }
         Ok(Vault {
             log: Log::load(ctx, &store, None, local)?,
-            name: worktree.root.display().to_string(),
+            name,
             store,
             config,
             worktree,
@@ -337,7 +344,7 @@ impl<B: Backend> Vault<B, Bare> {
         backend: B,
         known: Option<&Store<Fs>>,
     ) -> Result<Vault<B, Bare>> {
-        let store = Store::new(name, backend);
+        let store = Store::open(name, backend)?;
         let config = store.load_config()?;
         store.list()?;
         let mut vault = Vault {
@@ -388,11 +395,11 @@ impl<B: Backend, W: Worktree> Vault<B, W> {
         sum.record(event);
     }
 
-    /// Whether a run writes this path here: the vault includes it and does
-    /// not ignore it. A scan includes every file on disk, so after one a path
-    /// with a row is taken unless it is ignored.
+    /// Whether a run writes this path here: the vault includes it or has it
+    /// already, and does not ignore it. A path with a row is taken whatever
+    /// the filter says, until `drop` or `move` removes it.
     pub fn takes(&self, path: &str) -> bool {
-        self.config.includes(path) && !self.skips(path)
+        (self.config.includes(path) || self.worktree.rows().contains_key(path)) && !self.skips(path)
     }
 
     /// Whether a scan would not look at this path: it is ignored, belongs to a

@@ -2,6 +2,7 @@
 //! nothing is collected. A message has a text form (`Display`) and a JSON
 //! form (`Serialize`); the caller picks the stream, `json` picks the form.
 
+use crate::config::Config;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::fmt::{self, Display};
@@ -125,7 +126,7 @@ fn mark(state: &str) -> &'static str {
         "behind" => "◐",
         "missing" => "○",
         "conflict" => "≠",
-        "excluded" => "-",
+        "excluded" | "undropped" => "-",
         "ignored" => "·",
         _ => "!", // incomplete
     }
@@ -191,9 +192,13 @@ pub enum Message {
         #[serde(skip)]
         side: &'static str,
     },
-    Setting {
-        name: &'static str,
-        value: String,
+    /// A vault's config: the values of its `config.toml`, and for text the
+    /// file as `Config::to_toml` writes it.
+    Config {
+        #[serde(flatten)]
+        config: Config,
+        #[serde(skip)]
+        toml: String,
     },
     /// A vault this one remembers, in `remotes`.
     Remote {
@@ -292,7 +297,7 @@ impl Display for Message {
                 Ok(())
             }
             Message::State(h) => write!(f, "{}", h.row(0)),
-            Message::Setting { name, value } => write!(f, "{name}: {value}"),
+            Message::Config { toml, .. } => write!(f, "{}", toml.trim_end()),
             Message::Remote { nickname, location } => write!(f, "{nickname} {location}"),
             Message::Blame { path, nicknames } => write!(f, "{} {path}", nicknames.join(",")),
             Message::Info { message } => write!(f, "{message}"),

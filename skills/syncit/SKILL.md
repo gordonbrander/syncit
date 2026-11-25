@@ -36,7 +36,7 @@ If `syncit --version` fails, syncit is not installed: point the user to the inst
 2. **Never use `rm` to free space.** Deleting a file is a real deletion that reaches every vault on the next sync. To remove files from this vault only, use `syncit move` (see [references/partial.md](references/partial.md)).
 3. **Ask the user before** `drop --force`, `compact`, lowering `keep-history`, or `--no-remove`. The first three discard data for good. `--no-remove` puts deleted files back for good.
 4. **Read the exit code.** `0` is done. `1` is failed. `2` means the run finished but something needs a look: a conflict, or a file that was skipped or is pending. Tell the user what the `U` and `!` lines say; do not report a `2` as a clean sync.
-5. **One command at a time per vault.** A second one fails with "vault is in use". Never edit anything inside `.syncit/`.
+5. **One command at a time per vault.** A second one fails with "vault is in use". Never edit anything inside `.syncit/`, except `.syncit/config.toml` when the user asks for a setting or rule to be changed there; prefer `syncit config`, `get` and `drop`, which do the same with checks.
 6. **Remote seed phrases stay out of the conversation.** See "Remote vaults" below before running `init`, `clone` or `remote add` with a URL.
 
 ## Journeys
@@ -105,7 +105,7 @@ syncit restore --in-place notes.txt 3f9a    # replace the file with that version
 ### Keep only part of a large archive
 
 ```sh
-syncit clone /Volumes/Backup/Archive ~/Archive --only photos/2024 --only music
+syncit clone /Volumes/Backup/Archive ~/Archive --include photos/2024 --include music
 cd ~/Archive
 syncit status --all --vs /Volumes/Backup/Archive   # what is here, what is only there
 syncit get /Volumes/Backup/Archive/video           # bring in another folder
