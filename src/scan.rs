@@ -74,6 +74,8 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
 
     let mut dirstate = v.dirstate.clone();
     let mut out = Scan::default();
+    // New files, `(path, hash)`, to pair with deletions into moves.
+    let mut added = vec![];
     // For `Scan::cache`: rows to refresh, rows to smudge, and whether a
     // refresh changes what the next scan hashes.
     let mut refreshed = vec![];
@@ -167,6 +169,9 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
             parents,
             path: path.clone(),
         };
+        if kind == "new" {
+            added.push((path.clone(), hash.clone()));
+        }
         dirstate.rows.insert(
             path.clone(),
             Row {
@@ -205,12 +210,6 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
         out.entries.push(entry);
     }
 
-    // `changes` and `entries` are pushed together, one of each per path.
-    let new = out.changes.iter().zip(&out.entries);
-    let added: Vec<_> = new
-        .filter(|((_, kind), _)| *kind == "new")
-        .filter_map(|(_, e)| Some((e.path.clone(), e.hash.clone()?)))
-        .collect();
     out.moves = moves(&deleted, &added);
 
     // A file on disk is included, whether or not the vault knew it.
