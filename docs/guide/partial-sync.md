@@ -18,10 +18,22 @@ syncit clone /Volumes/Backup/Archive/photos/2024 ~/Archive
 
 You get `~/Archive/photos/2024/…` and nothing else. The folder structure is the same as in the archive, so paths always match. The vault *includes* that folder and *excludes* the rest. What is excluded is simply "not here"; syncing will never delete it from the archive. `get` includes more, and `move` or `drop` excludes again.
 
-To check out several folders at once, give `--only` for each, with paths from the top of the archive:
+To check out several folders at once, give `--include` for each, with paths from the top of the archive:
 
 ```sh
-syncit clone /Volumes/Backup/Archive ~/Archive --only photos/2024 --only music
+syncit clone /Volumes/Backup/Archive ~/Archive --include photos/2024 --include music
+```
+
+To take everything except some folders, give `--exclude` for each. What is excluded is never downloaded:
+
+```sh
+syncit clone /Volumes/Backup/Archive ~/Archive --exclude video
+```
+
+The two combine, to take a folder without part of it. An excluded path must be inside an included one:
+
+```sh
+syncit clone /Volumes/Backup/Archive ~/Archive --include photos --exclude photos/raw
 ```
 
 To see what you have and what you don't, use `syncit status --all --vs` (see [Checking before you sync](basics.md#checking-before-you-sync)).
@@ -48,6 +60,14 @@ If the archive is a [remote](remotes.md), or you'd rather give paths from the to
 syncit get music --from /Volumes/Backup/Archive
 syncit get music --from origin
 ```
+
+To get a folder without part of it, add `--exclude`, written the same way as the paths you get:
+
+```sh
+syncit get photos --from origin --exclude photos/raw
+```
+
+A plain `get photos` later brings the excluded part in too.
 
 ## Add your own
 
@@ -100,6 +120,12 @@ error: nothing dropped: no other copy is known of music/m.mp3. Name a vault that
 ```
 
 `--force` skips the check, if you really mean it: that may remove the only copy. As with `move`, later syncs neither bring dropped files back nor delete them elsewhere, and `syncit get` brings them back. You can also drop a folder you don't have yet, so that it is never fetched.
+
+To drop a folder but keep part of it, add `--keep`. The kept files are not touched, and keep syncing:
+
+```sh
+syncit drop --check /Volumes/Backup/Archive photos --keep photos/2024
+```
 
 ## Pushing to a partial vault
 

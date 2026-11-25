@@ -116,9 +116,18 @@ enum Command {
         /// Makes clone a partial replica of the original, including only some of
         /// its subpaths when syncing. Useful for syncing just part of a large backup.
         ///
-        /// With --only, SRC must be the vault's root.
+        /// With --include, SRC must be the vault's root.
         #[arg(long, value_name = "PATH")]
-        only: Vec<String>,
+        include: Vec<String>,
+        /// Leave this subpath of the vault out.
+        ///
+        /// Repeat to leave out multiple subpaths. Without --include, everything else
+        /// is cloned. With it, the subpath must be inside an included one.
+        /// `syncit get` brings an excluded subpath in later.
+        ///
+        /// With --exclude, SRC must be the vault's root.
+        #[arg(long, value_name = "PATH")]
+        exclude: Vec<String>,
         /// Save remote's secret keys to `~/.config/syncit/secrets.toml` if there is no OS keychain
         #[arg(long)]
         save_key: bool,
@@ -188,6 +197,11 @@ enum Command {
         /// The vault to get from. Path, URL, or remote nickname.
         #[arg(long, value_name = "VAULT")]
         from: Option<PathBuf>,
+        /// Leave this subpath out. Written as PATHS are, and inside one of them.
+        ///
+        /// Repeat to leave out multiple subpaths.
+        #[arg(long, value_name = "PATH")]
+        exclude: Vec<PathBuf>,
     },
     /// Move files to another vault.
     ///
@@ -236,6 +250,11 @@ enum Command {
         /// Paths to stop tracking
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        /// Keep this subpath here, and keep tracking it. Must be inside one of PATHS.
+        ///
+        /// Repeat to keep multiple subpaths. Their files are not touched.
+        #[arg(long, value_name = "PATH")]
+        keep: Vec<PathBuf>,
         /// Make sure another vault has a backup of the files.
         ///
         /// Nothing is sent there. To send files and then remove them here, use `syncit move`.
@@ -470,9 +489,10 @@ fn main() {
         Command::Clone {
             src,
             dir,
-            only,
+            include,
+            exclude,
             save_key,
-        } => commands::clone(ctx, cwd, &src, &dir, &only, save_key).map(Some),
+        } => commands::clone(ctx, cwd, &src, &dir, &include, &exclude, save_key).map(Some),
         Command::Sync { vault, .. } => commands::sync(ctx, cwd, &vault).map(Some),
         Command::Push { vault, .. } => commands::push(ctx, cwd, &vault).map(Some),
         Command::Pull { vault, .. } => commands::pull(ctx, cwd, &vault).map(Some),
@@ -483,23 +503,32 @@ fn main() {
         Command::Get {
             paths,
             from: Some(from),
+            exclude,
         } => {
-            let paths: Option<Vec<String>> =
-                paths.iter().map(|p| p.to_str().map(String::from)).collect();
-            match paths {
-                Some(paths) => commands::get_from(ctx, cwd, &paths, &from).map(Some),
-                None => Err(anyhow::anyhow!("a path is not UTF-8")),
+            let utf8 = |paths: &[PathBuf]| -> Option<Vec<String>> {
+                paths.iter().map(|p| p.to_str().map(String::from)).collect()
+            };
+            match (utf8(&paths), utf8(&exclude)) {
+                (Some(paths), Some(exclude)) => {
+                    commands::get_from(ctx, cwd, &paths, &exclude, &from).map(Some)
+                }
+                _ => Err(anyhow::anyhow!("a path is not UTF-8")),
             }
         }
-        Command::Get { paths, from: None } => commands::get(ctx, cwd, &paths).map(Some),
+        Command::Get {
+            paths,
+            from: None,
+            exclude,
+        } => commands::get(ctx, cwd, &paths, &exclude).map(Some),
         Command::Move { paths, vault, .. } => commands::move_to(ctx, cwd, &paths, &vault).map(Some),
         Command::Cp { paths, dest, .. } => commands::cp(ctx, cwd, &paths, &dest).map(Some),
         Command::Drop {
             paths,
+            keep,
             check,
             force,
             ..
-        } => commands::drop(ctx, cwd, &paths, check.as_deref(), force).map(Some),
+        } => commands::drop(ctx, cwd, &paths, &keep, check.as_deref(), force).map(Some),
         Command::Blame { paths } => commands::blame(ctx, cwd, &paths).map(|_| None),
         Command::Log { paths } => commands::log(ctx, cwd, &paths).map(|_| None),
         Command::Restore {

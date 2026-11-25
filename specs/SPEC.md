@@ -555,7 +555,7 @@ Specified in `store.md`, sections 7 and 10.
 
 ## 11. Commands
 
-The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. Remote vaults widen it to a *target*: a path, a URL or a nickname (`store.md`, section 9). That section also specifies `init <url>`, `remote`, `clone <url>`, `clone --only`, `get --from`, and `--vault` on `config` and `compact`. Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
+The vault is found by walking up from the current directory to the first folder containing `.syncit/`. A `<vault>` argument is resolved the same way from the given path. Remote vaults widen it to a *target*: a path, a URL or a nickname (`store.md`, section 9). That section also specifies `init <url>`, `remote`, `clone <url>`, `clone --include` and `--exclude`, `get --from`, and `--vault` on `config` and `compact`. Every command except `init` and `clone` takes the vault's lock first: open `.syncit/lock` and `try_lock()`; if that fails, exit with "vault is in use". Paths stored in `config` are canonicalised.
 
 | Command | Steps |
 |---|---|
@@ -581,12 +581,14 @@ The vault is found by walking up from the current directory to the first folder 
 
 `get`, `move` and `drop` take one or more paths. The steps below run once over all the paths together: `move` and `drop` make their checks for every file before removing anything, so they either remove them all or refuse.
 
+**Flags that narrow a command.** `clone --exclude`, `get --exclude` and `drop --keep` each name paths inside the paths their command applies to (for `clone`, the paths of `--include`, or the vault root). A flag's paths are written as the command's own paths are. Each must lie inside one of the command's paths and not be one; if any does not, the command fails with `<flag> <path> is not inside a path it applies to` before anything is changed. The flags only say in one command what two commands in the right order would: the config they leave is an ordinary `include` and `exclude` list.
+
 ### get
 
 The paths of `get` lie inside the *other* vault, as the source of `clone` does: `syncit get /Volumes/Backup/archive/music`, run in a vault, adds `music` to that vault and fetches it from the vault at `/Volumes/Backup/archive`.
 
 1. Find the vault root above each path. All paths must give the same root `R`, and `R` must not be this vault. Each path relative to `R` is a prefix.
-2. Remove every `exclude` at or under each prefix and every `include` under it. Add the prefix to `include`. Save the config.
+2. Remove every `exclude` at or under each prefix and every `include` under it. Add the prefix to `include`. Add each path of `--exclude` to `exclude`. Save the config. Nothing is removed: a file already here under a new exclude is `undropped` (section 7).
 3. Run `pull` from `R` (section 10).
 
 ### move
@@ -606,12 +608,12 @@ A failure in steps 2, 3 or 5 is exit code 1.
 
 ### drop
 
-`syncit drop [--check <vault>] [--force] <path>...` is the end of `move` without the push: the files are removed from this vault only, and sent nowhere. The paths are in this vault, relative to the current directory, and need not exist on disk. No deletion is recorded.
+`syncit drop [--check <vault>] [--force] [--keep <path>]... <path>...` is the end of `move` without the push: the files are removed from this vault only, and sent nowhere. The paths are in this vault, relative to the current directory, and need not exist on disk. No deletion is recorded.
 
 1. Open and lock this vault, and the vault named by `--check` if there is one, as a run does (section 10). Scan both: unrecorded changes here are recorded before anything is removed, and the checked vault's rows say what it has now.
-2. Collect the paths this vault has a row for under the given prefixes. There may be none: the prefixes are excluded all the same, which is how to say "never fetch this folder".
+2. Collect the paths this vault has a row for under the given prefixes and not under a path of `--keep`. There may be none: the prefixes are excluded all the same, which is how to say "never fetch this folder".
 3. **Copy check**, unless `--force`. For each of those paths, the row's hash must be in this vault's `.syncit/blobs/`, or in the checked vault: a row of its dirstate with that hash, or a file in its `blobs/`. If any is not, fail with `nothing dropped: no other copy is known of <paths>.` and a hint: `Sync with it first` if a vault was named, `Name a vault that has them with --check <vault>` if not; then `, or use --force`. Exit code 1. This prevents dropping the only copy of a file, including a version the scan in step 1 has just recorded.
-4. Steps 6 to 8 of `move`. Each removed file is reported as `dropped`.
+4. Steps 6 to 8 of `move`, adding each path of `--keep` to `include` in step 6. Each removed file is reported as `dropped`. The rows and files under a kept path are not touched.
 
 Nothing is sent to the checked vault; scanning it may write a segment there, as any scan may. `move` is the command for "put it there, then remove it here"; `drop` is for files another vault already has, or that are not wanted at all.
 
@@ -903,6 +905,8 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `copy_deleted_stays_deleted` | deleting a conflict copy and syncing does not bring it back |
 | `move_refuses` | `move` refuses, removing nothing, when the target excludes a path (and then sends nothing), when the target has a different version of a file, when no files lie under the paths, and for a vault with itself; an unrecorded edit under the path is recorded, sent and moved |
 | `drop_refuses_sole_copy` | `drop` refuses without `--check` when the vault keeps no history; an unrecorded edit under the path is recorded as an entry, and then blocks the drop against the checked vault until it is pushed; a file the checked vault has lost since its last scan blocks it too; with two paths given, nothing is dropped; nothing reads as deleted afterwards; a path with no files is excluded; local history counts as another copy; a vault cannot check itself; `--force` overrides |
+| `get_exclude` | `get` of a folder with `--exclude` of a sub-folder fetches the folder without it; a plain `get` later brings the sub-folder; excluding what is already here removes nothing and shows it as `undropped`; an exclude outside the paths got is refused |
+| `drop_keep` | `drop` of a folder with `--keep` of a sub-folder removes the rest and leaves the kept files untouched; the kept folder still syncs and the dropped one stays away; a keep outside the paths dropped is refused and nothing is dropped |
 | `cp_from_plain_folder` | `cp` from a folder that is not a vault adds what the vault lacks, replaces what differs and leaves the rest; the vault is scanned first; ignored files, links and the source's `.syncit` are not copied; a read-only executable arrives executable; the copies show in `status` as unrecorded; `.` copies contents and a named source lands under its name in a folder that need not exist; a missing source copies nothing; a dry run writes nothing and returns the real run's `Summary` |
 | `config_command` | `config` prints the settings; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
@@ -972,7 +976,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 |---|---|
 | Store | a vault that is bare and remote, not a second kind of thing (`store.md`): one mechanism for keeping history (`R16`) and for syncing through a third place (`R24`). On any object storage the `object_store` crate reaches, and always encrypted (`R28`) |
 | Origin | none. No vault is special and there is no default peer: a command that involves another vault names it, by path, URL or nickname. A vault may remember others in `remotes`, an address book of nickname to location. A folder that moves breaks only its own entry |
-| A partial vault from a store | `clone <vault> <dir> --only <path>`, repeatable, with paths from the vault's root. A URL cannot carry a sub-folder as a path does, so the flag names it. The form that infers the sub-folder from a path stays (`store.md`, section 9) |
+| A partial vault from a store | `clone <vault> <dir> --include <path>`, repeatable, with paths from the vault's root; `--exclude <path>` leaves a path out. A URL cannot carry a sub-folder as a path does, so the flag names it. The form that infers the sub-folder from a path stays (`store.md`, section 9) |
 | Reaching a store | with the ordinary commands and a target. No `store` setting and no upload after every run: a command does what its name says, and backing up on a schedule is `push` in cron |
 | Size of the build | everything remote vaults add is behind two Cargo features, `remote` and `keychain`, on by default. Without them the build is as small as before. No feature for each cloud: they share their dependencies |
 | Object-store client | the `object_store` crate, driven from a private single-thread async runtime. No external tools. OpenDAL was ruled out because it needs a newer Rust than 1.89 |
@@ -1016,7 +1020,7 @@ Record here anything built differently from these documents, with the reason.
 - **Remote vaults (milestone 9, `store.md`) are built.** MinIO's images could not be pulled, so `store.md` milestone 7 ran `cloud_remote` against Adobe's S3Mock (`adobe/s3mock:3.11.0` in Docker) through `AWS_ENDPOINT_URL` and `AWS_ALLOW_HTTP`, and pushed and cloned a 20 MB file, which goes in 16 MiB parts. Both passed with no change to the code. Both then passed against a real Cloudflare R2 bucket on 2026-11-22, again with no change. GCS and Azure are untested. The crate APIs behaved as `store.md`, section 2, records; nothing had to be adapted, and the default TLS provider built. The CI steps, in all three builds, passed on Linux in a `rust:1.96` container, which also compiled the Linux keychain store, and then in GitHub Actions (PR #12) after one lint that only clippy 1.100 reports was fixed.
 - **`store.md` as built.** Where it left a choice, or where building it showed something:
   - `Log::load` takes a vault's storage instead of its `log/` folder, so the test helper that loads a log passes the folder's `Store`; no assertion changed. A corrupt segment is reported by its name, not its file's path.
-  - Commands take a target as a `&Path`: a URL or a nickname is a valid path string, read back with `to_str`. `clone`, `compact` and `config` gained the parameters for `--only`, `--save-key` and `--vault`; the tests pass the defaults.
+  - Commands take a target as a `&Path`: a URL or a nickname is a valid path string, read back with `to_str`. `clone`, `compact` and `config` gained the parameters for `--include` and `--exclude`, `--save-key` and `--vault`; the tests pass the defaults.
   - `Store::put_blob` consumes its source file, which is a scratch file in every caller.
   - `init <url>` and `clone` take `--save-key` as `remote add` does, since section 8 lets all three save a key. `init --nickname` is for a remote; with a path it is refused.
   - `clone` records its source in `remotes` whether it is a URL or a folder. If that fails (no key for a URL), the new `.syncit/` is removed and nothing is pulled.

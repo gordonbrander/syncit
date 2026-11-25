@@ -86,7 +86,7 @@ The user needs the credentials (step 2) and the seed phrase. Then they run one o
 
 ```sh
 syncit clone s3://my-bucket/notes ~/Documents
-syncit clone s3://my-bucket/notes ~/Photos --only photos/2024 --only music
+syncit clone s3://my-bucket/notes ~/Photos --include photos/2024 --include music
 ```
 
 Without the seed phrase the remote cannot be read. If the user has lost it but still has a computer that syncs with the remote, their files are safe on that computer: they can make a new remote with `init` at a new, empty URL and push to it.

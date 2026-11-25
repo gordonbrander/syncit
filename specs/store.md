@@ -120,7 +120,7 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 | `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.store`; functions are generic over the vaults they are given |
 | `src/config.rs` | `remotes` |
 | `src/output.rs` | `Context.secret_key` |
-| `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--only` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
+| `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--include` and `--exclude` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
 
 ## 4. Storage: one store, on a backend
 
@@ -362,10 +362,10 @@ read this vault from another computer, and they are not shown again.
 
 A URL with no `format` fails with `no vault at <url>: run syncit init <url>`.
 
-**`syncit clone <vault> <dir> [--only <path>]…`.** `<vault>` is a target: a nickname in the vault the command runs in, a URL or a path. Two forms, told apart by the flag, as for `get`:
+**`syncit clone <vault> <dir> [--include <path>]… [--exclude <path>]…`.** `<vault>` is a target: a nickname in the vault the command runs in, a URL or a path. Two forms, told apart by the flags, as for `get`:
 
-- Without `--only`: unchanged for a path. The vault is found by walking up from it, and the new vault includes the sub-folder the path names, or everything if the path is the vault's root. A URL is always a whole vault, so the new vault includes everything.
-- With `--only`, which may be given more than once: `<vault>` is a URL or the root of a vault, and the new vault includes exactly the paths given, each from that vault's root, written with `/` and validated with `entry::valid_path`. A path below a vault's root together with `--only` is an error that says to give the root. This is how part of a remote vault is cloned: `syncit clone s3://bucket/archive ~/Archive --only photos/2024 --only music`.
+- With neither flag: unchanged for a path. The vault is found by walking up from it, and the new vault includes the sub-folder the path names, or everything if the path is the vault's root. A URL is always a whole vault, so the new vault includes everything.
+- With `--include` or `--exclude`, each of which may be given more than once: `<vault>` is a URL or the root of a vault. The new vault includes the paths given to `--include`, or everything if there are none, and excludes the paths given to `--exclude`. Each path is from that vault's root, written with `/` and validated with `entry::valid_path`. Each excluded path must lie inside an included one and not be one (`SPEC.md`, section 11, "Flags that narrow a command"). A path below a vault's root together with either flag is an error that says to give the root. This is how part of a remote vault is cloned: `syncit clone s3://bucket/archive ~/Archive --include photos/2024 --include music`.
 
 Either way: create the vault in `<dir>`, record the source in `remotes` under its nickname if that name is free (for a URL this is `remote add`, which finds or asks for the key), then `pull` from it. `get --from` adds more later.
 
@@ -374,7 +374,7 @@ Either way: create the vault in `<dir>`, record the source in `remotes` under it
 - `syncit get <paths>…`: unchanged. Each argument is a filesystem path inside another vault's folder, and the vault is found by walking up from it.
 - `syncit get <paths>… --from <target>`: the vault is the target (a nickname, a URL or a path), and each argument is a path from that vault's root, written with `/` and validated with `entry::valid_path`. This is the only form that reaches a remote vault.
 
-The rest is `get` as it is: include the prefixes, then pull.
+Both take `--exclude <path>`, written as the paths of that form are. The rest is `get` as it is: include the prefixes, then pull.
 
 **`sync`, `push`, `pull`, `move`, `status --vs`, `drop --check`** take a target. No other change: they run the same code with a bare peer (section 7). The target stays required.
 
@@ -420,7 +420,7 @@ No test uses the real keychain or the network. Tests pass a phrase in `Context.s
 | `remote_hostile` | a garbage object, a valid object copied to another name, and a truncated blob are rejected or left pending; objects under names the key did not make are ignored; the rest of the run completes |
 | `known_segments_stay_put` | a vault that has a remote's segments syncs with it though the remote's copies cannot be read; a vault that lacks them reports them `rejected` |
 | `remote_by_nickname` | `sync origin`, `sync <url>` and `sync ./origin` (a folder) each reach the right vault; `clone`, run in the vault, resolves the nickname of a remote and of a folder vault |
-| `clone_only` | `clone <url> <dir> --only a --only b/c` gives a vault that includes those two paths and has only their files; the same against a folder vault's root; a later `get --from` adds a third; a path below a vault's root with `--only` is refused and nothing is created |
+| `clone_include_exclude` | `clone <url> <dir> --include a --include b/c` gives a vault that includes those two paths and has only their files; the same against a folder vault's root; a later `get --from` adds a third; `--exclude b` alone gives everything else, and `--include b --exclude b/d` a folder less a sub-folder, with nothing excluded fetched; an exclude outside the includes, or equal to one, is refused; a path below a vault's root with either flag is refused and nothing is created |
 | `get_from_remote` | a partial vault runs `get music --from origin`; the folder arrives and stays included; nothing else is downloaded. `--from` with a folder vault's path gives the same result as the inferred form |
 | `move_to_remote` | files are removed here only when the remote has their content; a remote that excludes them refuses |
 | `partial_remote` | a remote whose `include` is one folder takes only that folder's blobs, and `push` warns about the rest as it does for a folder |
@@ -440,7 +440,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_file`.
 4. **The remote backends and `init <url>`.** `Bucket`, `Sealed`, `format`, the encrypted `config`. Test: `init_remote`.
 5. **Bare vaults in a run.** `Bare`, the derived rows, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
-6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
+6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --include`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_include_exclude`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
 7. **A real bucket.** Run `cloud_remote` against MinIO or a real bucket and fix what differs from `file://`.
 8. **Documents.** `SPEC.md`, `PRD.md` and `CRDT.md` already describe this design as not built. When it is built: in `SPEC.md`, remove the "Not built" notes in sections 8, 10 and 14, tick milestone 9, drop the "not built yet" entry in section 17 and record there anything built differently; in `PRD.md`, remove "Stores are not built yet". Add a README section: remotes, the phrase and its warning, credentials by environment variable, the macOS keychain prompt after reinstalling, the multipart lifecycle rule.
 
