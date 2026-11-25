@@ -13,7 +13,7 @@ There is one kind of thing: a vault. A **store** is not a second kind of thing. 
 - **Bare.** It has no working folder. The content of its current versions lives in `blobs/`, where an ordinary vault keeps only history.
 - **Remote.** Its log, blobs and config sit on untrusted object storage, so they are encrypted and reached through an object API, not the filesystem.
 
-In this version a vault reached by a URL is both bare and remote, and a vault reached by a path is neither. The code keeps the two properties apart (a flag, and the backend a vault is stored on, section 4) so that neither leaks into the other.
+In this version a vault reached by a URL is both bare and remote, and a vault reached by a path is neither. The code keeps the two properties apart, as the two type parameters of `Vault<B, W>` (section 4): `B` is the backend it is stored on and `W` is its working dir, or none. Neither leaks into the other.
 
 Because a store is a vault, `sync`, `push`, `pull`, `move`, `get`, `clone`, `status --vs`, `drop --check`, `compact` and `config` mean what they already mean. There is no automatic upload, no `flush`, and no `sync` without a target.
 
@@ -108,14 +108,14 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 
 | File | Change |
 |---|---|
-| `src/backend.rs` | the `Backend` trait, bytes at paths, and `Fs`, a vault folder's `.syncit/` |
-| `src/storage.rs` | `Store`: a vault's config, log and blobs, and where each is on its backend |
-| `src/remote.rs` | `Bucket`, the object-storage backend, and the credentials for it |
+| `src/backend.rs` | the `Backend` trait, bytes at paths, and `Fs`, a vault folder's `.syncit/`, which holds the vault's lock |
+| `src/storage.rs` | `Store<B>`: a vault's config, log and blobs, and where each is on its backend |
+| `src/remote.rs` | `Bucket`, the object-storage backend, the credentials for it, and `backend(url)`, which makes a remote's `Sealed<Bucket>` |
 | `src/sealed.rs` | `Sealed`, a backend that encrypts names and contents on top of another, and the `format` file |
 | `src/crypt.rs` | key derivation, name encryption, stream encryption. No I/O beyond `Read` and `Write` |
 | `src/keys.rs` (new) | phrase and key; keychain, environment and `secrets.toml` |
-| `src/vault.rs` | `Vault` holds `storage: Store`, `bare: bool` and a display `name`; opening by target |
-| `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.storage` |
+| `src/vault.rs` | `Vault<B, W>`, the `Worktree` trait with `Dir` and `Bare`, and `Target` (section 4) |
+| `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.store`; functions are generic over the vaults they are given |
 | `src/config.rs` | `remotes` |
 | `src/output.rs` | `Context.secret_key` |
 | `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--only` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
@@ -156,7 +156,7 @@ Paths are relative, `/`-separated, and name files only: a folder exists while it
 
 A read that finds something other than what was written (changed, cut short, or put there by someone else) fails with the error `Unreadable`, which is told apart from a backend that cannot be reached.
 
-**`Store` is a vault's state on a backend.** There is one, for every vault. It holds the layout, which is the same everywhere:
+**`Store<B>` is a vault's state on the backend `B`.** There is one, for every vault, and it owns its backend. It holds the layout, which is the same everywhere:
 
 ```
 config              the vault's config
@@ -171,13 +171,26 @@ and these operations: `load_config`, `save_config`; `segment_names`, `read_segme
 - **Sizes are asked for one at a time**: by `read_blob`, to refuse a blob larger than `max` before reading it, and by `drop_blobs_except`, for the bytes it reports. On a remote each is a request. `// ponytail:` take sizes from the listing if compacting a remote is too slow.
 - **Verified here.** `get_blob` and `read_blob` check the content's hash, whatever the backend. A blob that is absent, `Unreadable` or wrong is not to be had: the answer is false, and the path that needs it is `pending`.
 - **A segment is read as it is stored**, not validated; the caller validates it (`CRDT.md`, "Validation"). An `Unreadable` one is reported as `rejected`, as a corrupt one is.
-- **A segment is the same wherever it is stored.** It is immutable and named by its hash, so any copy will do. `Log::load` is given the local vault's store when it reads a remote's log, and reads from there every segment that vault already has. Only segments new to this vault are fetched. A store on a backend that is not a folder keeps the segments it has read, so that a run that reads one twice (to load the log, then to copy it) fetches it once.
-- Working files are not storage. `Vault.hints` and the file sources in `blobs.rs` stay where they are. `blobs::fetch` tries, in order: this vault's working files, this vault's storage, the peer's working files, the peer's storage.
+- **A segment is the same wherever it is stored.** It is immutable and named by its hash, so any copy will do. `Log::load` is given the local vault's store when it reads a remote's log, and reads from there every segment that vault already has. Only segments new to this vault are fetched, and the log keeps their bytes (`Log.fetched`), so that the run copies them into the local vault without fetching them again.
+- Working files are not storage. They belong to the vault's working dir (`Dir.hints`), not its store. `blobs::fetch` tries, in order: this vault's working files, this vault's storage, the peer's working files, the peer's storage.
 - `Config::load` and `save` are `Store` on the vault's folder.
 
 **Scratch files.** `Sealed` puts ciphertext on its way in or out beside the local file it was given, as `<file>.sealed`, and removes it. That file is in a vault's `.syncit/tmp` or is a `.syncit-tmp-` file of a working folder, so it is never in the system temp directory and a scan never takes it for a file of the vault.
 
-**Not built: an encrypted vault in a folder.** It is `Store` on `Sealed` on `Fs`, and needs no new storage code: only a way to make and open one.
+**A vault is `Vault<B, W>`**: a name for people, a `Store<B>`, the config and log read from it, and `work: W`, its files.
+
+| | Type |
+|---|---|
+| A vault in a folder | `Vault<Fs, Dir>` |
+| A remote | `Vault<Sealed<Bucket>, Bare>` |
+
+- **`W` is a `Worktree`: `Dir` or `Bare`.** `Dir` is a working dir: its root, dirstate, ignore file, and which files may hold which content. `Bare` is none: only the rows derived from the log and blobs (section 7). The trait is everything that differs between the two: the rows, what is ignored, the files that can supply content, the dir if there is one, and what scan, materialise, `--no-remove` and the end of a retain do.
+- **A function says what it needs.** One that works on any vault takes `Vault<impl Backend, impl Worktree>`; one that reads or writes files takes `Vault<impl Backend, Dir>`, and cannot be given a bare vault. Nothing is boxed.
+- **`Fs` owns the lock.** `Fs::open` finds the vault folder and holds its lock while it lives; `Fs::at` points at a folder without locking, to read another vault's config or to make a vault. `Bucket` has no lock, as object storage has none.
+- **A target is parsed once**, into `Target::Dir` or `Target::Url`, with a nickname already looked up. Each command that takes one matches on it, opens that vault (`Vault::open` for a dir, `Vault::bare` on `remote::backend(url)` for a URL) and calls one generic body.
+- **A vault has no role.** Which vault a command runs in is in the `Context`, and the arrow of an event is looked up there by the vault's name. What a run sent to a bare vault and received from it is counted in the `Summary`. Files in transit go through the `.syncit/tmp` of whichever vault of the run has a dir.
+
+**Not built: an encrypted vault in a folder.** It is `Vault<Sealed<Fs>, Bare>`, and needs no new storage code: only a way to make and open one.
 
 ## 5. Layout of a remote vault
 
@@ -253,12 +266,12 @@ What the provider can still see: how many objects there are, their sizes, when t
 
 ## 7. A bare vault
 
-`Vault.bare` is true for a vault opened by URL. In a bare vault:
+A vault opened by URL is a `Vault<_, Bare>` (section 4). In a bare vault:
 
 - **Scan** does nothing and records nothing.
 - **Retain is how content arrives.** `blobs::retain` collects every hash in `Log::keep(keep_history, takes)` that its storage lacks. `keep` always includes the heads, so a bare vault holds the current version of every path it includes, plus `keep_history` versions back. The early return for `keep_history == Some(0)` applies only to vaults with a working folder.
 - **Materialise** does nothing. It writes no files, no conflict copies and no merges.
-- **The dirstate is derived, not stored.** After the log is loaded, and again after `retain`, a bare vault's rows are: for each path it includes whose winner is a live entry with a stored blob, a row with that entry's hash, `exec` and `mtime`, and its id as `base`. With this rule `move`'s arrival check, `excluded()`, `status --vs` and `drop --check` need no branch for bare vaults. In a dry run `retain` stores nothing, so a blob counts as stored if a source could supply it (`blobs::available`); a dry `move` then reports what the real one does.
+- **Its rows are derived, not stored.** After the log is loaded, and again after `retain`, a bare vault's rows (`Bare.rows`) are: for each path it includes whose winner is a live entry with a stored blob, a row with that entry's hash, `exec` and `mtime`, and its id as `base`. With this rule `move`'s arrival check, `excluded()`, `status --vs` and `drop --check` need no branch for bare vaults. In a dry run `retain` stores nothing, so a blob counts as stored if a source could supply it (`blobs::available`): `retain` hands the rows the hashes that would have arrived. A dry `move` then reports what the real one does.
 - **No lock, no ignore file.** `takes(path)` is `includes(path)` and the `.syncit` and scratch-name rules.
 - **Compaction** is the same code: `drop_blobs_except(Log::keep(keep_history, |_| true))`.
 
@@ -423,7 +436,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 2. **`crypt`.** The `remote` and `keychain` features of section 2 are declared here, with the first optional dependencies, and CI gains its second and third jobs (section 14). Tests: `crypt_round_trip`, `crypt_rejects`, `names_open`.
 3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_file`.
 4. **The remote backends and `init <url>`.** `Bucket`, `Sealed`, `format`, the encrypted `config`. Test: `init_remote`.
-5. **Bare vaults in a run.** `Vault.bare`, the derived dirstate, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
+5. **Bare vaults in a run.** `Bare`, the derived rows, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
 6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
 7. **A real bucket.** Run `cloud_remote` against MinIO or a real bucket and fix what differs from `file://`.
 8. **Documents.** `SPEC.md`, `PRD.md` and `CRDT.md` already describe this design as not built. When it is built: in `SPEC.md`, remove the "Not built" notes in sections 8, 10 and 14, tick milestone 9, drop the "not built yet" entry in section 17 and record there anything built differently; in `PRD.md`, remove "Stores are not built yet". Add a README section: remotes, the phrase and its warning, credentials by environment variable, the macOS keychain prompt after reinstalling, the multipart lifecycle rule.
