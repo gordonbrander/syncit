@@ -7,7 +7,7 @@ use crate::log::Log;
 use crate::output::{Context, Event, Message, Summary, print_stdout};
 use crate::storage::Store;
 use anyhow::{Context as _, Result, anyhow};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,6 +33,28 @@ pub struct Vault {
     pub ignore: Ignore,
     /// Hash to working files that may have it. A hint: every use is verified.
     pub hints: HashMap<String, Vec<PathBuf>>,
+}
+
+/// Another vault, as a command names it.
+pub enum Target {
+    /// A dir in the vault.
+    Dir(PathBuf),
+    /// The URL of a remote vault.
+    Url(String),
+}
+
+impl Target {
+    /// What `arg` names: the location `remotes` has under that nickname, or
+    /// else `arg` itself.
+    pub fn parse(arg: &Path, remotes: Option<&BTreeMap<String, String>>) -> Target {
+        let text = arg.to_str();
+        let location = text.and_then(|t| remotes?.get(t).map(String::as_str));
+        match location.or(text) {
+            Some(text) if text.contains("://") => Target::Url(text.to_string()),
+            Some(text) => Target::Dir(PathBuf::from(text)),
+            None => Target::Dir(arg.to_path_buf()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -159,11 +181,7 @@ impl Vault {
     /// locked.
     #[cfg(feature = "remote")]
     pub fn open_url(ctx: &Context, url: &str, local: Option<&Vault>) -> Result<Vault> {
-        use crate::remote::{Bucket, credentials};
-        let bucket = Bucket::new(url, credentials(ctx, url)?)?;
-        let check = crate::sealed::check(&bucket, url)?;
-        let (key, _) = crate::keys::find(ctx, url, &check)?;
-        let storage = bucket.store(key);
+        let storage = Store::new(url, Box::new(crate::remote::backend(ctx, url)?));
         let config = storage.load_config()?;
         storage.list()?;
         let mut vault = Vault {

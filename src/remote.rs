@@ -2,10 +2,8 @@
 //! reached by URL, and the credentials for it.
 
 use crate::backend::Backend;
-use crate::crypt::Key;
 use crate::output::Context;
 use crate::sealed::Sealed;
-use crate::storage::Store;
 use anyhow::{Context as _, Result, anyhow, ensure};
 use futures::TryStreamExt;
 use object_store::path::Path as ObjectPath;
@@ -24,6 +22,15 @@ pub struct Bucket {
     store: Box<dyn ObjectStore>,
     root: String,
     rt: tokio::runtime::Runtime,
+}
+
+/// The backend of the remote vault at `url`: its bucket, sealed with its
+/// key, which is found as store.md, section 8 says.
+pub fn backend(ctx: &Context, url: &str) -> Result<Sealed<Bucket>> {
+    let bucket = Bucket::new(url, credentials(ctx, url)?)?;
+    let check = crate::sealed::check(&bucket, url)?;
+    let (key, _) = crate::keys::find(ctx, url, &check)?;
+    Ok(Sealed::new(bucket, key))
 }
 
 fn not_found(e: &object_store::Error) -> bool {
@@ -152,12 +159,6 @@ impl Bucket {
             stream.try_next().await
         });
         Ok(first.map_err(|e| self.fail(e))?.is_none())
-    }
-
-    /// The encrypted vault here, whose key is `key`.
-    pub fn store(self, key: Key) -> Store {
-        let url = self.url.clone();
-        Store::new(&url, Box::new(Sealed::new(self, key)))
     }
 
     fn put(&self, rel: &str, bytes: Vec<u8>) -> Result<()> {

@@ -2132,6 +2132,7 @@ mod remote {
     use syncit::crypt::Key;
     use syncit::keys;
     use syncit::remote::Bucket;
+    use syncit::sealed::Sealed;
 
     /// Context with a phrase. Every remote test starts here, so that the
     /// keychain is the mock one, never the machine's.
@@ -2183,7 +2184,8 @@ mod remote {
         assert!(syncit::entry::is_hash(check), "{format}");
         let stored = fs::read(r.join(config)).unwrap();
         assert!(!stored.windows(6).any(|w| w == b"origin"));
-        let config = Bucket::new(&url(&r), vec![]).unwrap().store(key);
+        let bucket = Bucket::new(&url(&r), vec![]).unwrap();
+        let config = Store::new("r", Box::new(Sealed::new(bucket, key)));
         let config = config.load_config().unwrap();
         assert_eq!(
             (config.include, config.keep_history, config.autocompact),
@@ -2242,7 +2244,8 @@ mod remote {
 
     fn configure_remote(target: &Path, change: impl FnOnce(&mut Config)) {
         let target = target.to_str().unwrap();
-        let r = Bucket::new(target, vec![]).unwrap().store(key());
+        let bucket = Bucket::new(target, vec![]).unwrap();
+        let r = Store::new(target, Box::new(Sealed::new(bucket, key())));
         let mut config = r.load_config().unwrap();
         change(&mut config);
         r.save_config(&config).unwrap();

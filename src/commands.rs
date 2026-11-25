@@ -14,7 +14,7 @@ use crate::output::{
 use crate::scan::{Scan, deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
 use crate::storage::Store;
-use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
+use crate::vault::{TMP_PREFIX, Target, Vault, find_root, relative, resolve_path, unique};
 use anyhow::{Context as _, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,7 +98,8 @@ pub fn init_remote(
         ..Config::new(String::new(), nickname)
     };
     crate::sealed::create(&bucket, &key)?;
-    bucket.store(key.clone()).save_config(&config)?;
+    let sealed = crate::sealed::Sealed::new(bucket, key.clone());
+    Store::new(url, Box::new(sealed)).save_config(&config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
     print_stdout(ctx, &Message::Info { message });
     if !generated {
@@ -147,13 +148,13 @@ pub fn clone(
 ) -> Result<Summary> {
     vault_paths(only)?;
     let local = Vault::open(ctx, cwd, true).ok();
-    let src = &resolve(local.as_ref(), src);
+    let src = Target::parse(src, local.as_ref().map(|v| &v.config.remotes));
     std::mem::drop(local); // it may be the source, which is locked
-    let (source, include) = match url(src) {
-        Some(_) if only.is_empty() => (src.to_path_buf(), vec![String::new()]),
-        Some(_) => (src.to_path_buf(), only.to_vec()),
-        None => {
-            let src = resolve_path(src)?;
+    let (source, include) = match src {
+        Target::Url(url) if only.is_empty() => (PathBuf::from(url), vec![String::new()]),
+        Target::Url(url) => (PathBuf::from(url), only.to_vec()),
+        Target::Dir(src) => {
+            let src = resolve_path(&src)?;
             let root = find_root(&src)?;
             let sub = relative(&root, &src)?;
             ensure!(
@@ -204,47 +205,34 @@ fn nested(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// A target names another vault: a URL, or a path.
-fn url(target: &Path) -> Option<&str> {
-    target.to_str().filter(|t| t.contains("://"))
+/// Open the remote vault at `url`, for a command run in `local`.
+#[cfg(feature = "remote")]
+fn open_url(ctx: &Context, local: Option<&Vault>, url: &str) -> Result<Vault> {
+    Vault::open_url(ctx, url, local)
 }
 
-/// A target after the local vault's `remotes`: a nickname there is replaced
-/// by its location.
-fn resolve(local: Option<&Vault>, target: &Path) -> PathBuf {
-    let location = target.to_str().and_then(|t| local?.config.remotes.get(t));
-    location.map_or_else(|| target.to_path_buf(), PathBuf::from)
-}
-
-/// Open the vault a target names, for a command run in `local`.
-fn open_target(ctx: &Context, local: Option<&Vault>, target: &Path) -> Result<Vault> {
-    match url(target) {
-        #[cfg(feature = "remote")]
-        Some(url) => Vault::open_url(ctx, url, local),
-        #[cfg(not(feature = "remote"))]
-        Some(_) => {
-            let _ = local;
-            Err(no_remote())
-        }
-        None => Vault::open(ctx, target, false),
-    }
+#[cfg(not(feature = "remote"))]
+fn open_url(_: &Context, _: Option<&Vault>, _: &str) -> Result<Vault> {
+    Err(no_remote())
 }
 
 /// Open another vault for a run with `v`.
 fn other(ctx: &Context, v: &mut Vault, target: &Path) -> Result<Vault> {
-    let target = &resolve(Some(v), target);
-    if url(target).is_none() {
-        ensure!(
-            target.exists(),
-            "no vault at {}: not a folder, a URL or the name of a remote",
-            target.display()
-        );
-        ensure!(
-            !nested(&find_root(target)?, &v.root),
-            "cannot sync a vault with itself or with a vault inside it"
-        );
+    match Target::parse(target, Some(&v.config.remotes)) {
+        Target::Url(url) => open_url(ctx, Some(v), &url),
+        Target::Dir(dir) => {
+            ensure!(
+                dir.exists(),
+                "no vault at {}: not a folder, a URL or the name of a remote",
+                dir.display()
+            );
+            ensure!(
+                !nested(&find_root(&dir)?, &v.root),
+                "cannot sync a vault with itself or with a vault inside it"
+            );
+            Vault::open(ctx, &dir, false)
+        }
     }
-    open_target(ctx, Some(v), target)
 }
 
 /// The context of a run with two vaults, `ours` being the one it runs in.
@@ -862,10 +850,9 @@ pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Res
     vault_paths(paths)?;
     {
         let mut v = Vault::open(ctx, cwd, true)?;
-        let target = resolve(Some(&v), from);
-        if url(&target).is_none() {
+        if let Target::Dir(dir) = Target::parse(from, Some(&v.config.remotes)) {
             ensure!(
-                !nested(&find_root(&target)?, &v.root),
+                !nested(&find_root(&dir)?, &v.root),
                 "cannot get files from this vault or a vault inside it"
             );
         }
@@ -881,12 +868,11 @@ fn open_vault(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<Vault> 
         return Vault::open(ctx, cwd, true);
     };
     let local = Vault::open(ctx, cwd, true).ok();
-    let target = resolve(local.as_ref(), target);
-    match url(&target) {
-        Some(_) => open_target(ctx, local.as_ref(), &target),
-        None => {
+    match Target::parse(target, local.as_ref().map(|v| &v.config.remotes)) {
+        Target::Url(url) => open_url(ctx, local.as_ref(), &url),
+        Target::Dir(dir) => {
             std::mem::drop(local); // it may be the target, which is locked
-            Vault::open(ctx, &target, true)
+            Vault::open(ctx, &dir, true)
         }
     }
 }
@@ -992,7 +978,8 @@ fn find_remote(ctx: &Context, url: &str) -> Result<(Config, Found)> {
         Err(e) if !std::io::stdin().is_terminal() => return Err(e),
         Err(_) => (keys::prompt(url, &check)?, Source::New),
     };
-    let config = bucket.store(found.0.clone()).load_config()?;
+    let sealed = crate::sealed::Sealed::new(bucket, found.0.clone());
+    let config = Store::new(url, Box::new(sealed)).load_config()?;
     Ok((config, found))
 }
 
