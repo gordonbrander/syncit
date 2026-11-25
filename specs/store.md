@@ -160,7 +160,7 @@ A read that finds something other than what was written (changed, cut short, or 
 **`Store<B>` is a vault's state on the backend `B`.** There is one, for every vault, and it owns its backend. It holds the layout, which is the same everywhere:
 
 ```
-version             the layout version (section 14)
+format              what the vault is: its layout version (section 14)
 config              the vault's config
 log/<name>          a segment, named by its SHA-256
 blobs/<ab>/<hash>   a blob, in a folder named by the first 2 chars of its hash
@@ -197,8 +197,7 @@ and these operations: `open`, which refuses a vault that is not at this build's 
 ## 5. Layout of a remote vault
 
 ```
-<url>/format                          plaintext, one line: {"check":"<64 hex>","syncit":1}
-<url>/E(version)                      the layout version (section 14)
+<url>/format                          plaintext, one line: {"check":"<64 hex>","syncit":2}
 <url>/E(config)                       the vault's config
 <url>/E(log)/E(<name>)                a segment
 <url>/E(blobs)/E(<ab>)/E(<hash>)      a blob
@@ -209,7 +208,7 @@ This is the layout of section 4 on a sealed backend: `E(x)` is the name `x`, enc
 - A name that the vault's key did not make is not one of the vault's files. It is left out of every listing and never touched.
 - Segments and blobs are immutable and written whole. A blob that exists is not written again.
 - `config` is the same JSON as `.syncit/config`, and is the one file that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
-- `format` is canonical JSON, keys in alphabetical order. `syncit` other than 1 is refused. `check` lets a wrong key be told from a damaged store. It is the one file read before the key is known, so it is the one file `Sealed` does not encrypt.
+- `format` is canonical JSON, keys in alphabetical order. `syncit` is the layout version (section 14), as in every vault. `check` lets a wrong key be told from a damaged store. It is the one file read before the key is known, so it is the one file `Sealed` does not encrypt: `Sealed` stores it under its own name, as it is.
 - A prefix with objects but no `format` is not a vault and is refused, untouched.
 - syncit never creates a bucket or a directory. A `file://` directory that does not exist is an error, and syncit must check for it itself (section 2).
 - A remote made before names were encrypted this way (2026-11-25) cannot be read: make a new one with `init` and push to it.
@@ -446,15 +445,17 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 
 ## 14. Migrations (`migrate.rs`)
 
-A vault's **layout** is which files it has on its backend and what is in them. It has a number, in the `version` file at the backend's root: `.syncit/version` in a folder, `E(version)` in a remote. The file holds the number as text and a newline. A vault with no `version` file is at layout 1.
+A vault's **layout** is which files it has on its backend and what is in them. It has one number, the `syncit` of its `format` file:
 
-Three numbers are versioned separately, because they version different things:
+```
+.syncit/format     {"syncit":2}                       a vault in a folder
+<url>/format       {"check":"<64 hex>","syncit":2}    a sealed vault
+```
 
-| Number | Versions | Changes by |
-|---|---|---|
-| `version` | the layout: everything above the backend | a migration |
-| `format`'s `syncit` | the sealing: how names and contents are encrypted (section 6). It is below `Sealed`, where a migration does not reach | not built |
-| a segment header's `syncit` | the segment format (`CRDT.md`). Segments are immutable and replicated, so they are never rewritten in place | a new segment version, read beside the old |
+- `format` is a JSON object in canonical form, at the backend's root, and plaintext on every backend, so that it can be read before anything else about the vault is understood: by a build that does not know the layout, and before the key is known.
+- **One number versions everything in the vault**: the files above the backend, and in a sealed vault the sealing too (section 6).
+- A vault with no `format`, or one without `syncit`, is at layout 1. A folder at layout 1 has none; a remote at layout 1 has `"syncit":1`.
+- A segment header's `syncit` is a different thing: the version of the segment format (`CRDT.md`). Segments are immutable and replicated, so they are never rewritten in place, and a new segment format is read beside the old.
 
 **Every layout change is in `migrate.rs`**, and nowhere else. No other code reads an old layout.
 
@@ -466,10 +467,10 @@ pub fn migrate(b: &impl Backend, name: &str) -> Result<u32>   // bring it to VER
 fn step(b: &impl Backend, from: u32) -> Result<()>       // one `match`: 1 => to_2(b), …
 ```
 
-- **A migration is a function on a backend**: `fn to_N(b: &impl Backend) -> Result<()>`. It has the whole backend (section 4), so it can rework anything `Store` or the dirstate reads, and it is the same function for a folder and a remote. A file only a folder has, such as `dirstate`, is reached the same way; a migration takes a missing one as nothing to do.
+- **A migration is a function on a backend**: `fn to_N(b: &impl Backend) -> Result<()>`. A change to the sealing is not built: it would need the backend below `Sealed`, and the key. It has the whole backend (section 4), so it can rework anything `Store` or the dirstate reads, and it is the same function for a folder and a remote. A file only a folder has, such as `dirstate`, is reached the same way; a migration takes a missing one as nothing to do.
 - **It reads old files as bytes or untyped JSON**, never through `Config`, `Store` or another type of the current build, so it keeps working when those change.
 - **It is safe to stop at any change and run again from the top.** Two things hold it to that:
-  - Only the runner writes `version`, after a step returns. A run that stops leaves the vault at the version whose step it was in.
+  - Only the runner writes the version, after a step returns. A run that stops leaves the vault at the version whose step it was in.
   - The test `every_step_survives_a_stop` takes every step in turn, stops it at its first change, its second, and so on (a test backend that fails at the `n`th write, move or remove), runs it again, and requires the same files as a run that was not stopped. A new step is tested by it as soon as it has an arm in `step`.
 - **To change the layout**: write `to_N`, add its arm to `step`, raise `VERSION`.
 - **There is no way back** to an older layout.
@@ -477,7 +478,7 @@ fn step(b: &impl Backend, from: u32) -> Result<()>       // one `match`: 1 => to
 
 **Who migrates** (the rule is in `SPEC.md`, section 5, "version"):
 
-- `Store::open` calls `check`, so no code reads an existing vault's files at the wrong layout. `Store::create` writes the config, then `version`.
+- `Store::open` calls `check`, so no code reads an existing vault's files at the wrong layout. `Store::create` writes the config, then the version.
 - The vault a command runs in is migrated before its store is opened: in `Vault::open` when `local`, and in `own_store` for the commands that read only settings. It holds its lock.
 - A peer or a remote is opened without migrating, so one that is behind is refused by `check`. `syncit migrate <vault>` migrates it. A folder is locked first. A remote has no lock: two machines migrating it at once write the same bytes, since a step depends only on what is there and every file is written whole.
 
@@ -486,7 +487,7 @@ fn step(b: &impl Backend, from: u32) -> Result<()>       // one `match`: 1 => to
 | Layout | Change |
 |---|---|
 | 1 | as first built. The version is the config's `syncit` field |
-| 2 | the version is the `version` file, and the config has no `syncit` |
+| 2 | the version is in `format`, in every vault, and the config has no `syncit` |
 
 Tests: `every_step_survives_a_stop` and `every_step_survives_a_stop_sealed` (the rules above, on a folder and on a sealed folder: a layout 1 vault migrates and keeps every setting; again is nothing; a newer vault is refused untouched; no step is harmed by a stop), `migrates_own_vault`, `migrate_other_vault`, `migrate_remote` (an old remote is refused by `sync`, `clone` and `config --vault` and not changed; migrated from outside any vault; then they work).
 

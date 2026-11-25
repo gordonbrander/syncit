@@ -13,19 +13,38 @@ use anyhow::{Context as _, Result, bail, ensure};
 /// The layout this build reads and writes.
 pub const VERSION: u32 = 2;
 
-/// The layout version of the vault on `b`: what its `version` file says. A
-/// vault made before there was one is at version 1.
-pub fn version(b: &impl Backend) -> Result<u32> {
-    let Some(bytes) = b.read("version")? else {
-        return Ok(1);
+/// The file that says what a vault is: a JSON object whose `syncit` is the
+/// layout version. It is plaintext on every backend, so it can be read
+/// before anything else is understood; a sealed vault's also has the `check`
+/// of its key (`sealed.rs`).
+pub const FORMAT: &str = "format";
+
+/// The fields of the vault's `format`; none if it has no such file.
+fn format(b: &impl Backend) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let Some(bytes) = b.read(FORMAT)? else {
+        return Ok(Default::default());
     };
-    let version = std::str::from_utf8(&bytes).ok().map(str::trim);
-    let version = version.and_then(|text| text.parse().ok());
-    version.filter(|v| *v > 0).context("corrupt version")
+    serde_json::from_slice(&bytes).context("corrupt format")
 }
 
+/// The layout version of the vault on `b`: the `syncit` of its `format`. A
+/// vault made before that was there is at version 1.
+pub fn version(b: &impl Backend) -> Result<u32> {
+    match format(b)?.get("syncit") {
+        None => Ok(1),
+        Some(version) => {
+            let version = version.as_u64().and_then(|v| u32::try_from(v).ok());
+            version.filter(|v| *v > 0).context("corrupt format")
+        }
+    }
+}
+
+/// Canonical JSON: keys in alphabetical order, one line.
 fn set_version(b: &impl Backend, version: u32) -> Result<()> {
-    b.write("version", format!("{version}\n").as_bytes())
+    let mut format = format(b)?;
+    format.insert("syncit".to_string(), version.into());
+    let text = serde_json::to_string(&format)? + "\n";
+    b.write(FORMAT, text.as_bytes())
 }
 
 /// Mark the new vault on `b` as having this build's layout.
@@ -52,7 +71,7 @@ pub fn check(b: &impl Backend, name: &str) -> Result<()> {
 }
 
 /// Bring the vault on `b` up to `VERSION`. Returns the version it was at.
-/// Only this writes `version`, and only after a step is done, so a run that
+/// Only this writes the version, and only after a step is done, so a run that
 /// stops leaves the vault at the version whose step it was in, to be run
 /// again.
 pub fn migrate(b: &impl Backend, name: &str) -> Result<u32> {
@@ -91,7 +110,7 @@ fn step(b: &impl Backend, from: u32) -> Result<()> {
 }
 
 /// 1 to 2: the version leaves the config, where it was the field `syncit`,
-/// for the `version` file, so that the config's own format can change.
+/// for `format`, so that the config's own format can change.
 fn to_2(b: &impl Backend) -> Result<()> {
     let bytes = b.read("config")?.context("it has no config")?;
     let mut config: serde_json::Value = serde_json::from_slice(&bytes).context("corrupt config")?;
@@ -215,7 +234,10 @@ mod tests {
         assert_eq!(version(&b).unwrap(), VERSION);
         check(&b, "v").unwrap();
         let after = files(&b);
-        assert_eq!(after["version"], format!("{VERSION}\n").as_bytes());
+        assert_eq!(
+            after[FORMAT],
+            format!("{{\"syncit\":{VERSION}}}\n").as_bytes()
+        );
         let json = |text: &[u8]| serde_json::from_slice::<serde_json::Value>(text).unwrap();
         let mut expected = json(CONFIG_1.as_bytes());
         expected.as_object_mut().unwrap().remove("syncit");
@@ -239,7 +261,7 @@ mod tests {
             assert!(refused.contains("upgrade syncit"), "{refused}");
         }
         assert_eq!(files(&b), before);
-        b.write("version", b"two").unwrap();
+        b.write(FORMAT, b"{\"syncit\":\"two\"}").unwrap();
         assert!(check(&b, "v").is_err() && migrate(&b, "v").is_err());
 
         // Not a vault.

@@ -4,43 +4,33 @@
 
 use crate::backend::{Backend, Unreadable};
 use crate::crypt::{self, Key};
-use anyhow::{Context, Result, bail, ensure};
-use serde::{Deserialize, Serialize};
+use crate::migrate::FORMAT;
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-/// The plaintext `format` file: the one thing read before the key is known.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Format {
-    check: String,
-    syncit: u32,
-}
-
 /// The `check` in the `format` of the vault stored on `inner`, which tells
-/// its key from another. `name` is the vault's, for errors.
+/// its key from another. `format` is the one file read before the key is
+/// known, so it is the one file that is not encrypted. `name` is the
+/// vault's, for errors.
 pub fn check(inner: &impl Backend, name: &str) -> Result<String> {
-    let Some(bytes) = inner.read("format")? else {
+    let Some(bytes) = inner.read(FORMAT)? else {
         bail!("no vault at {name}: run syncit init {name}");
     };
-    let format: Format =
-        serde_json::from_slice(&bytes).with_context(|| format!("{name}: corrupt format"))?;
-    let version = format.syncit;
-    ensure!(version == 1, "{name} has format version {version}, not 1");
-    Ok(format.check)
+    let format: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+    let check = format
+        .as_ref()
+        .and_then(|format| format.get("check")?.as_str());
+    let check = check.with_context(|| format!("{name}: corrupt format"))?;
+    Ok(check.to_string())
 }
 
-/// Write the `format` of a new vault whose key is `key`.
+/// Write the `format` of a new vault whose key is `key`: its `check`. The
+/// layout version is added to it when the vault is made (`Store::create`).
 pub fn create(inner: &impl Backend, key: &Key) -> Result<()> {
-    let format = Format {
-        check: crypt::check(key),
-        syncit: 1,
-    };
-    inner.write(
-        "format",
-        (serde_json::to_string(&format)? + "\n").as_bytes(),
-    )
+    let format = serde_json::json!({ "check": crypt::check(key) });
+    inner.write(FORMAT, (format.to_string() + "\n").as_bytes())
 }
 
 /// The backend `B`, with every name and every file encrypted with `key`.
@@ -61,8 +51,12 @@ impl<B: Backend> Sealed<B> {
         Sealed { inner, key }
     }
 
-    /// Where `path` is stored: each of its names, encrypted.
+    /// Where `path` is stored: each of its names, encrypted. `format` is
+    /// stored as it is.
     fn hide(&self, path: &str) -> String {
+        if path == FORMAT {
+            return path.to_string();
+        }
         let names = path.split('/').filter(|name| !name.is_empty());
         let hidden: Vec<String> = names
             .map(|name| crypt::seal_name(&self.key, name))
@@ -72,6 +66,9 @@ impl<B: Backend> Sealed<B> {
 
     /// The path stored as `hidden`; None if it is not one of this vault's.
     fn show(&self, hidden: &str) -> Option<String> {
+        if hidden == FORMAT {
+            return Some(hidden.to_string());
+        }
         let names = hidden.split('/');
         let shown: Option<Vec<String>> = names.map(|n| crypt::open_name(&self.key, n)).collect();
         Some(shown?.join("/"))
@@ -80,6 +77,9 @@ impl<B: Backend> Sealed<B> {
 
 impl<B: Backend> Backend for Sealed<B> {
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        if path == FORMAT {
+            return self.inner.read(path);
+        }
         let Some(sealed) = self.inner.read(&self.hide(path))? else {
             return Ok(None);
         };
@@ -95,12 +95,18 @@ impl<B: Backend> Backend for Sealed<B> {
     }
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        if path == FORMAT {
+            return self.inner.write(path, bytes);
+        }
         let mut sealed = vec![];
         crypt::encrypt(&crypt::content_key(&self.key, path), bytes, &mut sealed)?;
         self.inner.write(&self.hide(path), &sealed)
     }
 
     fn copy_to(&self, path: &str, dest: &Path) -> Result<bool> {
+        if path == FORMAT {
+            return self.inner.copy_to(path, dest);
+        }
         let sealed = beside(dest);
         if !self.inner.copy_to(&self.hide(path), &sealed)? {
             return Ok(false);
@@ -122,6 +128,9 @@ impl<B: Backend> Backend for Sealed<B> {
     }
 
     fn move_to(&self, src: &Path, path: &str) -> Result<()> {
+        if path == FORMAT {
+            return self.inner.move_to(src, path);
+        }
         let sealed = beside(src);
         let key = crypt::content_key(&self.key, path);
         let moved = File::open(src)
@@ -142,6 +151,9 @@ impl<B: Backend> Backend for Sealed<B> {
     /// The size of the plaintext.
     fn size(&self, path: &str) -> Result<Option<u64>> {
         let size = self.inner.size(&self.hide(path))?;
+        if path == FORMAT {
+            return Ok(size);
+        }
         Ok(size.map(|size| crypt::plain_len(size).unwrap_or(size)))
     }
 
@@ -250,11 +262,24 @@ mod tests {
         assert_eq!(check(&inner, "there").unwrap(), crypt::check(&key(1)));
         let format = tmp.path().join(".syncit/format");
         let text = fs::read_to_string(&format).unwrap();
-        assert!(text.starts_with("{\"check\":\"") && text.ends_with("\",\"syncit\":1}\n"));
-        fs::write(&format, text.replace(":1}", ":2}")).unwrap();
-        let newer = check(&inner, "there").unwrap_err().to_string();
-        assert_eq!(newer, "there has format version 2, not 1");
-        fs::write(&format, "junk").unwrap();
-        assert!(check(&inner, "there").is_err());
+        assert!(text.starts_with("{\"check\":\"") && text.ends_with("\"}\n"));
+        // It is the one file a sealed backend stores as it is, and the
+        // layout version goes into it beside the check.
+        let s = Sealed::new(Fs::at(tmp.path()), key(1));
+        assert_eq!(s.read(FORMAT).unwrap().unwrap(), text.as_bytes());
+        crate::migrate::create(&s).unwrap();
+        let text = fs::read_to_string(&format).unwrap();
+        let version = crate::migrate::VERSION;
+        assert!(
+            text.ends_with(&format!("\",\"syncit\":{version}}}\n")),
+            "{text}"
+        );
+        assert_eq!(check(&inner, "there").unwrap(), crypt::check(&key(1)));
+        assert!(s.list("").unwrap().contains(FORMAT));
+        assert_eq!(s.size(FORMAT).unwrap(), Some(text.len() as u64));
+        for junk in ["junk", "{\"syncit\":2}"] {
+            fs::write(&format, junk).unwrap();
+            assert!(check(&inner, "there").is_err(), "{junk}");
+        }
     }
 }

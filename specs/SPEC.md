@@ -167,7 +167,7 @@ pub struct Loser { pub hash: String, pub mtime: i64, pub exec: bool }
 ```
 <vault>/
   .syncit/
-    version   # the layout version, as text: "2"
+    format    # what the vault is: {"syncit":2}, its layout version
     config    # JSON, local
     dirstate     # JSON, local
     lock      # empty file, locked while a command runs
@@ -179,9 +179,9 @@ pub struct Loser { pub hash: String, pub mtime: i64, pub exec: bool }
 
 Every file written under `.syncit/` is written to `.syncit/tmp/` first and renamed into place.
 
-### version
+### format
 
-The number of the layout: which files there are and what is in them (`R25`). This document describes layout 2. A vault with no `version` file is at layout 1, which kept the number in the config as `"syncit": 1`. The number is in a file of its own so that every other file, the config included, can change format.
+`{"syncit":2}`: the number of the layout, which is which files there are and what is in them (`R25`). This document describes layout 2. A vault with no `format` is at layout 1, which kept the number in the config as `"syncit": 1`. The number is in a file of its own so that every other file, the config included, can change format. A remote's `format` is the same file with one more field (`store.md`, section 5).
 
 - **The vault a command runs in** (the one at the current directory, or the folder `--vault` names) is brought up to the build's layout when it is opened, under its lock, by `status` and a dry run too. One `info` line on stderr says so.
 - **Any other vault** (the peer of a run, or a remote) that is behind is refused, with a message that names `syncit migrate <vault>`. It may be used by machines with an older syncit, which a migration locks out, so it is changed only on purpose.
@@ -503,7 +503,7 @@ Save the dirstate once, after all paths, if materialise changed it.
 
 `sync`, `push` and `pull` share one procedure. "Receiver" means both vaults for `sync`, the peer for `push`, the local vault for `pull`.
 
-1. Open both vaults. Refuse if they are the same folder, if one is inside the other (a run would copy the outer vault into the inner, one level deeper each time), or if either is not at this build's layout (section 5, "version"). Lock both.
+1. Open both vaults. Refuse if they are the same folder, if one is inside the other (a run would copy the outer vault into the inner, one level deeper each time), or if either is not at this build's layout (section 5, "format"). Lock both.
 2. Scan the local vault, then the peer (section 7). Both scan in every mode, so each vault's changes are recorded from its own dirstate.
 3. Exchange segments: each receiver takes every segment in the other vault's `log/` whose name it lacks. A segment is read, validated as in `CRDT.md`, and only then written into `log/`. A segment that fails is not stored, is reported as `rejected`, and does not stop the run.
 4. Each receiver reloads its log.
@@ -572,7 +572,7 @@ The vault is found by walking up from the current directory to the first folder 
 | `syncit log [path]...` | See below. (`R26`) |
 | `syncit restore [--in-place] <path> <hash>` | See below. (`R26`) |
 | `syncit compact [--dry-run]` | See below. (`R15`) |
-| `syncit migrate [<vault>]` | Bring a vault up to this build's layout (section 5, "version"): the one named, a path, a URL or a nickname, or else the one here. A folder is locked first. Prints `migrated <vault> from format version N to M`, or `<vault> is at format version M`. (`R25`) |
+| `syncit migrate [<vault>]` | Bring a vault up to this build's layout (section 5, "format"): the one named, a path, a URL or a nickname, or else the one here. A folder is locked first. Prints `migrated <vault> from format version N to M`, or `<vault> is at format version M`. (`R25`) |
 | `syncit config [keep-history <n>\|all]` | See below. (`R15`) |
 | `syncit config autocompact on\|off` | See below. (`R15`) |
 | `syncit config nickname <name>` | See below. |
@@ -904,7 +904,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `config_command` | `config` prints the settings; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
 | (remote vaults) | the tests listed in `store.md`, section 12: `crypt_*`, `names_open`, the backend and `sealed_*` tests, `phrase_round_trip`, `key_lookup_order`, `secrets_file`, `credentials_match` and `credentials_errors` in `src/`, the rest in the `remote` module of `tests/stories.rs` and in `cli_smoke` |
-| `version_mismatch` | a vault whose `version` is ahead of the build is refused, as a peer and as the vault a command runs in |
+| `version_mismatch` | a vault whose `format` is ahead of the build is refused, as a peer and as the vault a command runs in |
 | `migrates_own_vault` | a command in a layout 1 vault brings it to the current layout, one that reads only settings too |
 | `migrate_other_vault` | a layout 1 peer is refused and not changed; `migrate` brings it up to date, by path and by nickname; `migrate` with no vault is the one here |
 | `cli_smoke` | the built binary runs every command and returns the documented exit codes; results are on stdout and warnings and errors on stderr; with `--json` every line of both streams is an object with a `type`, and the last stdout line of a run is the summary; `push` to a partial vault warns and `sync` does not |
@@ -1019,7 +1019,7 @@ Record here anything built differently from these documents, with the reason.
   - `remote add` with a path needs the root of a vault. A target that is no nickname, no URL and no existing path fails with `no vault at <target>: not a folder, a URL or the name of a remote`, where it used to fail in the nesting check.
   - A remote segment that cannot be decrypted is listed like any other, so the run reports it as `rejected` as it would a corrupt segment. An object under a name the key did not make is not the vault's, and is ignored.
   - **One store, on a backend (2026-11-25).** As first built, storage was a `Storage` trait with two whole implementations, a folder and an encrypted bucket, and a remote's object names were a one-way keyed hash. A listing could then not be read back, so the remote implementation was handed the local vault, fetched every segment it did not know in order to name it, and borrowed the local `.syncit/tmp`. Names are now encrypted reversibly, which let encryption become a backend like any other and left one `Store` for every vault (`store.md`, sections 4 to 6). A folder vault is stored exactly as before. The layout of a remote changed, and one made before this cannot be read. `corrupt config` and a missing config are reported by the vault's folder, not the config file's path.
-  - **Migrations (2026-11-25).** The layout version was `"syncit": 1` in the config, checked where the config was read, and a vault at any other version was refused for good. It is now the `version` file, and `migrate.rs` holds every change from one layout to the next (`store.md`, section 14). Layout 2 is that change. A build from before this reports a layout 2 vault as `corrupt config`, not as a newer version; from layout 2 on, an older build says `upgrade syncit`.
+  - **Migrations (2026-11-25).** The layout version was `"syncit": 1` in the config, checked where the config was read, and a vault at any other version was refused for good. It is now the `syncit` of the `format` file, which every vault has and a remote already had, and `migrate.rs` holds every change from one layout to the next (`store.md`, section 14). Layout 2 is that change. A build from before this reports a layout 2 folder as `corrupt config`, and a layout 2 remote as `format version 2, not 1`; from layout 2 on, an older build says `upgrade syncit`.
   - **Vaults as types (2026-11-25).** `Store` first held its backend in a `Box<dyn Backend>`, and `Vault` was one struct for every vault, with a `bare` flag, placeholder working-folder fields in a bare vault, its side of the run and its traffic counts. A vault is now `Vault<B, W>`: its backend and its working dir, or none, are its types, and nothing is boxed (`store.md`, section 4). The lock belongs to `Fs`. Nothing on disk and nothing printed changed, but for one line: a dry run now counts the segment its scan would write, so `would send … N segments` equals what the real run reports.
   - The `sent …` and `received …` lines count distinct blobs and segments. In a dry run, received files are those a dry run finds only in the remote; history that a real `retain` would download is not counted.
 

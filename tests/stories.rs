@@ -1801,14 +1801,23 @@ fn nested_vault_is_ordinary_files() {
 }
 
 /// Make the vault on `b` what version 1 made: the version in the config,
-/// and no `version` file.
+/// and a `format` only if it is sealed, which says version 1.
 fn to_version_1(b: &impl Backend) {
-    let bytes = b.read("config").unwrap().unwrap();
-    let mut config: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let json = |path: &str| -> serde_json::Value {
+        serde_json::from_slice(&b.read(path).unwrap().unwrap()).unwrap()
+    };
+    let mut config = json("config");
     config["syncit"] = 1.into();
     let text = serde_json::to_string_pretty(&config).unwrap();
     b.write("config", text.as_bytes()).unwrap();
-    b.remove("version").unwrap();
+    let mut format = json("format");
+    match format.get("check") {
+        None => b.remove("format").unwrap(),
+        Some(_) => {
+            format["syncit"] = 1.into();
+            b.write("format", format.to_string().as_bytes()).unwrap();
+        }
+    }
 }
 
 #[test]
@@ -1819,10 +1828,8 @@ fn migrates_own_vault() {
     assert!(Config::load(&a).is_err(), "not read as it is");
     // Any command in the vault brings it up to date, a dry one too.
     assert!(status(&a).is_empty());
-    assert_eq!(
-        fs::read_to_string(a.join(".syncit/version")).unwrap(),
-        "2\n"
-    );
+    let format = fs::read_to_string(a.join(".syncit/format")).unwrap();
+    assert_eq!(format, "{\"syncit\":2}\n");
     let after = Config::load(&a).unwrap();
     assert_eq!(
         (after.include, after.keep_history),
@@ -1874,7 +1881,7 @@ fn migrate_other_vault() {
 #[test]
 fn version_mismatch() {
     let (_tmp, a, b) = pair(&[("f.txt", "v1")]);
-    fs::write(a.join(".syncit/version"), "3\n").unwrap();
+    fs::write(a.join(".syncit/format"), "{\"syncit\":3}\n").unwrap();
     put(&a, "f.txt", "v2", 1);
     for result in [
         cmd::sync(&O, &b, &a),
@@ -2250,15 +2257,11 @@ mod remote {
         assert_eq!(words.split(' ').count(), 24);
         let key = keys::parse_phrase(&words).unwrap();
         let config = syncit::crypt::seal_name(&key, "config");
-        let version = syncit::crypt::seal_name(&key, "version");
-        assert_eq!(
-            names(&r),
-            BTreeSet::from([config.clone(), version, "format".into()])
-        );
+        assert_eq!(names(&r), BTreeSet::from([config.clone(), "format".into()]));
         let format = fs::read_to_string(r.join("format")).unwrap();
         let check = format
             .strip_prefix(r#"{"check":""#)
-            .and_then(|f| f.strip_suffix("\",\"syncit\":1}\n"))
+            .and_then(|f| f.strip_suffix("\",\"syncit\":2}\n"))
             .unwrap();
         assert!(syncit::entry::is_hash(check), "{format}");
         let stored = fs::read(r.join(config)).unwrap();
@@ -2288,15 +2291,15 @@ mod remote {
         assert!(cmd::init_remote(&given, &url(&missing), None, false).is_err());
         assert!(!missing.exists(), "syncit never creates a directory");
 
-        // A format other than version 1 is refused.
+        // A vault from a newer syncit is refused.
         fs::write(
             s.join("format"),
-            format.replace("\"syncit\":1", "\"syncit\":2"),
+            format.replace("\"syncit\":2", "\"syncit\":3"),
         )
         .unwrap();
-        let bucket = Bucket::new(&url(&s), vec![]).unwrap();
-        let err = syncit::sealed::check(&bucket, "s").unwrap_err();
-        assert!(err.to_string().contains("format version 2"), "{err}");
+        let s = PathBuf::from(url(&s));
+        let err = cmd::config(&given, tmp.path(), Some(&s), None).unwrap_err();
+        assert!(err.to_string().contains("upgrade syncit"), "{err}");
     }
 
     /// The phrase every remote in these tests is made with.
