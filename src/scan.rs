@@ -74,6 +74,8 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
 
     let mut dirstate = v.dirstate.clone();
     let mut out = Scan::default();
+    // Files on disk that the config does not include yet.
+    let mut excluded = vec![];
     // New files, `(path, hash)`, to pair with deletions into moves.
     let mut added = vec![];
     // For `Scan::cache`: rows to refresh, rows to smudge, and whether a
@@ -84,6 +86,10 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
     let progress = Progress::new(&ctx.bar, "scanning", files.len());
     for path in &files {
         progress.tick();
+        // A file on disk is included, whether or not the vault knew it.
+        if !v.config.includes(path) {
+            excluded.push(path);
+        }
         let file = v.root.join(path);
         let row = dirstate.rows.get(path).cloned();
         let meta = file.symlink_metadata().ok();
@@ -212,10 +218,8 @@ pub fn scan(ctx: &Context, v: &mut Vault, dry: bool) -> Result<Scan> {
 
     out.moves = moves(&deleted, &added);
 
-    // A file on disk is included, whether or not the vault knew it.
     // Shortest first, so one dragged-in folder yields one include.
     let mut config = v.config.clone();
-    let mut excluded: Vec<_> = files.iter().filter(|p| !config.includes(p)).collect();
     excluded.sort_by_key(|p| p.len());
     excluded.iter().for_each(|p| config.auto_include(p));
 
