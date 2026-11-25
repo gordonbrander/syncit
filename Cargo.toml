@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Two-way sync and partial replication between folders"
-exclude = [".claude-plugin/", "scripts/", "skills/"]
+license = "MIT"
+repository = "https://github.com/gordonbrander/syncit"
+readme = "README.md"
+keywords = ["sync", "backup", "replication", "files", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+exclude = [".claude-plugin/", ".github/", "docs/", "scripts/", "skills/"]
 
 [features]
 default = ["remote", "keychain"]
