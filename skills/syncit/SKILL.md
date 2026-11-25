@@ -105,7 +105,7 @@ syncit restore --in-place notes.txt 3f9a    # replace the file with that version
 ### Keep only part of a large archive
 
 ```sh
-syncit clone /Volumes/Backup/Archive ~/Archive --only photos/2024 --only music
+syncit clone /Volumes/Backup/Archive ~/Archive --include photos/2024 --include music
 cd ~/Archive
 syncit status --all --vs /Volumes/Backup/Archive   # what is here, what is only there
 syncit get /Volumes/Backup/Archive/video           # bring in another folder

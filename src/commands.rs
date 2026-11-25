@@ -42,12 +42,14 @@ enum Mode {
     Pull,
 }
 
-/// Make `dir` a vault that includes `include`, nicknamed after the folder.
-fn create(dir: &Path, include: Vec<String>) -> Result<Config> {
+/// Make `dir` a vault that includes `include` and excludes `exclude`,
+/// nicknamed after the folder.
+fn create(dir: &Path, include: Vec<String>, exclude: Vec<String>) -> Result<Config> {
     let folder = resolve_path(dir)?;
     let folder = folder.file_name().unwrap_or_default().to_string_lossy();
     let config = Config {
         include,
+        exclude,
         ..Config::new(String::new(), default_nickname(&folder))
     };
     for sub in ["log", "blobs", "tmp"] {
@@ -64,7 +66,7 @@ pub fn init(ctx: &Context, dir: &Path) -> Result<()> {
         "{} is already a vault",
         dir.display()
     );
-    let config = create(dir, vec![String::new()])?;
+    let config = create(dir, vec![String::new()], vec![])?;
     let message = format!(
         "Vault initialized: {}\nNickname: {}",
         resolve_path(dir)?.display(),
@@ -150,26 +152,47 @@ fn vault_paths(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Each of `inner`, the paths given to `flag`, must lie inside one of `outer`
+/// and not be one of them.
+fn inside(flag: &str, inner: &[String], outer: &[String]) -> Result<()> {
+    for path in inner {
+        let holds = |o: &String| o != path && prefix_matches(o, path);
+        ensure!(
+            outer.iter().any(holds),
+            "{flag} {path} is not inside a path it applies to"
+        );
+    }
+    Ok(())
+}
+
 /// Make `dir` a vault with the files of the vault `src`: a URL, a path in a
-/// vault, or a nickname in the vault at `cwd`. Without `only`, it includes
-/// the sub-folder the path names, or everything. With it, `src` is a URL or
-/// a vault's root, and it includes exactly those paths. The source is
-/// remembered in `remotes`, then pulled.
+/// vault, or a nickname in the vault at `cwd`. With neither `include` nor
+/// `exclude`, it includes the sub-folder the path names, or everything. With
+/// either, `src` is a URL or a vault's root, and it includes those paths, or
+/// everything, less the excluded ones. The source is remembered in
+/// `remotes`, then pulled.
 pub fn clone(
     ctx: &Context,
     cwd: &Path,
     src: &Path,
     dir: &Path,
-    only: &[String],
+    include: &[String],
+    exclude: &[String],
     save_key: bool,
 ) -> Result<Summary> {
-    vault_paths(only)?;
+    vault_paths(include)?;
+    vault_paths(exclude)?;
+    let filtered = !include.is_empty() || !exclude.is_empty();
+    let given = match include.is_empty() {
+        true => vec![String::new()],
+        false => include.to_vec(),
+    };
+    inside("--exclude", exclude, &given)?;
     let local = Vault::open(ctx, cwd, true).ok();
     let src = Target::parse(src, local.as_ref().map(|v| &v.config.remotes));
     std::mem::drop(local); // it may be the source, which is locked
     let (source, include) = match src {
-        Target::Url(url) if only.is_empty() => (PathBuf::from(url), vec![String::new()]),
-        Target::Url(url) => (PathBuf::from(url), only.to_vec()),
+        Target::Url(url) => (PathBuf::from(url), given),
         Target::Dir(src) => {
             let src = resolve_path(&src)?;
             let root = find_root(&src)?;
@@ -179,20 +202,20 @@ pub fn clone(
                 "cannot clone a vault into itself"
             );
             ensure!(
-                only.is_empty() || sub.is_empty(),
-                "{} is inside the vault {}: with --only, give the vault's root",
+                !filtered || sub.is_empty(),
+                "{} is inside the vault {}: with --include or --exclude, give the vault's root",
                 src.display(),
                 root.display()
             );
-            match only.is_empty() {
-                true => (root, vec![sub]),
-                false => (root, only.to_vec()),
+            match filtered {
+                false => (root, vec![sub]),
+                true => (root, given),
             }
         }
     };
     let empty = !dir.exists() || dir.read_dir()?.next().is_none();
     ensure!(empty, "{} exists and is not empty", dir.display());
-    create(dir, include)?;
+    create(dir, include, exclude.to_vec())?;
     let location = source.to_str().context("the source is not UTF-8")?;
     let added =
         Vault::open(ctx, dir, true).and_then(|mut v| add(ctx, &mut v, location, None, save_key));
@@ -920,8 +943,9 @@ fn prefixes(root: &Path, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<String>> {
 
 /// Add paths of another vault to this one. Each path lies inside that vault,
 /// whose root is found by walking up, as `clone` does. The paths become
-/// included here, and a pull from that vault fetches them.
-pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
+/// included here, less the paths in `exclude`, which are given the same way,
+/// and a pull from that vault fetches them.
+pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf], exclude: &[PathBuf]) -> Result<Summary> {
     let first = paths.first().context("no path given")?;
     let source = find_root(&cwd.join(first))?;
     for path in paths {
@@ -939,26 +963,41 @@ pub fn get(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Summary> {
             "{} is in this vault: give a path in the vault to get it from",
             first.display()
         );
-        include(&mut v, prefixes(&source, cwd, paths)?)?;
+        let exclude = prefixes(&source, cwd, exclude)?;
+        include(&mut v, prefixes(&source, cwd, paths)?, exclude)?;
     }
     run(ctx, cwd, &source, Mode::Pull)
 }
 
-/// Include `prefixes` in the vault, and save its config.
-fn include(v: &mut Vault<impl Backend, impl Worktree>, prefixes: Vec<String>) -> Result<()> {
+/// Include `prefixes` in the vault, less `exclude`, and save its config.
+/// Nothing is removed: a file already here under `exclude` is undropped.
+fn include(
+    v: &mut Vault<impl Backend, impl Worktree>,
+    prefixes: Vec<String>,
+    exclude: Vec<String>,
+) -> Result<()> {
+    inside("--exclude", &exclude, &prefixes)?;
     for prefix in prefixes {
         v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
         v.config.include.retain(|x| !prefix_matches(&prefix, x));
         v.config.include.push(prefix);
     }
+    v.config.exclude.extend(exclude);
     v.store.save_config(&v.config)
 }
 
 /// `get --from`: add paths of the vault `from`, a target, each given from
 /// that vault's root. This is the form that reaches a remote vault.
-pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Result<Summary> {
+pub fn get_from(
+    ctx: &Context,
+    cwd: &Path,
+    paths: &[String],
+    exclude: &[String],
+    from: &Path,
+) -> Result<Summary> {
     ensure!(!paths.is_empty(), "no path given");
     vault_paths(paths)?;
+    vault_paths(exclude)?;
     {
         let mut v = Vault::open(ctx, cwd, true)?;
         if let Target::Dir(dir) = Target::parse(from, Some(&v.config.remotes)) {
@@ -967,7 +1006,7 @@ pub fn get_from(ctx: &Context, cwd: &Path, paths: &[String], from: &Path) -> Res
                 "cannot get files from this vault or a vault inside it"
             );
         }
-        include(&mut v, paths.to_vec())?;
+        include(&mut v, paths.to_vec(), exclude.to_vec())?;
     }
     run(ctx, cwd, from, Mode::Pull)
 }
@@ -1221,7 +1260,7 @@ fn move_with(
         missing.join(", ")
     );
 
-    remove_here(ctx, v, prefixes, present, "moved", &mut sum)?;
+    remove_here(ctx, v, prefixes, vec![], present, "moved", &mut sum)?;
     report(ctx, &sum, &t);
     Ok(sum)
 }
@@ -1233,20 +1272,23 @@ pub fn drop(
     ctx: &Context,
     cwd: &Path,
     paths: &[PathBuf],
+    keep: &[PathBuf],
     check: Option<&Path>,
     force: bool,
 ) -> Result<Summary> {
     let mut v = Vault::open(ctx, cwd, true)?;
+    let keep = prefixes(&v.worktree.root, cwd, keep)?;
     let prefixes = prefixes(&v.worktree.root, cwd, paths)?;
+    inside("--keep", &keep, &prefixes)?;
     match check.map(|check| Target::parse(check, Some(&v.config.remotes))) {
-        None => drop_with(ctx, &mut v, prefixes, None::<Local>, force),
+        None => drop_with(ctx, &mut v, prefixes, keep, None::<Local>, force),
         Some(Target::Dir(dir)) => {
             let check = open_dir(ctx, &v, &dir)?;
-            drop_with(ctx, &mut v, prefixes, Some(check), force)
+            drop_with(ctx, &mut v, prefixes, keep, Some(check), force)
         }
         Some(Target::Url(url)) => {
             let check = open_url(ctx, Some(&v), &url)?;
-            drop_with(ctx, &mut v, prefixes, Some(check), force)
+            drop_with(ctx, &mut v, prefixes, keep, Some(check), force)
         }
     }
 }
@@ -1255,6 +1297,7 @@ fn drop_with(
     ctx: &Context,
     v: &mut Local,
     prefixes: Vec<String>,
+    keep: Vec<String>,
     mut check: Option<Vault<impl Backend, impl Worktree>>,
     force: bool,
 ) -> Result<Summary> {
@@ -1271,15 +1314,10 @@ fn drop_with(
         record(ctx, c, Some(&*v), &mut sum)?;
     }
 
-    let under = |path: &&String| prefixes.iter().any(|prefix| prefix_matches(prefix, path));
-    let present: Vec<String> = v
-        .worktree
-        .dirstate
-        .rows
-        .keys()
-        .filter(under)
-        .cloned()
-        .collect();
+    let any = |list: &[String], path: &str| list.iter().any(|p| prefix_matches(p, path));
+    let under = |path: &&String| any(&prefixes, path) && !any(&keep, path);
+    let rows = v.worktree.dirstate.rows.keys();
+    let present: Vec<String> = rows.filter(under).cloned().collect();
     if !force {
         let elsewhere = |hash: &String| {
             v.store.has_blob(hash)
@@ -1303,16 +1341,18 @@ fn drop_with(
             sole.join(", ")
         );
     }
-    remove_here(ctx, v, prefixes, present, "dropped", &mut sum)?;
+    remove_here(ctx, v, prefixes, keep, present, "dropped", &mut sum)?;
     Ok(sum)
 }
 
-/// Exclude `prefixes` and remove the `present` files under them from this
-/// vault only, reporting each as `kind`. No deletion is recorded.
+/// Exclude `prefixes`, less the paths in `keep`, and remove the `present`
+/// files from this vault only, reporting each as `kind`. No deletion is
+/// recorded.
 fn remove_here(
     ctx: &Context,
     v: &mut Local,
     prefixes: Vec<String>,
+    keep: Vec<String>,
     present: Vec<String>,
     kind: &'static str,
     sum: &mut Summary,
@@ -1322,6 +1362,7 @@ fn remove_here(
         v.config.exclude.retain(|x| !prefix_matches(&prefix, x));
         v.config.exclude.push(prefix);
     }
+    v.config.include.extend(keep);
     if !ctx.dry_run {
         v.store.save_config(&v.config)?;
     }

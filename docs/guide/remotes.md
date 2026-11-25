@@ -89,7 +89,7 @@ Set up `credentials.toml` there too (step 2), then make a vault from the remote,
 
 ```sh
 syncit clone s3://my-bucket/notes ~/Documents
-syncit clone s3://my-bucket/notes ~/Photos --only photos/2024 --only music
+syncit clone s3://my-bucket/notes ~/Photos --include photos/2024 --include music
 syncit get music --from origin     # later, add more
 ```
 
