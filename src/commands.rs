@@ -9,7 +9,7 @@ use crate::entry::valid_path;
 use crate::log::PathState;
 use crate::materialise::{copy_name, materialise, no_symlinked_parent, prune, write_now};
 use crate::output::{
-    Context, Event, Message, State, Summary, Version, print_states, print_stdout, warn,
+    Context, Event, Message, State, Summary, Traffic, Version, print_states, print_stdout, warn,
 };
 use crate::scan::{Scan, deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
@@ -244,28 +244,34 @@ fn other(ctx: &Context, v: &mut Vault, target: &Path) -> Result<Vault> {
             "cannot sync a vault with itself or with a vault inside it"
         );
     }
-    let mut peer = open_target(ctx, Some(v), target)?;
-    (v.side, peer.side) = ("->", "<-");
-    Ok(peer)
+    open_target(ctx, Some(v), target)
+}
+
+/// The context of a run with two vaults, `ours` being the one it runs in.
+fn sided(ctx: &Context, ours: &Vault) -> Context {
+    Context {
+        ours: Some(ours.name.clone()),
+        ..ctx.clone()
+    }
 }
 
 /// After a run, one line for each vault that is remote: what was sent to
 /// it and received from it.
-fn report(ctx: &Context, vaults: [&Vault; 2]) {
+fn report(ctx: &Context, sum: &Summary, vaults: [&Vault; 2]) {
     for v in vaults.into_iter().filter(|v| v.bare) {
-        let t = v.traffic.borrow();
+        let t = &sum.traffic;
         let lines = [
-            ("send", "sent", "to", &t.sent_files, &t.sent_segments),
+            ("send", "sent", "to", &t.sent_files, t.sent_segments),
             (
                 "receive",
                 "received",
                 "from",
                 &t.received_files,
-                &t.received_segments,
+                t.received_segments,
             ),
         ];
         for (verb, done, to, files, segments) in lines {
-            if files.is_empty() && segments.is_empty() {
+            if files.is_empty() && segments == 0 {
                 continue;
             }
             let verb = if ctx.dry_run {
@@ -273,7 +279,7 @@ fn report(ctx: &Context, vaults: [&Vault; 2]) {
             } else {
                 done.into()
             };
-            let (f, s) = (files.len(), segments.len());
+            let (f, s) = (files.len(), segments);
             let message = format!("{verb} {f} files, {s} segments {to} {}", v.name);
             print_stdout(ctx, &Message::Info { message });
         }
@@ -284,6 +290,7 @@ fn report(ctx: &Context, vaults: [&Vault; 2]) {
 fn run(ctx: &Context, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
     let mut a = Vault::open(ctx, cwd, true)?;
     let mut b = other(ctx, &mut a, peer)?;
+    let ctx = &sided(ctx, &a);
     let mut sum = Summary::default();
     announce(ctx);
     record(ctx, &mut a, Some(&b), &mut sum)?;
@@ -291,7 +298,7 @@ fn run(ctx: &Context, cwd: &Path, peer: &Path, mode: Mode) -> Result<Summary> {
     exchange(ctx, &mut a, &mut b, mode, &mut sum)?;
     autocompact(ctx, &a)?;
     autocompact(ctx, &b)?;
-    report(ctx, [&a, &b]);
+    report(ctx, &sum, [&a, &b]);
     Ok(sum)
 }
 
@@ -394,10 +401,10 @@ fn exchange(
     // before it is replaced. A vault whose log is as it was when it last
     // retained has nothing new to keep.
     if to_b && b.log.entries.len() != retained_b {
-        retain(ctx, b, Some(&*a))?;
+        retain(ctx, b, Some(&*a), sum)?;
     }
     if to_a && a.log.entries.len() != retained_a {
-        retain(ctx, a, Some(&*b))?;
+        retain(ctx, a, Some(&*b), sum)?;
     }
     // A merge replaces two versions. It is made only if a vault receiving in
     // this run keeps history: its `retain` above then has them, so they can
@@ -454,7 +461,7 @@ fn record(ctx: &Context, v: &mut Vault, peer: Option<&Vault>, sum: &mut Summary)
     for path in &scanned.skipped {
         v.event(ctx, sum, "skipped", path, "changed while it was being read");
     }
-    retain(ctx, v, peer)
+    retain(ctx, v, peer, sum)
 }
 
 /// Take every segment the other vault has and this one lacks. A segment is
@@ -475,13 +482,10 @@ pub fn receive(ctx: &Context, v: &mut Vault, from: &Vault, sum: &mut Summary) ->
                     v.storage.write_segment(&name, &bytes)?;
                 }
                 if v.bare {
-                    v.traffic.borrow_mut().sent_segments.insert(name.clone());
+                    sum.traffic.sent_segments += 1;
                 }
                 if from.bare {
-                    from.traffic
-                        .borrow_mut()
-                        .received_segments
-                        .insert(name.clone());
+                    sum.traffic.received_segments += 1;
                 }
                 for (id, e) in segment.entries {
                     v.log.insert(id, e, &segment.nickname);
@@ -491,19 +495,24 @@ pub fn receive(ctx: &Context, v: &mut Vault, from: &Vault, sum: &mut Summary) ->
         }
     }
     // What a dry scan of `from` recorded is in its memory, not in a segment.
-    if ctx.dry_run {
-        absorb(v, from);
+    // A real run sends it as the one segment that scan writes.
+    if ctx.dry_run && absorb(v, from) && v.bare {
+        sum.traffic.sent_segments += 1;
     }
     Ok(())
 }
 
-/// Add every entry of `from`'s log to `v`'s, in memory only.
-fn absorb(v: &mut Vault, from: &Vault) {
+/// Add every entry of `from`'s log to `v`'s, in memory only. Whether any
+/// was new to `v`.
+fn absorb(v: &mut Vault, from: &Vault) -> bool {
+    let mut new = false;
     for (id, e) in &from.log.entries {
+        new |= !v.log.entries.contains_key(id);
         for nickname in &from.log.authors[id] {
             v.log.insert(id.clone(), e.clone(), nickname);
         }
     }
+    new
 }
 
 /// The copies of the open conflict at `path`, as a run names them; None if
@@ -544,7 +553,7 @@ fn conflicts(ctx: &Context, v: &Vault, seen: &mut BTreeSet<String>) {
             vault: v.name.clone(),
             path: path.clone(),
             message,
-            side: v.side,
+            side: ctx.side(&v.name),
         };
         print_stdout(ctx, &conflict);
     }
@@ -1008,6 +1017,7 @@ pub fn move_to(ctx: &Context, cwd: &Path, paths: &[PathBuf], target: &Path) -> R
     let mut v = Vault::open(ctx, cwd, true)?;
     let prefixes = prefixes(&v.root, cwd, paths)?;
     let mut t = other(ctx, &mut v, target)?;
+    let ctx = &sided(ctx, &v);
     let mut sum = Summary::default();
     announce(ctx);
     record(ctx, &mut v, Some(&t), &mut sum)?;
@@ -1054,7 +1064,7 @@ pub fn move_to(ctx: &Context, cwd: &Path, paths: &[PathBuf], target: &Path) -> R
     );
 
     remove_here(ctx, &mut v, prefixes, present, "moved", &mut sum)?;
-    report(ctx, [&v, &t]);
+    report(ctx, &sum, [&v, &t]);
     Ok(sum)
 }
 
@@ -1071,6 +1081,10 @@ pub fn drop(
     let mut v = Vault::open(ctx, cwd, true)?;
     let prefixes = prefixes(&v.root, cwd, paths)?;
     let mut check = check.map(|path| other(ctx, &mut v, path)).transpose()?;
+    let ctx = &match check {
+        Some(_) => sided(ctx, &v),
+        None => ctx.clone(),
+    };
     let mut sum = Summary::default();
     announce(ctx);
     // Unrecorded changes are recorded before anything is removed, and the
@@ -1322,7 +1336,10 @@ pub fn log(ctx: &Context, cwd: &Path, paths: &[PathBuf]) -> Result<Vec<Version>>
                 mtime: e.mtime,
                 nicknames: v.log.authors[id].iter().cloned().collect(),
                 current: winner.as_ref() == Some(id),
-                available: e.hash.as_ref().is_some_and(|h| available(&v, None, h)),
+                available: e
+                    .hash
+                    .as_ref()
+                    .is_some_and(|h| available(&v, None, h, &mut Traffic::default())),
             };
             print_stdout(ctx, &Message::Version(version.clone()));
             found.push(version);

@@ -4,7 +4,7 @@ use crate::blobs::{available, fetch, hash_file, read};
 use crate::dirstate::{Row, TICK_MARGIN_MS, mtime_ms};
 use crate::entry::{Entry, Id, sha256};
 use crate::log::{Loser, PathState};
-use crate::output::{Context, Progress, Summary};
+use crate::output::{Context, Progress, Summary, Traffic};
 use crate::scan::moves;
 use crate::segment;
 use crate::vault::{TMP_PREFIX, Vault, unique};
@@ -54,6 +54,7 @@ fn merged(
     p: &str,
     heads: &[Id],
     winner: &Id,
+    traffic: &mut Traffic,
 ) -> Option<(String, Entry)> {
     let [a, b] = heads else { return None };
     if !mergeable(p) {
@@ -65,8 +66,10 @@ fn merged(
         return None; // the same content twice is not a conflict
     }
     let base = &v.log.entries[&v.log.merge_base(p, a, b)?];
-    let text =
-        |e: &Entry| String::from_utf8(read(v, peer, e.hash.as_ref()?, MERGE_MAX_BYTES)?).ok();
+    let mut text = |e: &Entry| {
+        let bytes = read(v, peer, e.hash.as_ref()?, MERGE_MAX_BYTES, traffic)?;
+        String::from_utf8(bytes).ok()
+    };
     let text = diffy::merge(&text(base)?, &text(w)?, &text(l)?).ok()?;
     let entry = Entry {
         // The bit is merged as the text is: a change on either side is kept.
@@ -217,7 +220,9 @@ fn one(
         }
         return delete(ctx, v, p, heads, pass);
     };
-    let merge = kept.then(|| merged(v, peer, p, &heads, &winner)).flatten();
+    let merge = kept
+        .then(|| merged(v, peer, p, &heads, &winner, &mut sum.traffic))
+        .flatten();
     if let Some((text, entry)) = merge {
         safe(v, p)?;
         let hash = sha256(text.as_bytes());
@@ -270,13 +275,14 @@ fn one(
             );
         }
         let (size, mtime) = if ctx.dry_run {
-            if !available(v, peer, &h) {
+            if !available(v, peer, &h, &mut sum.traffic) {
                 v.event(ctx, sum, "pending", p, UNAVAILABLE);
                 return Ok(());
             }
             (None, w.mtime) // in memory only
         } else {
-            let Some(tmp) = stage(v, p, w.mtime, w.exec, |tmp| fetch(v, peer, &h, tmp))? else {
+            let fill = |tmp: &Path| fetch(v, peer, &h, tmp, &mut sum.traffic);
+            let Some(tmp) = stage(v, p, w.mtime, w.exec, fill)? else {
                 v.event(ctx, sum, "pending", p, UNAVAILABLE);
                 return Ok(());
             };
@@ -348,7 +354,7 @@ fn copies_and_base(
             }
             same
         } else {
-            match write_copy(ctx, v, peer, &c, l) {
+            match write_copy(ctx, v, peer, &c, l, &mut sum.traffic) {
                 Ok(true) => v.event(ctx, sum, "copied", &c, ""),
                 Ok(false) => v.event(ctx, sum, "pending", &c, UNAVAILABLE),
                 Err(e) => v.event(ctx, sum, "skipped", &c, &format!("{e:#}")),
@@ -379,13 +385,15 @@ fn write_copy(
     peer: Option<&Vault>,
     c: &str,
     l: &Loser,
+    traffic: &mut Traffic,
 ) -> Result<bool> {
     ensure!(!v.skips(c), "the conflict copy name is ignored");
     no_symlinked_parent(v, c)?;
     if ctx.dry_run {
-        return Ok(available(v, peer, &l.hash));
+        return Ok(available(v, peer, &l.hash, traffic));
     }
-    let Some(tmp) = stage(v, c, l.mtime, l.exec, |tmp| fetch(v, peer, &l.hash, tmp))? else {
+    let fill = |tmp: &Path| fetch(v, peer, &l.hash, tmp, traffic);
+    let Some(tmp) = stage(v, c, l.mtime, l.exec, fill)? else {
         return Ok(false);
     };
     place(v, &tmp, c, &l.hash)?;
@@ -505,7 +513,8 @@ pub fn write_now(v: &mut Vault, p: &str, h: &str, exec: bool) -> Result<bool> {
         no_symlinked_parent(v, p)?;
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
-    let Some(tmp) = stage(v, p, now, exec, |tmp| fetch(v, None, h, tmp))? else {
+    let fill = |tmp: &Path| fetch(v, None, h, tmp, &mut Traffic::default());
+    let Some(tmp) = stage(v, p, now, exec, fill)? else {
         return Ok(false);
     };
     place(v, &tmp, p, h)?;

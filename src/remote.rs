@@ -332,6 +332,7 @@ mod tests {
             secret_key: None,
             bar: crate::output::bar(false),
             config_dir: Some(dir.to_path_buf()),
+            ours: None,
         }
     }
 

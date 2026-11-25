@@ -16,6 +16,7 @@ static O: LazyLock<Context> = LazyLock::new(|| Context {
     secret_key: None,
     bar: syncit::output::bar(false),
     config_dir: None,
+    ours: None,
 });
 use std::sync::LazyLock;
 use syncit::backend::Fs;
@@ -606,6 +607,7 @@ fn compact_command() {
         secret_key: None,
         bar: syncit::output::bar(false),
         config_dir: None,
+        ours: None,
     };
     let (_tmp, a, b) = pair(&[("f.txt", "v1"), ("c.bin", "c1"), ("d.txt", "d")]);
     configure(&a, |c| c.autocompact = false);
@@ -725,6 +727,7 @@ fn no_remove_keeps_deleted() {
         secret_key: None,
         bar: syncit::output::bar(false),
         config_dir: None,
+        ours: None,
     };
     let files = [
         ("f.txt", "f"),
@@ -1981,6 +1984,7 @@ fn dry_run_matches_real_run() {
         secret_key: None,
         bar: syncit::output::bar(false),
         config_dir: None,
+        ours: None,
     };
     type Run = fn(&Context, &Path, &Path) -> anyhow::Result<Summary>;
     for run in [cmd::sync as Run, cmd::push, cmd::pull] {
@@ -2056,6 +2060,7 @@ fn cp_from_plain_folder() {
         secret_key: None,
         bar: syncit::output::bar(false),
         config_dir: None,
+        ours: None,
     };
     let files = [
         ("same.txt", "s"),
@@ -2145,6 +2150,7 @@ mod remote {
             secret_key: phrase.map(String::from),
             bar: syncit::output::bar(false),
             config_dir: None,
+            ours: None,
         }
     }
 
@@ -2293,6 +2299,7 @@ mod remote {
         let o = Context {
             bar: syncit::output::bar(false),
             config_dir: syncit::output::config_dir(),
+            ours: None,
             ..o()
         };
         cmd::init_remote(&o, &url, None, false).unwrap();
@@ -2657,6 +2664,7 @@ mod remote {
         let saved = &Context {
             bar: syncit::output::bar(false),
             config_dir: Some(tmp.path().join("config")),
+            ours: None,
             ..ctx(None)
         };
         keys::add_saved(saved, second, &phrase()).unwrap();

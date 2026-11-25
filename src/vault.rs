@@ -7,8 +7,7 @@ use crate::log::Log;
 use crate::output::{Context, Event, Message, Summary, print_stdout};
 use crate::storage::Store;
 use anyhow::{Context as _, Result, anyhow};
-use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,25 +27,12 @@ pub struct Vault {
     pub storage: Store,
     /// Scratch space for files in transit.
     pub tmp: PathBuf,
-    /// In a run with a peer, `->` for our vault and `<-` for theirs.
-    pub side: &'static str,
     pub config: Config,
     pub dirstate: Dirstate,
     pub log: Log,
     pub ignore: Ignore,
     /// Hash to working files that may have it. A hint: every use is verified.
     pub hints: HashMap<String, Vec<PathBuf>>,
-    /// What a run moved to and from this vault's storage.
-    pub traffic: RefCell<Traffic>,
-}
-
-/// Blob hashes and segment names, sent to a vault or received from it.
-#[derive(Default)]
-pub struct Traffic {
-    pub sent_files: BTreeSet<String>,
-    pub sent_segments: BTreeSet<String>,
-    pub received_files: BTreeSet<String>,
-    pub received_segments: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -149,10 +135,8 @@ impl Vault {
             log: Log::load(ctx, &storage, None, local)?,
             name: root.display().to_string(),
             bare: false,
-            traffic: RefCell::default(),
             storage,
             tmp: dot.join("tmp"),
-            side: "",
             hints: HashMap::new(),
             root,
             config,
@@ -189,12 +173,10 @@ impl Vault {
             log: Log::load(ctx, &storage, local.map(|v| &v.storage), false)?,
             storage,
             tmp: local.map(|v| v.tmp.clone()).unwrap_or_default(),
-            side: "",
             config,
             dirstate: Dirstate::default(),
             ignore: Ignore::default(),
             hints: HashMap::new(),
-            traffic: RefCell::default(),
         };
         vault.derive(|v, hash| v.storage.has_blob(hash));
         Ok(vault)
@@ -248,7 +230,7 @@ impl Vault {
             path: path.to_string(),
             note: note.to_string(),
             from: None,
-            side: self.side,
+            side: ctx.side(&self.name),
         };
         print_stdout(ctx, &Message::Event(event.clone()));
         sum.record(event);
@@ -262,7 +244,7 @@ impl Vault {
             path: to.to_string(),
             note: String::new(),
             from: Some(from.to_string()),
-            side: self.side,
+            side: ctx.side(&self.name),
         };
         print_stdout(ctx, &Message::Event(event.clone()));
         sum.record(event);
