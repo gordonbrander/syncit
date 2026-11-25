@@ -13,7 +13,7 @@ There is one kind of thing: a vault. A **store** is not a second kind of thing. 
 - **Bare.** It has no working folder. The content of its current versions lives in `blobs/`, where an ordinary vault keeps only history.
 - **Remote.** Its log, blobs and config sit on untrusted object storage, so they are encrypted and reached through an object API, not the filesystem.
 
-In this version a vault reached by a URL is both bare and remote, and a vault reached by a path is neither. The code keeps the two properties apart (a flag and a trait, section 4) so that neither leaks into the other.
+In this version a vault reached by a URL is both bare and remote, and a vault reached by a path is neither. The code keeps the two properties apart (a flag, and the backend a vault is stored on, section 4) so that neither leaks into the other.
 
 Because a store is a vault, `sync`, `push`, `pull`, `move`, `get`, `clone`, `status --vs`, `drop --check`, `compact` and `config` mean what they already mean. There is no automatic upload, no `flush`, and no `sync` without a target.
 
@@ -24,7 +24,7 @@ Every difference in behaviour must follow from one of the two properties:
 | Nothing is scanned; no dirstate file; no `.syncitignore` | bare: these describe a working folder |
 | It never records an entry | bare: entries come from scanning and merging files |
 | "Present" means the blob is stored (section 7) | bare |
-| Content and names are encrypted | remote |
+| Content and names are encrypted | remote: its backend is a sealed one (section 4) |
 | No lock | remote: object storage has none. Safe because log and blob objects are immutable and named by hash |
 | A secret key is needed | remote |
 
@@ -40,7 +40,7 @@ default = ["remote", "keychain"]
 remote = [
     "dep:object_store", "dep:tokio", "dep:futures", "dep:url",
     "dep:chacha20poly1305", "dep:aead-stream", "dep:hkdf", "dep:getrandom",
-    "dep:zeroize", "dep:bip39", "dep:rpassword", "dep:toml_edit",
+    "dep:zeroize", "dep:bip39", "dep:rpassword", "dep:toml_edit", "dep:aes-siv",
 ]
 keychain = [
     "remote", "dep:keyring-core",
@@ -55,6 +55,7 @@ url = { version = "2", optional = true }
 chacha20poly1305 = { version = "0.11", optional = true }
 aead-stream = { version = "0.6", features = ["alloc"], optional = true }
 hkdf = { version = "0.13", optional = true }
+aes-siv = { version = "0.8", optional = true }
 getrandom = { version = "0.4", optional = true }
 zeroize = { version = "1", optional = true }
 bip39 = { version = "3", features = ["zeroize"], optional = true }
@@ -73,14 +74,14 @@ These are added to the dependencies the crate has today. Everything this documen
 
 | Feature | Adds | Without it |
 |---|---|---|
-| `remote` | remote vaults: `remote.rs`, `crypt.rs`, `keys.rs`, `init <url>`, URL targets | the build has today's dependencies. A URL target, or a nickname that names one, fails with `this build has no remote support: install with the remote feature` |
+| `remote` | remote vaults: `remote.rs`, `sealed.rs`, `crypt.rs`, `keys.rs`, `init <url>`, URL targets | the build has today's dependencies. A URL target, or a nickname that names one, fails with `this build has no remote support: install with the remote feature` |
 | `keychain` | the OS keychain as a place for the key. Needs `remote` | the keychain is left out of the search of section 8, and a key is saved only in `secrets.toml`. `SYNCIT_SECRET_KEY` and `secrets.toml` work as specified |
 
 Rules for the features:
 
 - `cargo install` gives the whole tool. `--no-default-features` gives the small one, and `--no-default-features --features remote` a build for a machine with no keychain.
-- The `Storage` trait, `Dir`, `config.remotes`, the `remote` commands and targets that are paths or nicknames of paths are **not** behind a feature. The config format is the same in every build, so a vault made by one build opens in another.
-- The gates are few and at the edges: the `Remote` implementation and the two modules beside it, the place a URL target is opened, `init <url>`, and the keychain entry in the key search. No `#[cfg]` inside the run, the log or the blob code.
+- `Store`, the `Backend` trait, `Fs`, `config.remotes`, the `remote` commands and targets that are paths or nicknames of paths are **not** behind a feature. The config format is the same in every build, so a vault made by one build opens in another.
+- The gates are few and at the edges: the bucket and sealed backends and the two modules beside them, the place a URL target is opened, `init <url>`, and the keychain entry in the key search. No `#[cfg]` inside the run, the log or the blob code.
 - There is no feature for each cloud. S3, GCS and Azure share nearly all their dependencies.
 
 Measured on 2026-11-22, as packages in the whole tree for a Linux build: 38 today; 130 with `remote` limited to `file://`; 189 with the keychain; 231 with S3, and the same with GCS and Azure. S3 brings the only part that compiles C, the TLS provider.
@@ -89,6 +90,7 @@ These were tried on 2026-11-22 in a throwaway crate, on macOS with Rust 1.96: th
 
 - **Stream cipher.** `aead_stream::{EncryptorBE32, DecryptorBE32}` over `chacha20poly1305::XChaCha20Poly1305`, built with `new(key.into(), (&nonce).into())` from a `[u8; 32]` key and a `[u8; 19]` nonce, with `encrypt_next` / `encrypt_last` and `decrypt_next` / `decrypt_last` on `&[u8]`. A wrong key, a changed byte, a cut at a chunk boundary and a short nonce all return errors.
 - **Key derivation.** `Hkdf::<Sha256>::from_prk(&key)` then `expand(info, &mut out)`, with `sha2` 0.11.
+- **Name cipher** (added with the backends, 2026-11-25). `aes_siv::siv::Aes256Siv::new(key.into())` from a `[u8; 64]` key, then `encrypt(headers, plaintext)` and `decrypt(headers, sealed)` with no headers. The output is the plaintext's length plus 16 bytes, and a plaintext shorter than 16 bytes works. `aes-siv` 0.8 uses the `aead` 0.6 and `cipher` 0.5 the stream cipher already brings. Its README says it has had no security audit.
 - **Random bytes.** `getrandom::fill(&mut buf)`.
 - **Phrase.** `Mnemonic::from_entropy(&key)`, `to_string()` (24 words), `Mnemonic::parse_in(Language::English, s)`, `to_entropy()`. A misspelt word is `Error::UnknownWord(index)`, counted from 0; a wrong word from the list is `Error::InvalidChecksum`.
 - **Keychain.** `keyring_core::set_default_store(store)`, with `keyring_core::mock::Store::new()?` in tests and `apple_native_keyring_store::keychain::Store::new()?` on macOS. `Entry::new(service, user)?`, `get_password()`, `set_password()`. A missing item is `Error::NoEntry`. Two entries with the same service and user see the same item.
@@ -106,69 +108,95 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 
 | File | Change |
 |---|---|
-| `src/storage.rs` (new) | the `Storage` trait and `Dir`, the plain-directory implementation: today's `.syncit/` access, moved |
-| `src/remote.rs` (new) | `Remote`, the encrypted object-store implementation |
-| `src/crypt.rs` (new) | key derivation, object names, stream encryption. No I/O beyond `Read` and `Write` |
+| `src/backend.rs` | the `Backend` trait, bytes at paths, and `Fs`, a vault folder's `.syncit/` |
+| `src/storage.rs` | `Store`: a vault's config, log and blobs, and where each is on its backend |
+| `src/remote.rs` | `Bucket`, the object-storage backend, and the credentials for it |
+| `src/sealed.rs` | `Sealed`, a backend that encrypts names and contents on top of another, and the `format` file |
+| `src/crypt.rs` | key derivation, name encryption, stream encryption. No I/O beyond `Read` and `Write` |
 | `src/keys.rs` (new) | phrase and key; keychain, environment and `secrets.toml` |
-| `src/vault.rs` | `Vault` holds `storage: Box<dyn Storage>`, `bare: bool` and a display `name`; opening by target |
+| `src/vault.rs` | `Vault` holds `storage: Store`, `bare: bool` and a display `name`; opening by target |
 | `src/log.rs`, `src/blobs.rs`, `src/scan.rs`, `src/materialise.rs`, `src/commands.rs` | every read or write of a vault's log, blobs or config goes through `v.storage` |
 | `src/config.rs` | `remotes` |
 | `src/output.rs` | `Context.secret_key` |
 | `src/main.rs` | target arguments become strings; `init <url>`; `remote`; `--only` on `clone`; `--from` on `get`; `--vault` on `config` and `compact` |
 
-## 4. The storage trait
+## 4. Storage: one store, on a backend
 
-One interface for where a vault's replicated state lives. Callers speak only in plaintext names and hashes; keyed names and ciphertext never leave `remote.rs`.
+A vault's replicated state is its config, its log and its blobs. There are two layers, and each knows nothing of the other's business.
+
+**A backend is bytes at paths.** It knows nothing about vaults.
 
 ```rust
-pub trait Storage {
-    fn load_config(&self) -> Result<Config>;
-    fn save_config(&self, config: &Config) -> Result<()>;
-
-    /// The names of the segments stored.
-    fn segment_names(&self) -> Result<BTreeSet<String>>;
-    /// A segment's bytes, not validated.
-    fn read_segment(&self, name: &str) -> Result<Vec<u8>>;
-    fn write_segment(&self, name: &str, bytes: &[u8]) -> Result<()>;
-
-    fn has_blob(&self, hash: &str) -> bool;
-    /// Copy the blob to `dest`, verifying its hash. False if it is absent
-    /// or wrong; `dest` is then removed.
-    fn get_blob(&self, hash: &str, dest: &Path) -> io::Result<bool>;
-    /// The blob's bytes if it is stored, verified, and no larger than `max`.
-    fn read_blob(&self, hash: &str, max: u64) -> Option<Vec<u8>>;
-    /// Store the file at `src`, whose hash the caller has verified.
-    fn put_blob(&self, hash: &str, src: &Path) -> Result<()>;
-    /// The stored blobs whose hash is not in `keep`: how many, and their
-    /// bytes. They are removed unless `dry_run`.
-    fn drop_blobs_except(&self, keep: &BTreeSet<String>, dry_run: bool) -> Result<(usize, u64)>;
+pub trait Backend {
+    /// The bytes at `path`; None if nothing is there.
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>>;
+    /// Whole or not at all; replaces what was there.
+    fn write(&self, path: &str, bytes: &[u8]) -> Result<()>;
+    /// Copy what is at `path` to the local file `dest`. False if nothing is
+    /// there, and `dest` is then not made.
+    fn copy_to(&self, path: &str, dest: &Path) -> Result<bool>;
+    /// Move the local file `src` to `path`. `src` is gone afterwards.
+    fn move_to(&self, src: &Path, path: &str) -> Result<()>;
+    /// Not an error if nothing is there.
+    fn remove(&self, path: &str) -> Result<()>;
+    /// The size of what is at `path`; None if nothing is there.
+    fn size(&self, path: &str) -> Result<Option<u64>>;
+    /// Every file under `dir`, by its path relative to `dir`.
+    fn list(&self, dir: &str) -> Result<BTreeSet<String>>;
 }
 ```
 
-The signatures may be adjusted while building, but these rules hold:
+Paths are relative, `/`-separated, and name files only: a folder exists while it holds a file. `copy_to` and `move_to` are there because a blob can be large: it goes from file to file and is never held in memory. `list` gives names and not sizes, because a folder can list its names without looking at a file; `size` is one look at one file, or one request.
 
-- There is no method that lists blob hashes. An encrypted store cannot answer it (section 6), so no caller may need it. `blobs::droppable` and `compact` become `drop_blobs_except`.
+| Backend | Is |
+|---|---|
+| `Fs` | a vault folder's `.syncit/`. `write` goes through `.syncit/tmp/` and a rename; `move_to` is a rename. A path that would leave `.syncit/` is refused. Removing a file removes the folders it leaves empty, except those directly in `.syncit/` |
+| `Bucket` | a prefix in object storage (section 5) |
+| `Sealed` | another backend, with every name and every file encrypted (section 6). It is a backend itself, so what is above it sees plaintext paths and bytes |
+
+A read that finds something other than what was written (changed, cut short, or put there by someone else) fails with the error `Unreadable`, which is told apart from a backend that cannot be reached.
+
+**`Store` is a vault's state on a backend.** There is one, for every vault. It holds the layout, which is the same everywhere:
+
+```
+config              the vault's config
+log/<name>          a segment, named by its SHA-256
+blobs/<ab>/<hash>   a blob, in a folder named by the first 2 chars of its hash
+```
+
+and these operations: `load_config`, `save_config`; `segment_names`, `read_segment`, `write_segment`; `has_blob`, `missing`, `get_blob`, `read_blob`, `put_blob`, `drop_blobs_except`. These rules hold:
+
+- **A folder vault is `Store` on `Fs`; a remote vault is `Store` on `Sealed` on `Bucket`.** Nothing above the backend knows which. A remote is another vault with a different backend, as the idea in section 1 says.
+- **Listed once.** The log and the blobs are each listed on first need and the lists are kept for the rest of the run, added to as the store writes. `has_blob` is a lookup in the list of blobs if there is one, and a look at that one blob (`size`) if not: `missing` and compaction list, and opening a remote lists, so a command that asks about a few blobs of a folder vault, as `log` does, reads no folders. A file under `blobs/` that is not at `<ab>/<hash>` is not a blob.
+- **Sizes are asked for one at a time**: by `read_blob`, to refuse a blob larger than `max` before reading it, and by `drop_blobs_except`, for the bytes it reports. On a remote each is a request. `// ponytail:` take sizes from the listing if compacting a remote is too slow.
+- **Verified here.** `get_blob` and `read_blob` check the content's hash, whatever the backend. A blob that is absent, `Unreadable` or wrong is not to be had: the answer is false, and the path that needs it is `pending`.
+- **A segment is read as it is stored**, not validated; the caller validates it (`CRDT.md`, "Validation"). An `Unreadable` one is reported as `rejected`, as a corrupt one is.
+- **A segment is the same wherever it is stored.** It is immutable and named by its hash, so any copy will do. `Log::load` is given the local vault's store when it reads a remote's log, and reads from there every segment that vault already has. Only segments new to this vault are fetched. A store on a backend that is not a folder keeps the segments it has read, so that a run that reads one twice (to load the log, then to copy it) fetches it once.
 - Working files are not storage. `Vault.hints` and the file sources in `blobs.rs` stay where they are. `blobs::fetch` tries, in order: this vault's working files, this vault's storage, the peer's working files, the peer's storage.
-- `Log::load`, `commands::receive`, the segment writes in `scan.rs` and `materialise.rs`, `Config::load` and `save`, and the blob check in `commands::drop` all go through the trait.
-- `Dir` must behave exactly as the code does today. Milestone 1 is this refactor alone, with the existing tests unchanged and passing.
+- `Config::load` and `save` are `Store` on the vault's folder.
 
-The remote implementation needs a scratch directory for plaintext in transit. It is given the local vault's `.syncit/tmp` at open. It never uses the system temp directory. A command with no local vault (`init <url>`, or `config --vault <url>` run outside one) moves no blobs and needs none.
+**Scratch files.** `Sealed` puts ciphertext on its way in or out beside the local file it was given, as `<file>.sealed`, and removes it. That file is in a vault's `.syncit/tmp` or is a `.syncit-tmp-` file of a working folder, so it is never in the system temp directory and a scan never takes it for a file of the vault.
+
+**Not built: an encrypted vault in a folder.** It is `Store` on `Sealed` on `Fs`, and needs no new storage code: only a way to make and open one.
 
 ## 5. Layout of a remote vault
 
 ```
-<url>/format         plaintext, one line: {"check":"<64 hex>","syncit":1}
-<url>/config         the vault's config, encrypted
-<url>/log/<name>     a segment, encrypted
-<url>/blobs/<ab>/<name>   a blob, encrypted, in a folder named by the first 2 chars of its name
+<url>/format                          plaintext, one line: {"check":"<64 hex>","syncit":1}
+<url>/E(config)                       the vault's config
+<url>/E(log)/E(<name>)                a segment
+<url>/E(blobs)/E(<ab>)/E(<hash>)      a blob
 ```
 
-- `<name>` is 64 lowercase hex characters (section 6). Other names in a listing are ignored.
-- Segments and blobs are immutable and written whole. One that exists is not written again.
-- `config` is the same JSON as `.syncit/config`, and is the one object that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
-- `format` is canonical JSON, keys in alphabetical order. `syncit` other than 1 is refused. `check` lets a wrong key be told from a damaged store.
+This is the layout of section 4 on a sealed backend: `E(x)` is the name `x`, encrypted (section 6), and every file but `format` is encrypted.
+
+- A name that the vault's key did not make is not one of the vault's files. It is left out of every listing and never touched.
+- Segments and blobs are immutable and written whole. A blob that exists is not written again.
+- `config` is the same JSON as `.syncit/config`, and is the one file that is overwritten. Two vaults changing a remote's settings at the same moment: the later write wins.
+- `format` is canonical JSON, keys in alphabetical order. `syncit` other than 1 is refused. `check` lets a wrong key be told from a damaged store. It is the one file read before the key is known, so it is the one file `Sealed` does not encrypt.
 - A prefix with objects but no `format` is not a vault and is refused, untouched.
 - syncit never creates a bucket or a directory. A `file://` directory that does not exist is an error, and syncit must check for it itself (section 2).
+- A remote made before names were encrypted this way (2026-11-25) cannot be read: make a new one with `init` and push to it.
 
 **URLs.**
 
@@ -188,39 +216,40 @@ The remote implementation needs a scratch directory for plaintext in transit. It
 
 **Listing and transfers.**
 
-- Opening a remote lists `log/` and `blobs/` once each (names and sizes) and works from those lists for the rest of the run, adding to them as it writes.
-- `has_blob` is a lookup in the listing.
-- Download: stream to a file in the scratch directory, decrypt from there.
-- Upload: encrypt to a file in the scratch directory. Under 16 MiB, one `put`. Otherwise `put_multipart` with 16 MiB parts, aborted on error.
+- Opening a remote lists its log and its blobs once each and works from those lists for the rest of the run (section 4).
+- Download: stream to the scratch file, decrypt from there.
+- Upload: encrypt to the scratch file. Under 16 MiB, one `put`. Otherwise `put_multipart` with 16 MiB parts, aborted on error.
 - `// ponytail:` transfers are sequential. Parallelise if a large first upload is too slow.
 
 ## 6. Encryption (`crypt.rs`)
 
 The master key `K` is 32 random bytes from `getrandom`, one per remote vault, held in `Zeroizing`.
 
-Everything is derived from `K` with HKDF-SHA256 `expand` (`Hkdf::from_prk(K)`), 32 bytes out:
+Everything is derived from `K` with HKDF-SHA256 `expand` (`Hkdf::from_prk(K)`):
 
-| Value | `info` |
-|---|---|
-| `check` in `format` | `"syncit check"` |
-| object name | `"syncit name " + kind + " " + hash` |
-| object key | `"syncit key " + kind + " " + name` |
-| key for `config` | `"syncit key config"` |
+| Value | `info` | Bytes |
+|---|---|---|
+| `check` in `format` | `"syncit check"` | 32 |
+| key for names | `"syncit names"` | 64 |
+| key for the file at `path` | `"syncit content " + path` | 32 |
 
-`kind` is `log` or `blobs`. `hash` is the plaintext's SHA-256 in hex: the segment's name or the blob's hash, as today. `name` is the object name in hex.
+`path` is the plaintext path of section 4, such as `log/<name>` or `config`.
 
-- **Hash addressed.** An object's name is a function of its content's hash and the key. It can be computed without reading the file.
-- **Keyed.** Without `K`, a name says nothing about the content, so the provider cannot test whether a known file is stored.
-- **One way.** A name cannot be turned back into a hash. This is why the trait has no "list blob hashes".
-- The object key is derived from the object's name, not from the plaintext hash, because a vault downloading a segment it has never seen knows only the name.
+**Names.** Each name in a path is encrypted on its own with AES-256-SIV (RFC 5297, `aes-siv`), with no associated data, and written in lowercase hex: 16 bytes longer than the name, so 160 characters for a hash.
+
+- **Deterministic.** A name always encrypts to the same stored name, so the stored path of a segment or blob can be computed from its hash, without reading anything.
+- **Keyed.** Without `K`, a stored name says nothing about the name, so the provider cannot test whether a known file is stored.
+- **Reversible with `K`.** A listing decrypts back to plaintext paths. This is what lets everything above the backend work in plaintext names (section 4), and what lets a vault know which of a remote's segments it already has without fetching one.
+- **Authenticated.** A stored name the key did not make does not decrypt, and is not one of the vault's files (section 5).
+- The same name encrypts to the same stored name wherever it is in the tree. The provider can see that, and nothing else about it.
+
+**Contents.** The key of a file is derived from its plaintext path, so a file copied or moved to another stored name does not decrypt.
 
 Body of every encrypted object: a 19-byte random nonce, then XChaCha20-Poly1305 in the STREAM construction (`aead-stream`, `EncryptorBE32` and `DecryptorBE32`), plaintext in 64 KiB chunks, the last sealed with `encrypt_last`. Every chunk but the last is exactly 64 KiB. The last holds what remains: 1 byte to 64 KiB, or nothing only when the plaintext is empty, so there is always one last chunk and never an empty one after a full one. An object of `n` plaintext bytes is `19 + n + 16 × max(1, ⌈n / 65536⌉)` bytes long. The nonce is random so that a mistake elsewhere can never reuse a key and nonce with different content.
 
-Decryption fails, without panicking, on a wrong key, a changed byte, a truncated object or a short nonce. Plaintext is written to a scratch file and moved into place only after the whole object has decrypted and its hash has been checked.
+Decryption fails, without panicking, on a wrong key, a changed byte, a truncated object or a short nonce; the backend's error is then `Unreadable` (section 4). A blob's plaintext is written to a scratch file and moved into place only after the whole object has decrypted and its hash has been checked.
 
-**Segment names in a remote.** `segment_names()` must return plaintext names, which the listing does not contain. `Remote` is given the local vault's segment names at open. A listed name equal to `name(K, "log", s)` for a local segment `s` is `s`. Each remaining object is downloaded and decrypted; its name is the SHA-256 of its plaintext, and it is kept only if `name(K, "log", that)` equals the object's name. An object that fails either step is reported as `rejected` and left out. The bytes are held in memory for `read_segment`.
-
-What the provider can still see: how many objects there are, their sizes, and when they were written.
+What the provider can still see: how many objects there are, their sizes, when they were written, and the shape of the tree: which are the config, the segments and the blobs, and how blobs fall into their 256 folders.
 
 ## 7. A bare vault
 
@@ -357,19 +386,23 @@ No test uses the real keychain or the network. Tests pass a phrase in `Context.s
 | Test | Checks |
 |---|---|
 | (existing suite) | passes unchanged after the storage refactor |
+| `fs_backend`, `bucket_backend`, `sealed_backend` | one contract for every backend: nothing there, bytes written and replaced, a file moved in and copied out, sizes, removal, a nested listing. `Fs` also keeps the folders directly in `.syncit/`, and refuses a path that would leave it |
+| `sealed_is_opaque`, `sealed_rejects`, `sealed_format` | a sealed backend stores no plaintext name or content, and another key sees none of it; a file under a name the key did not make is not listed; garbage, a file copied to another name and a truncated one are each `Unreadable` and leave nothing behind; `format` is written, read, and refused at version 2 |
+| `missing_blobs` | a store on a folder: where a blob lands, what is missing, a blob that is not what its name says, compaction, and what under `blobs/` is not a blob |
 | `crypt_round_trip` | empty, 1 byte, 64 KiB − 1, 64 KiB, 64 KiB + 1, 128 KiB and 1 MiB decrypt to the input, and each object has the length section 6 gives |
-| `crypt_rejects` | wrong key, wrong name, wrong kind, a changed byte, truncation at a chunk boundary, a short nonce: each is an error and none panics |
-| `names_are_keyed` | names differ between keys and between kinds, are stable for one key, and are never the plaintext hash |
+| `crypt_rejects` | wrong key, wrong path, a changed byte, truncation at a chunk boundary, a short nonce: each is an error and none panics |
+| `names_open` | a name, long or short, encrypts to the same stored name every time, differently under another key, and opens again; a changed stored name, another key's, and a name no key made do not open |
 | `phrase_round_trip` | 32 bytes to 24 words and back; a misspelt word is named by position; a swapped word is a checksum error |
 | `key_lookup_order` | `Context`, mock keychain, `secrets.toml`: the first whose check matches is used; one that does not match is passed over; none gives the documented error |
 | `secrets_file` | mode 0600, in a folder saving makes; two remotes give two entries; saving again replaces; comments and other keys written by hand stay; a missing file gives no key; bad TOML, a `remotes` that is not a table and a phrase that is not a string are each `corrupt secrets` |
 | `credentials_match` | an entry's `url` applies to a URL equal to it or under it at a `/`, never to `s3://b2` for `s3://b`; the entries that apply come from the shortest prefix to the longest, whatever their order in the file; `url` is not among the settings; a URL no entry covers gets none |
 | `credentials_errors` | a missing file gives no settings; bad TOML, a `remotes` that is not `[[remotes]]` entries, an entry with no `url` or a `url` that is not a string, a setting that is not a string, and two entries with the same `url` are each `corrupt credentials <path>`, naming the entry |
-| `init_remote` | writes `format` and `config`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses `format` version 2 |
+| `init_remote` | writes `format` and the encrypted `config`; prints 24 words when it generates the key and none when given one; refuses a non-empty prefix and leaves it untouched; refuses `format` version 2 |
 | `remote_add` | records the target's nickname and location for a URL and for a path; a taken name needs `--nickname`; a wrong phrase is refused and `config` is unchanged; `remote remove` forgets it |
 | `story_c2_sync_through_remote` | two vaults that never sync with each other converge through one remote, in either order, including a conflict; a vault with no history supplies its current files; a third machine `clone`s the URL and has everything |
-| `remote_is_opaque` | no object in the remote's directory contains a known line of a file, a path, a nickname or a plaintext hash, and no object name is a plaintext hash |
-| `remote_hostile` | a garbage object, a valid object copied to another name, and a truncated blob are rejected or left pending; the rest of the run completes |
+| `remote_is_opaque` | no object in the remote's directory contains a known line of a file, a path, a nickname or a plaintext hash, and no name in the tree is a plaintext hash or a plaintext name |
+| `remote_hostile` | a garbage object, a valid object copied to another name, and a truncated blob are rejected or left pending; objects under names the key did not make are ignored; the rest of the run completes |
+| `known_segments_stay_put` | a vault that has a remote's segments syncs with it though the remote's copies cannot be read; a vault that lacks them reports them `rejected` |
 | `remote_by_nickname` | `sync origin`, `sync <url>` and `sync ./origin` (a folder) each reach the right vault; `clone`, run in the vault, resolves the nickname of a remote and of a folder vault |
 | `clone_only` | `clone <url> <dir> --only a --only b/c` gives a vault that includes those two paths and has only their files; the same against a folder vault's root; a later `get --from` adds a third; a path below a vault's root with `--only` is refused and nothing is created |
 | `get_from_remote` | a partial vault runs `get music --from origin`; the folder arrives and stays included; nothing else is downloaded. `--from` with a folder vault's path gives the same result as the inferred form |
@@ -386,10 +419,10 @@ No test uses the real keychain or the network. Tests pass a phrase in `Context.s
 
 Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` passing, in each of the three builds of section 14 once the features exist. Do them in order; each is a commit that leaves the tool working.
 
-1. **The storage seam.** The `Storage` trait and `Dir`; `Vault.storage`; every access to log, blobs and config through it. No behaviour changes and no new dependency. Test: the existing suite, unchanged.
-2. **`crypt`.** The `remote` and `keychain` features of section 2 are declared here, with the first optional dependencies, and CI gains its second and third jobs (section 14). Tests: `crypt_round_trip`, `crypt_rejects`, `names_are_keyed`.
+1. **The storage seam.** `Vault.storage` (first a `Storage` trait with a folder implementation; since 2026-11-25 one `Store` on a `Backend`, section 4); every access to log, blobs and config through it. No behaviour changes and no new dependency. Test: the existing suite, unchanged.
+2. **`crypt`.** The `remote` and `keychain` features of section 2 are declared here, with the first optional dependencies, and CI gains its second and third jobs (section 14). Tests: `crypt_round_trip`, `crypt_rejects`, `names_open`.
 3. **`keys`.** Tests: `phrase_round_trip`, `key_lookup_order`, `secrets_file`.
-4. **`Remote` and `init <url>`.** The object-store implementation of `Storage`, `format`, the encrypted `config`. Test: `init_remote`.
+4. **The remote backends and `init <url>`.** `Bucket`, `Sealed`, `format`, the encrypted `config`. Test: `init_remote`.
 5. **Bare vaults in a run.** `Vault.bare`, the derived dirstate, targets by URL. Tests: `story_c2_sync_through_remote` (with `init` and `pull` in place of `clone`), `remote_is_opaque`, `remote_hostile`, `move_to_remote`, `partial_remote`, `dry_run_remote`, `status_vs_remote`.
 6. **Nicknames and the remaining commands.** `config.remotes`, `remote`, targets by nickname, `clone <url>`, `clone --only`, `get --from`, `--vault`; the message for a build without `remote`. Tests: `no_remote_feature`, `remote_add`, `remote_by_nickname`, `clone_only`, `get_from_remote`, `remote_history_depth`, the `clone` part of `story_c2_sync_through_remote`, `cli_smoke`.
 7. **A real bucket.** Run `cloud_remote` against MinIO or a real bucket and fix what differs from `file://`.

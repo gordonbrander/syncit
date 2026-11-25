@@ -240,7 +240,7 @@ With `keep_history` 0 the vault stores no blobs and its log records hashes only.
 A store is a vault with no working folder, kept on object storage: a bucket, or a folder on a shared or external drive. It has what every vault has, a log, blobs and a config with a nickname and a filter, and it syncs by the same commands. Two things set it apart, and every difference in how it behaves follows from one of them:
 
 - **It is bare.** With no folder, the content of its current versions is kept as blobs, nothing is scanned, and it never records a change of its own.
-- **It is remote.** What it holds is encrypted, since the storage is someone else's. Each object is named by a keyed hash of its content, so the storage provider learns neither what a file says nor which files are there.
+- **It is remote.** What it holds is encrypted, since the storage is someone else's. Every name in it is encrypted too, so the storage provider learns neither what a file says nor which files are there.
 
 What follows from that:
 
@@ -341,7 +341,7 @@ The design keeps three things separate that sync tools usually fuse: what happen
 - **Uploading to a store after every run.** It made every local command reach the network and need the key, and needed rules for what to do when either was missing. A command now does what its name says; backing up on a schedule is `push` in cron.
 - **Shelling out to `rclone` or `aws`.** It would make a second program part of every install and of every bug report. The backends come from a library instead.
 - **An unencrypted store.** A second format, and one more thing to get wrong when choosing where files go. A store is always encrypted.
-- **Naming a store's objects by the plain hash of their content.** Anyone who can list the storage could test whether a known file is in it. The name is a keyed hash, so it is still decided by the content but says nothing without the key.
+- **Naming a store's objects by the plain hash of their content.** Anyone who can list the storage could test whether a known file is in it. The name is encrypted, so it is still decided by the content but says nothing without the key.
 - **Requiring blobs to be stored before an entry is published.** This would force every vault to keep or upload history. Treating a missing blob as "not yet" or "not kept" lets retention be optional.
 
 ## Prior art

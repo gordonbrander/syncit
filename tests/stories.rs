@@ -24,7 +24,7 @@ use syncit::entry::sha256;
 use syncit::log::{Log, PathState};
 use syncit::materialise::{copy_name, materialise};
 use syncit::scan::scan;
-use syncit::storage::Dir;
+use syncit::storage::Store;
 use syncit::vault::Vault;
 use tempfile::TempDir;
 
@@ -99,7 +99,7 @@ fn paths(list: &[&str]) -> Vec<PathBuf> {
 }
 
 fn log(dir: &Path) -> Log {
-    Log::load(&O, &Dir::new(dir), true).unwrap()
+    Log::load(&O, &Store::dir(dir), None, true).unwrap()
 }
 
 fn names(dir: &Path) -> BTreeSet<String> {
@@ -2123,9 +2123,9 @@ fn cp_from_plain_folder() {
 #[cfg(feature = "remote")]
 mod remote {
     use super::*;
+    use syncit::crypt::Key;
     use syncit::keys;
-    use syncit::remote::{Bucket, Remote};
-    use syncit::storage::Storage;
+    use syncit::remote::Bucket;
 
     /// Context with a phrase. Every remote test starts here, so that the
     /// keychain is the mock one, never the machine's.
@@ -2165,30 +2165,24 @@ mod remote {
         let words = cmd::init_remote(&ctx(None), &url(&r), None, false).unwrap();
         let words = words.expect("a generated key is printed");
         assert_eq!(words.split(' ').count(), 24);
-        assert_eq!(
-            names(&r),
-            BTreeSet::from(["config".into(), "format".into()])
-        );
+        let key = keys::parse_phrase(&words).unwrap();
+        let config = syncit::crypt::seal_name(&key, "config");
+        assert_eq!(names(&r), BTreeSet::from([config.clone(), "format".into()]));
         let format = fs::read_to_string(r.join("format")).unwrap();
         let check = format
             .strip_prefix(r#"{"check":""#)
             .and_then(|f| f.strip_suffix("\",\"syncit\":1}\n"))
             .unwrap();
         assert!(syncit::entry::is_hash(check), "{format}");
-        let key = keys::parse_phrase(&words).unwrap();
-        let remote = Remote::open(Bucket::new(&url(&r), vec![]).unwrap(), key, None).unwrap();
-        let config = remote.load_config().unwrap();
+        let stored = fs::read(r.join(config)).unwrap();
+        assert!(!stored.windows(6).any(|w| w == b"origin"));
+        let config = Bucket::new(&url(&r), vec![]).unwrap().store(key);
+        let config = config.load_config().unwrap();
         assert_eq!(
             (config.include, config.keep_history, config.autocompact),
             (vec![String::new()], None, false)
         );
         assert_eq!(config.nickname, "origin");
-        assert!(
-            !fs::read(r.join("config"))
-                .unwrap()
-                .windows(6)
-                .any(|w| w == b"origin")
-        );
 
         // Given a key, it prints none.
         let given = ctx(Some(&words));
@@ -2212,7 +2206,8 @@ mod remote {
             format.replace("\"syncit\":1", "\"syncit\":2"),
         )
         .unwrap();
-        let err = Bucket::new(&url(&s), vec![]).unwrap().check().unwrap_err();
+        let bucket = Bucket::new(&url(&s), vec![]).unwrap();
+        let err = syncit::sealed::check(&bucket, "s").unwrap_err();
         assert!(err.to_string().contains("format version 2"), "{err}");
     }
 
@@ -2234,14 +2229,13 @@ mod remote {
         (dir.clone(), PathBuf::from(url(&dir)))
     }
 
-    fn storage(target: &Path) -> Remote {
-        let target = target.to_str().unwrap();
-        let key = keys::parse_phrase(&phrase()).unwrap();
-        Remote::open(Bucket::new(target, vec![]).unwrap(), key, None).unwrap()
+    fn key() -> Key {
+        keys::parse_phrase(&phrase()).unwrap()
     }
 
     fn configure_remote(target: &Path, change: impl FnOnce(&mut Config)) {
-        let r = storage(target);
+        let target = target.to_str().unwrap();
+        let r = Bucket::new(target, vec![]).unwrap().store(key());
         let mut config = r.load_config().unwrap();
         change(&mut config);
         r.save_config(&config).unwrap();
@@ -2254,16 +2248,23 @@ mod remote {
         out
     }
 
-    /// Object names under `kind`; blobs sit in `ab/abcdef…` folders.
+    /// Where the remote in `dir` stores `path`: each name, encrypted.
+    fn at(dir: &Path, path: &str) -> PathBuf {
+        let names = path.split('/');
+        names.fold(dir.to_path_buf(), |dir, name| {
+            dir.join(syncit::crypt::seal_name(&key(), name))
+        })
+    }
+
+    /// The stored names of the files under `kind`, in folders or not.
     fn objects(dir: &Path, kind: &str) -> BTreeSet<String> {
-        let root = dir.join(kind);
-        match kind {
-            "blobs" => names(&root)
-                .iter()
-                .flat_map(|p| names(&root.join(p)))
-                .collect(),
-            _ => names(&root),
-        }
+        let found = listing(&at(dir, kind)).into_keys();
+        let files = found.filter(|path| path.is_file());
+        files.map(|path| name_of(&path)).collect()
+    }
+
+    fn name_of(path: &Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
     }
 
     #[test]
@@ -2368,6 +2369,7 @@ mod remote {
         hashes.extend(log(&a).entries.values().filter_map(|e| e.hash.clone()));
         hashes.extend(names(&a.join(".syncit/log")));
         assert!(hashes.len() > 4, "{hashes:?}");
+        let plain = ["config", "log", "blobs"].map(String::from);
         let secrets = [
             "a known line",
             "notes/plan.txt",
@@ -2378,10 +2380,10 @@ mod remote {
         let found = listing(&r);
         assert!(found.len() > 5, "{:?}", found.keys());
         for (path, bytes) in &found {
-            let name = path.file_name().unwrap().to_string_lossy();
+            let name = name_of(path);
             assert!(
-                !hashes.contains(name.as_ref()),
-                "{} is a plaintext hash",
+                !hashes.contains(&name) && !plain.contains(&name) && name.len() != 2,
+                "{} is a plaintext name",
                 path.display()
             );
             for text in secrets
@@ -2406,19 +2408,17 @@ mod remote {
         let (tmp, a) = vault(&[("good.txt", "good"), ("cut.bin", &"x".repeat(100_000))]);
         let (r, origin) = remote(&tmp, "r");
         cmd::push(o, &a, &origin).unwrap();
-        let key = keys::parse_phrase(&phrase()).unwrap();
-        let logs: Vec<String> = objects(&r, "log").into_iter().collect();
+        let log = at(&r, "log");
+        let good = log.join(objects(&r, "log").first().unwrap());
         // A garbage object, and a valid one copied to another name.
-        fs::write(r.join("log").join("ab".repeat(32)), b"garbage").unwrap();
-        fs::copy(
-            r.join("log").join(&logs[0]),
-            r.join("log").join("cd".repeat(32)),
-        )
-        .unwrap();
-        fs::write(r.join("log/not-a-name"), b"ignored").unwrap();
+        fs::write(at(&r, &format!("log/{}", "ab".repeat(32))), b"garbage").unwrap();
+        fs::copy(good, at(&r, &format!("log/{}", "cd".repeat(32)))).unwrap();
+        // Names the key did not make are not the vault's, and are ignored.
+        fs::write(log.join("not-a-name"), b"ignored").unwrap();
+        fs::write(log.join("ef".repeat(32)), b"ignored").unwrap();
         // A truncated blob.
-        let cut = syncit::crypt::name(&key, "blobs", &sha256("x".repeat(100_000).as_bytes()));
-        let blob = r.join("blobs").join(&cut[..2]).join(&cut);
+        let cut = sha256("x".repeat(100_000).as_bytes());
+        let blob = at(&r, &format!("blobs/{}/{cut}", &cut[..2]));
         let bytes = fs::read(&blob).unwrap();
         fs::write(&blob, &bytes[..bytes.len() - 10]).unwrap();
 
@@ -2431,8 +2431,27 @@ mod remote {
         assert!(is(&c, "good.txt", "good") && !c.join("cut.bin").exists());
         assert_eq!(sum.exit_code(), 2);
         // A garbage config is an error, not a panic.
-        fs::write(r.join("config"), b"garbage").unwrap();
+        fs::write(at(&r, "config"), b"garbage").unwrap();
         assert!(cmd::pull(o, &c, &origin).is_err());
+    }
+
+    /// A segment is the same wherever it is stored, so one this vault has
+    /// is not fetched from a remote.
+    #[test]
+    fn known_segments_stay_put() {
+        let o = &o();
+        let (tmp, a) = vault(&[("f.txt", "one")]);
+        let (r, origin) = remote(&tmp, "r");
+        cmd::push(o, &a, &origin).unwrap();
+        for name in objects(&r, "log") {
+            fs::write(at(&r, "log").join(name), b"unreadable").unwrap();
+        }
+        put(&a, "f.txt", "two", 1);
+        let sum = cmd::sync(o, &a, &origin).unwrap();
+        assert_eq!((sum.rejected, sum.exit_code()), (0, 0), "{sum:?}");
+        // A vault that does not have them must fetch them, and cannot.
+        let c = empty_vault(&tmp, "c");
+        assert_eq!(cmd::pull(o, &c, &origin).unwrap().rejected, 1);
     }
 
     #[test]
@@ -2669,7 +2688,7 @@ mod remote {
         // A folder vault that shares the remote's nickname.
         let folder = empty_vault(&tmp, "origin");
         cmd::remote_add(o, &a, origin.to_str().unwrap(), None, false).unwrap();
-        assert!(!r.join("blobs").exists());
+        assert!(!at(&r, "blobs").exists());
         cmd::sync(o, &a, Path::new("origin")).unwrap();
         assert_eq!(objects(&r, "blobs").len(), 1);
         assert!(!folder.join("f.txt").exists());

@@ -126,7 +126,7 @@ Suggested layout. Merge or split if it reads better, but keep the pure parts fre
 | `output` | `Context`, the `Message` types with their text and JSON forms, `print_stdout`, `print_stderr`, `Progress`, `Summary` | no |
 | `main` | argument parsing, printing the `Summary` and errors, exit code | yes |
 
-Remote vaults add `storage`, `remote`, `crypt` and `keys`, and put every read and write of a vault's log, blobs and config behind one trait (`store.md`, sections 3 and 4).
+Remote vaults add `backend`, `storage`, `remote`, `sealed`, `crypt` and `keys`. Every read and write of a vault's log, blobs and config goes through its `Store`, which is the same for every vault and sits on a backend: a folder, or encrypted object storage (`store.md`, sections 3 and 4).
 
 Types the rest of this file refers to:
 
@@ -389,7 +389,7 @@ A store is not a second kind of thing. It is a vault that is *bare* (it has no w
 - It has a `config` like any vault: `nickname`, `include`, `exclude`, `keep_history` and `autocompact`. A new one keeps every version and does not compact.
 - A run with one is section 10 unchanged. On its side the scan and materialise steps do nothing, and `retain()` is what moves content.
 - `fetch` tries each vault's storage after its working files. For a remote vault that is a download, decrypted and then hashed like any other source.
-- Every read and write of a vault's log, blobs and config goes through one `Storage` trait with two implementations: a plain directory, and an encrypted object store.
+- Every read and write of a vault's log, blobs and config goes through one `Store`, on one of two backends: a vault folder's `.syncit/`, or encrypted object storage (`store.md`, section 4).
 - There is no `store` setting, no automatic upload and no `flush()`. A vault reaches a store with the ordinary commands, by URL or by nickname.
 
 ## 9. Materialise
@@ -894,7 +894,7 @@ Unit tests live beside the code. Integration tests live in `tests/` and build va
 | `cp_from_plain_folder` | `cp` from a folder that is not a vault adds what the vault lacks, replaces what differs and leaves the rest; the vault is scanned first; ignored files, links and the source's `.syncit` are not copied; a read-only executable arrives executable; the copies show in `status` as unrecorded; `.` copies contents and a named source lands under its name in a folder that need not exist; a missing source copies nothing; a dry run writes nothing and returns the real run's `Summary` |
 | `config_command` | `config` prints the settings; a new vault has `keep_history` 1 and `autocompact` on; `keep-history` and `autocompact` are set and saved, and the setting takes effect; a vault's nickname is its folder's name until `config nickname` changes it, and an invalid nickname is refused |
 | `blame_names_the_recording_vault` | `blame` names the vault that recorded each file's current version and never one that only received it; an identical entry recorded by two vaults names both; deleted files are left out; paths limit the output; after a rename new changes carry the new nickname and old ones keep the old; an unrecorded edit is not attributed |
-| (remote vaults) | the tests listed in `store.md`, section 12: `crypt_*`, `names_are_keyed`, `phrase_round_trip`, `key_lookup_order`, `secrets_file`, `credentials_match` and `credentials_errors` in `src/`, the rest in the `remote` module of `tests/stories.rs` and in `cli_smoke` |
+| (remote vaults) | the tests listed in `store.md`, section 12: `crypt_*`, `names_open`, the backend and `sealed_*` tests, `phrase_round_trip`, `key_lookup_order`, `secrets_file`, `credentials_match` and `credentials_errors` in `src/`, the rest in the `remote` module of `tests/stories.rs` and in `cli_smoke` |
 | `version_mismatch` | a peer with `"syncit": 2` in its config is refused |
 | `cli_smoke` | the built binary runs every command and returns the documented exit codes; results are on stdout and warnings and errors on stderr; with `--json` every line of both streams is an object with a `type`, and the last stdout line of a run is the summary; `push` to a partial vault warns and `sync` does not |
 | `message_forms` | each message type's text form and JSON form; the summary's counts and exit code |
@@ -961,7 +961,7 @@ These settle, for version 1, questions that `PRD.md` lists as open.
 | Reaching a store | with the ordinary commands and a target. No `store` setting and no upload after every run: a command does what its name says, and backing up on a schedule is `push` in cron |
 | Size of the build | everything remote vaults add is behind two Cargo features, `remote` and `keychain`, on by default. Without them the build is as small as before. No feature for each cloud: they share their dependencies |
 | Object-store client | the `object_store` crate, driven from a private single-thread async runtime. No external tools. OpenDAL was ruled out because it needs a newer Rust than 1.89 |
-| Store encryption | always on. XChaCha20-Poly1305 in 64 KiB chunks. An object's name is a keyed function of its content's hash, so the provider learns neither the content nor whether a known file is stored |
+| Store encryption | always on. XChaCha20-Poly1305 in 64 KiB chunks. Every name is encrypted with AES-SIV, which the key turns back, so the provider learns neither the content nor whether a known file is stored |
 | Store keys | one 32-byte key for each remote vault, written as a 24-word BIP39 phrase and shown once, at creation. Kept in the OS keychain when there is one; otherwise given in `SYNCIT_SECRET_KEY` or, if the user chooses, saved in `~/.config/syncit/secrets.toml` |
 | Settings | changed with `syncit config`, not by editing the file |
 | Attribution | each vault has a nickname, by default its folder's name, written into the header of the segments it records; `blame` prints it. A label: not unique, not verified, read by no rule. Hostnames and absolute paths are not recorded, since the log is permanent and replicated |
@@ -1000,13 +1000,14 @@ Record here anything built differently from these documents, with the reason.
 
 - **Remote vaults (milestone 9, `store.md`) are built.** MinIO's images could not be pulled, so `store.md` milestone 7 ran `cloud_remote` against Adobe's S3Mock (`adobe/s3mock:3.11.0` in Docker) through `AWS_ENDPOINT_URL` and `AWS_ALLOW_HTTP`, and pushed and cloned a 20 MB file, which goes in 16 MiB parts. Both passed with no change to the code. Both then passed against a real Cloudflare R2 bucket on 2026-11-22, again with no change. GCS and Azure are untested. The crate APIs behaved as `store.md`, section 2, records; nothing had to be adapted, and the default TLS provider built. The CI steps, in all three builds, passed on Linux in a `rust:1.96` container, which also compiled the Linux keychain store, and then in GitHub Actions (PR #12) after one lint that only clippy 1.100 reports was fixed.
 - **`store.md` as built.** Where it left a choice, or where building it showed something:
-  - `Log::load` takes a vault's storage instead of its `log/` folder, so the test helper that loads a log passes a `Dir`; no assertion changed. A corrupt segment is reported by its name, not its file's path.
+  - `Log::load` takes a vault's storage instead of its `log/` folder, so the test helper that loads a log passes the folder's `Store`; no assertion changed. A corrupt segment is reported by its name, not its file's path.
   - Commands take a target as a `&Path`: a URL or a nickname is a valid path string, read back with `to_str`. `clone`, `compact` and `config` gained the parameters for `--only`, `--save-key` and `--vault`; the tests pass the defaults.
-  - `Storage::put_blob` consumes its source file, which is a scratch file in every caller.
+  - `Store::put_blob` consumes its source file, which is a scratch file in every caller.
   - `init <url>` and `clone` take `--save-key` as `remote add` does, since section 8 lets all three save a key. `init --nickname` is for a remote; with a path it is refused.
   - `clone` records its source in `remotes` whether it is a URL or a folder. If that fails (no key for a URL), the new `.syncit/` is removed and nothing is pulled.
   - `remote add` with a path needs the root of a vault. A target that is no nickname, no URL and no existing path fails with `no vault at <target>: not a folder, a URL or the name of a remote`, where it used to fail in the nesting check.
-  - A remote object that cannot be decrypted, or whose content does not match its name, is listed under its object name, so the run reports it as `rejected` as it would a corrupt segment.
+  - A remote segment that cannot be decrypted is listed like any other, so the run reports it as `rejected` as it would a corrupt segment. An object under a name the key did not make is not the vault's, and is ignored.
+  - **One store, on a backend (2026-11-25).** As first built, storage was a `Storage` trait with two whole implementations, a folder and an encrypted bucket, and a remote's object names were a one-way keyed hash. A listing could then not be read back, so the remote implementation was handed the local vault, fetched every segment it did not know in order to name it, and borrowed the local `.syncit/tmp`. Names are now encrypted reversibly, which let encryption become a backend like any other and left one `Store` for every vault (`store.md`, sections 4 to 6). A folder vault is stored exactly as before. The layout of a remote changed, and one made before this cannot be read. `corrupt config` and a missing config are reported by the vault's folder, not the config file's path.
   - The `sent …` and `received …` lines count distinct blobs and segments. In a dry run, received files are those a dry run finds only in the remote; history that a real `retain` would download is not counted.
 
 - **A peer's log is read leniently.** Section 6 says a local segment that fails validation stops the command; section 10 says a bad segment in the other vault is rejected and does not stop the run. Both cannot hold for the peer, which must load its own log to scan. A vault opened as a peer skips its invalid segments with a warning; the receiving vault reports them as `rejected`. The vault a command runs in is still strict.

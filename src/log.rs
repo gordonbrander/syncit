@@ -3,7 +3,7 @@
 use crate::entry::{Entry, Id};
 use crate::output::{Context, warn};
 use crate::segment;
-use crate::storage::Storage;
+use crate::storage::Store;
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,10 +59,22 @@ impl Log {
     /// Read every segment in `storage`. A bad segment is an error when
     /// `strict` (this vault's own log) and is ignored with a warning otherwise
     /// (a peer's log, which is not trusted).
-    pub fn load(ctx: &Context, storage: &dyn Storage, strict: bool) -> Result<Log> {
+    ///
+    /// A segment is immutable and named by its hash, so any copy will do:
+    /// one that `known` has is read from there, which for a remote vault
+    /// saves fetching it.
+    pub fn load(
+        ctx: &Context,
+        storage: &Store,
+        known: Option<&Store>,
+        strict: bool,
+    ) -> Result<Log> {
         let mut log = Log::default();
+        let have = known.map(Store::segment_names).transpose()?;
         for name in storage.segment_names()? {
-            let segment = storage
+            let from = known.filter(|_| have.as_ref().is_some_and(|h| h.contains(&name)));
+            let segment = from
+                .unwrap_or(storage)
                 .read_segment(&name)
                 .and_then(|bytes| segment::decode(&name, &bytes));
             match segment {

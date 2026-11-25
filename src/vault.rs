@@ -4,7 +4,7 @@ use crate::config::{Config, prefix_matches};
 use crate::dirstate::Dirstate;
 use crate::log::Log;
 use crate::output::{Context, Event, Message, Summary, print_stdout};
-use crate::storage::{Dir, Storage};
+use crate::storage::Store;
 use anyhow::{Context as _, Result, anyhow, ensure};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -24,7 +24,7 @@ pub struct Vault {
     /// and its dirstate is derived from its log and the blobs it holds.
     pub bare: bool,
     /// Its config, log and blobs.
-    pub storage: Box<dyn Storage>,
+    pub storage: Store,
     /// Scratch space for files in transit.
     pub tmp: PathBuf,
     /// In a run with a peer, `->` for our vault and `<-` for theirs.
@@ -167,16 +167,16 @@ impl Vault {
     pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault> {
         let Locked { root, config, lock } = lock(start)?;
         let dot = root.join(".syncit");
-        let storage = Dir::new(&root);
+        let storage = Store::dir(&root);
         let dirstate = Dirstate::load(&root)?;
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
         let mut vault = Vault {
-            log: Log::load(ctx, &storage, local)?,
+            log: Log::load(ctx, &storage, None, local)?,
             name: root.display().to_string(),
             bare: false,
             traffic: RefCell::default(),
-            storage: Box::new(storage),
+            storage,
             tmp: dot.join("tmp"),
             side: "",
             hints: HashMap::new(),
@@ -197,17 +197,18 @@ impl Vault {
     }
 
     /// Open the remote vault at `url` for a command run in `local`, if
-    /// there is one: it finds the key there, and moves files through its
-    /// `.syncit/tmp`. A remote is bare and is not locked.
+    /// there is one: the segments that vault has are read from it, and
+    /// files move through its `.syncit/tmp`. A remote is bare and is not
+    /// locked.
     #[cfg(feature = "remote")]
     pub fn open_url(ctx: &Context, url: &str, local: Option<&Vault>) -> Result<Vault> {
-        use crate::remote::{Bucket, Remote, credentials};
-        let root = local.map(|v| v.root.as_path());
+        use crate::remote::{Bucket, credentials};
         let bucket = Bucket::new(url, credentials(ctx, url)?)?;
-        let check = bucket.check()?;
+        let check = crate::sealed::check(&bucket, url)?;
         let (key, _) = crate::keys::find(ctx, url, &check)?;
-        let storage = Remote::open(bucket, key, root.map(Dir::new))?;
+        let storage = bucket.store(key);
         let config = storage.load_config()?;
+        storage.list()?;
         ensure!(
             config.syncit == 1,
             "{url} has format version {}, not 1",
@@ -217,8 +218,8 @@ impl Vault {
             root: PathBuf::new(),
             name: url.to_string(),
             bare: true,
-            log: Log::load(ctx, &storage, false)?,
-            storage: Box::new(storage),
+            log: Log::load(ctx, &storage, local.map(|v| &v.storage), false)?,
+            storage,
             tmp: local.map(|v| v.tmp.clone()).unwrap_or_default(),
             side: "",
             config,

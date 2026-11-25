@@ -95,7 +95,8 @@ pub fn init_remote(
         autocompact: false,
         ..Config::new(String::new(), nickname)
     };
-    bucket.create(&key, &config)?;
+    crate::sealed::create(&bucket, &key)?;
+    bucket.store(key.clone()).save_config(&config)?;
     let message = format!("Vault initialized: {url}\nNickname: {}", config.nickname);
     print_stdout(ctx, &Message::Info { message });
     if !generated {
@@ -970,13 +971,14 @@ fn find_remote(ctx: &Context, url: &str) -> Result<(Config, Found)> {
     }
     let settings = crate::remote::credentials(ctx, url)?;
     let bucket = crate::remote::Bucket::new(url, settings)?;
-    let check = bucket.check()?;
+    let check = crate::sealed::check(&bucket, url)?;
     let found = match keys::find(ctx, url, &check) {
         Ok(found) => found,
         Err(e) if !std::io::stdin().is_terminal() => return Err(e),
         Err(_) => (keys::prompt(url, &check)?, Source::New),
     };
-    Ok((crate::remote::read_config(&bucket, &found.0)?, found))
+    let config = bucket.store(found.0.clone()).load_config()?;
+    Ok((config, found))
 }
 
 #[cfg(not(feature = "remote"))]

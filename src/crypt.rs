@@ -1,5 +1,5 @@
-//! Encryption of a remote vault's objects (store.md, section 6): keys and
-//! object names derived from the master key, and XChaCha20-Poly1305 in the
+//! Encryption of a vault (store.md, section 6): keys derived from the
+//! master key, names in AES-SIV, and contents in XChaCha20-Poly1305 in the
 //! STREAM construction. No I/O beyond `Read` and `Write`.
 
 use aead_stream::{DecryptorBE32, EncryptorBE32};
@@ -35,20 +35,6 @@ fn derive(key: &Key, info: &str) -> Key {
 /// The value in `format` that tells a right key from a wrong one.
 pub fn check(key: &Key) -> String {
     base16ct::lower::encode_string(derive(key, "syncit check").as_slice())
-}
-
-/// The object name of a segment or blob (`kind` is `log` or `blobs`).
-pub fn name(key: &Key, kind: &str, hash: &str) -> String {
-    base16ct::lower::encode_string(derive(key, &format!("syncit name {kind} {hash}")).as_slice())
-}
-
-/// The key an object named `name` is encrypted with.
-pub fn object_key(key: &Key, kind: &str, name: &str) -> Key {
-    derive(key, &format!("syncit key {kind} {name}"))
-}
-
-pub fn config_key(key: &Key) -> Key {
-    derive(key, "syncit key config")
 }
 
 /// The key the object at `path` is encrypted with. An object moved to
@@ -186,19 +172,12 @@ mod tests {
     fn crypt_rejects() {
         let k = key(1);
         let plain = vec![9u8; 200_000];
-        let hash = sha256(&plain);
-        let n = name(&k, "blobs", &hash);
-        let sealed = {
-            let mut out = vec![];
-            encrypt(&object_key(&k, "blobs", &n), &plain[..], &mut out).unwrap();
-            out
-        };
-        let right = object_key(&k, "blobs", &n);
+        let right = content_key(&k, "blobs/ab/abcdef");
+        let sealed = seal(&right, &plain);
         assert_eq!(open(&right, &sealed).unwrap(), plain);
-        let wrong_key = object_key(&key(2), "blobs", &n);
-        let wrong_name = object_key(&k, "blobs", &name(&k, "blobs", &sha256(b"other")));
-        let wrong_kind = object_key(&k, "log", &n);
-        for other in [&wrong_key, &wrong_name, &wrong_kind] {
+        let wrong_key = content_key(&key(2), "blobs/ab/abcdef");
+        let wrong_path = content_key(&k, "log/abcdef");
+        for other in [&wrong_key, &wrong_path, &k] {
             assert!(open(other, &sealed).is_err());
         }
         for at in [0, 5, NONCE, NONCE + 70_000, sealed.len() - 1] {
@@ -218,20 +197,6 @@ mod tests {
             assert!(open(&right, &sealed[..cut]).is_err(), "cut at {cut}");
         }
         assert!(open(&right, &[]).is_err());
-    }
-
-    #[test]
-    fn names_are_keyed() {
-        let hash = sha256(b"content");
-        let (a, b) = (key(1), key(2));
-        assert_eq!(name(&a, "blobs", &hash), name(&a, "blobs", &hash));
-        assert_ne!(name(&a, "blobs", &hash), name(&b, "blobs", &hash));
-        assert_ne!(name(&a, "blobs", &hash), name(&a, "log", &hash));
-        for n in [name(&a, "blobs", &hash), name(&a, "log", &hash)] {
-            assert_ne!(n, hash);
-            assert!(crate::entry::is_hash(&n));
-        }
-        assert_ne!(check(&a), check(&b));
     }
 
     #[test]
@@ -258,5 +223,6 @@ mod tests {
         }
         assert_ne!(content_key(&a, "log/x"), content_key(&a, "blobs/x"));
         assert_ne!(content_key(&a, "log/x"), content_key(&b, "log/x"));
+        assert_ne!(check(&a), check(&b));
     }
 }
