@@ -170,7 +170,7 @@ mod tests {
     fn sealed(tmp: &Path, key: Key) -> (Sealed<Fs>, PathBuf) {
         let root = tmp.join("v");
         fs::create_dir_all(root.join(".syncit")).unwrap();
-        let sealed = Sealed::new(Fs::new(&root), key);
+        let sealed = Sealed::new(Fs::at(&root), key);
         (sealed, root.join(".syncit"))
     }
 
@@ -186,7 +186,7 @@ mod tests {
     fn sealed_is_opaque() {
         let tmp = tempfile::TempDir::new().unwrap();
         let (s, dot) = sealed(tmp.path(), key(1));
-        let inner = Fs::new(&tmp.path().join("v"));
+        let inner = Fs::at(&tmp.path().join("v"));
         s.write("folder/letter", b"some private words").unwrap();
         fs::write(tmp.path().join("src"), "more private words").unwrap();
         s.move_to(&tmp.path().join("src"), "folder/moved").unwrap();
@@ -200,7 +200,7 @@ mod tests {
             }
         }
         // Another key sees none of it.
-        let other = Sealed::new(Fs::new(&tmp.path().join("v")), key(2));
+        let other = Sealed::new(Fs::at(&tmp.path().join("v")), key(2));
         assert!(other.list("folder").unwrap().is_empty());
         assert_eq!(other.read("folder/letter").unwrap(), None);
     }
@@ -243,7 +243,7 @@ mod tests {
     fn sealed_format() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".syncit")).unwrap();
-        let inner = Fs::new(tmp.path());
+        let inner = Fs::at(tmp.path());
         let none = check(&inner, "there").unwrap_err().to_string();
         assert_eq!(none, "no vault at there: run syncit init there");
         create(&inner, &key(1)).unwrap();

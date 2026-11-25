@@ -1,8 +1,8 @@
 //! What a vault is stored on: bytes at paths, and nothing about vaults
 //! (store.md, section 4). `Fs` is a vault folder's `.syncit/`.
 
-use crate::vault::write_atomic;
-use anyhow::{Context, Result, ensure};
+use crate::vault::{find_root, write_atomic};
+use anyhow::{Context, Result, anyhow, ensure};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io;
@@ -41,9 +41,11 @@ impl std::fmt::Display for Unreadable {
 
 impl std::error::Error for Unreadable {}
 
-/// The `.syncit/` of the vault folder `root`.
+/// The `.syncit/` of the vault dir `root`.
 pub struct Fs {
     root: PathBuf,
+    /// Held while this lives, if it was opened and not only pointed at.
+    _lock: Option<File>,
 }
 
 fn missing(e: &io::Error) -> bool {
@@ -51,10 +53,34 @@ fn missing(e: &io::Error) -> bool {
 }
 
 impl Fs {
-    pub fn new(root: &Path) -> Fs {
+    /// The vault at or above `start`, locked until this is dropped: one
+    /// command at a time works in a vault.
+    pub fn open(start: &Path) -> Result<Fs> {
+        let root = find_root(start)?;
+        let lock = File::options()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join(".syncit/lock"))?;
+        lock.try_lock()
+            .map_err(|_| anyhow!("vault is in use: {}", root.display()))?;
+        Ok(Fs {
+            root,
+            _lock: Some(lock),
+        })
+    }
+
+    /// The vault dir `root`, not locked: to read what another command may be
+    /// working in, or to make a vault.
+    pub fn at(root: &Path) -> Fs {
         Fs {
             root: root.to_path_buf(),
+            _lock: None,
         }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     fn dot(&self) -> PathBuf {
@@ -63,7 +89,7 @@ impl Fs {
 
     /// The file for `path`. A path can come from a listing someone else
     /// wrote, so one that would leave `.syncit/` is refused.
-    fn at(&self, path: &str) -> Result<PathBuf> {
+    fn file(&self, path: &str) -> Result<PathBuf> {
         let mut file = self.dot();
         for part in path.split('/').filter(|_| !path.is_empty()) {
             let mut parts = Path::new(part).components();
@@ -77,7 +103,7 @@ impl Fs {
 
 impl Backend for Fs {
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        let file = self.at(path)?;
+        let file = self.file(path)?;
         match fs::read(&file) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if missing(&e) => Ok(None),
@@ -86,13 +112,13 @@ impl Backend for Fs {
     }
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        let dest = self.at(path)?;
+        let dest = self.file(path)?;
         fs::create_dir_all(dest.parent().unwrap())?;
         write_atomic(&self.root, &dest, bytes)
     }
 
     fn copy_to(&self, path: &str, dest: &Path) -> Result<bool> {
-        let file = self.at(path)?;
+        let file = self.file(path)?;
         let mut src = match File::open(&file) {
             Ok(src) => src,
             Err(e) if missing(&e) => return Ok(false),
@@ -104,13 +130,13 @@ impl Backend for Fs {
     }
 
     fn move_to(&self, src: &Path, path: &str) -> Result<()> {
-        let dest = self.at(path)?;
+        let dest = self.file(path)?;
         fs::create_dir_all(dest.parent().unwrap())?;
         fs::rename(src, &dest).with_context(|| format!("cannot write {}", dest.display()))
     }
 
     fn remove(&self, path: &str) -> Result<()> {
-        let file = self.at(path)?;
+        let file = self.file(path)?;
         match fs::remove_file(&file) {
             Err(e) if !missing(&e) => {
                 return Err(e).with_context(|| format!("cannot remove {}", file.display()));
@@ -133,7 +159,7 @@ impl Backend for Fs {
     }
 
     fn size(&self, path: &str) -> Result<Option<u64>> {
-        let file = self.at(path)?;
+        let file = self.file(path)?;
         match fs::metadata(&file) {
             Ok(meta) => Ok(meta.is_file().then_some(meta.len())),
             Err(e) if missing(&e) => Ok(None),
@@ -144,7 +170,7 @@ impl Backend for Fs {
     /// One read of each folder, and no look at any file.
     fn list(&self, dir: &str) -> Result<BTreeSet<String>> {
         let mut found = BTreeSet::new();
-        let mut dirs = vec![(self.at(dir)?, String::new())];
+        let mut dirs = vec![(self.file(dir)?, String::new())];
         while let Some((dir, prefix)) = dirs.pop() {
             let cannot = || format!("cannot read {}", dir.display());
             let entries = match fs::read_dir(&dir) {
@@ -214,7 +240,7 @@ pub(crate) mod tests {
         let (root, scratch) = (tmp.path().join("v"), tmp.path().join("s"));
         fs::create_dir_all(root.join(".syncit")).unwrap();
         fs::create_dir(&scratch).unwrap();
-        let b = Fs::new(&root);
+        let b = Fs::at(&root);
         contract(&b, &scratch);
         // Emptied folders go, but not those directly in `.syncit/`.
         assert!(root.join(".syncit/a").is_dir() && !root.join(".syncit/a/b").exists());

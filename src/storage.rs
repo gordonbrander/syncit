@@ -6,7 +6,7 @@ use crate::backend::{Backend, Fs, Unreadable};
 use crate::blobs::hash_file;
 use crate::config::Config;
 use crate::entry::{is_hash, sha256};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -54,12 +54,11 @@ impl Store {
         }
     }
 
-    /// The vault in the folder `root`: its `.syncit/`.
-    pub fn dir(root: &Path) -> Store {
-        let backend = Box::new(Fs::new(root));
+    /// The vault in a dir.
+    pub fn dir(fs: Fs) -> Store {
         Store {
             read: None,
-            ..Store::new(&root.display().to_string(), backend)
+            ..Store::new(&fs.root().display().to_string(), Box::new(fs))
         }
     }
 
@@ -68,7 +67,11 @@ impl Store {
         let read = self.backend.read("config");
         let bytes = read.with_context(|| format!("cannot read the config of {name}"))?;
         let bytes = bytes.with_context(|| format!("{name} has no config"))?;
-        serde_json::from_slice(&bytes).with_context(|| format!("corrupt config {name}"))
+        let config: Config =
+            serde_json::from_slice(&bytes).with_context(|| format!("corrupt config {name}"))?;
+        let version = config.syncit;
+        ensure!(version == 1, "{name} has format version {version}, not 1");
+        Ok(config)
     }
 
     pub fn save_config(&self, config: &Config) -> Result<()> {
@@ -218,7 +221,7 @@ mod tests {
             store.put_blob(hash, &src).unwrap();
             assert!(!src.exists(), "consumed");
         };
-        let store = Store::dir(tmp.path());
+        let store = Store::dir(Fs::at(tmp.path()));
         assert_eq!(store.missing(&both), both, "no blobs folder yet");
         put(&store, &a, "a");
         put(&store, &a, "a");
@@ -232,7 +235,7 @@ mod tests {
         // What a fresh look finds: a blob that is not what its name says
         // is there, but is not to be had.
         fs::write(blobs.join(&a[..2]).join(&a), "x").unwrap();
-        let store = Store::dir(tmp.path());
+        let store = Store::dir(Fs::at(tmp.path()));
         assert!(store.has_blob(&a) && store.read_blob(&a, 1).is_none());
         assert!(!store.get_blob(&a, &out).unwrap() && !out.exists());
         assert_eq!(store.drop_blobs_except(&both, false).unwrap(), (0, 0));
@@ -250,6 +253,6 @@ mod tests {
         fs::create_dir_all(blobs.join(&b[..2]).join(&b)).unwrap();
         fs::create_dir_all(blobs.join("zz")).unwrap();
         fs::write(blobs.join("zz").join(&a), "a").unwrap();
-        assert_eq!(Store::dir(tmp.path()).missing(&both), both);
+        assert_eq!(Store::dir(Fs::at(tmp.path())).missing(&both), both);
     }
 }

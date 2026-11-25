@@ -18,6 +18,7 @@ static O: LazyLock<Context> = LazyLock::new(|| Context {
     config_dir: None,
 });
 use std::sync::LazyLock;
+use syncit::backend::Fs;
 use syncit::config::Config;
 use syncit::dirstate::Dirstate;
 use syncit::entry::sha256;
@@ -99,7 +100,7 @@ fn paths(list: &[&str]) -> Vec<PathBuf> {
 }
 
 fn log(dir: &Path) -> Log {
-    Log::load(&O, &Store::dir(dir), None, true).unwrap()
+    Log::load(&O, &Store::dir(Fs::at(dir)), None, true).unwrap()
 }
 
 fn names(dir: &Path) -> BTreeSet<String> {

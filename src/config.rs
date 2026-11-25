@@ -1,5 +1,6 @@
 //! `.syncit/config`, and which paths a vault includes.
 
+use crate::backend::Fs;
 use crate::storage::Store;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -68,11 +69,11 @@ impl Config {
     }
 
     pub fn load(root: &Path) -> Result<Config> {
-        Store::dir(root).load_config()
+        Store::dir(Fs::at(root)).load_config()
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
-        Store::dir(root).save_config(self)
+        Store::dir(Fs::at(root)).save_config(self)
     }
 
     /// Whether the vault's filter selects the path. The longest matching

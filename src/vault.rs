@@ -1,14 +1,15 @@
-//! A vault: a folder with `.syncit/`, opened and locked.
+//! A vault, opened: its store, its config and log, and its working dir.
 
+use crate::backend::Fs;
 use crate::config::{Config, prefix_matches};
 use crate::dirstate::Dirstate;
 use crate::log::Log;
 use crate::output::{Context, Event, Message, Summary, print_stdout};
 use crate::storage::Store;
-use anyhow::{Context as _, Result, anyhow, ensure};
+use anyhow::{Context as _, Result, anyhow};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -37,7 +38,6 @@ pub struct Vault {
     pub hints: HashMap<String, Vec<PathBuf>>,
     /// What a run moved to and from this vault's storage.
     pub traffic: RefCell<Traffic>,
-    _lock: Option<File>,
 }
 
 /// Blob hashes and segment names, sent to a vault or received from it.
@@ -133,41 +133,15 @@ pub fn relative(root: &Path, path: &Path) -> Result<String> {
         .join("/"))
 }
 
-/// A vault found and locked, with its config and nothing else read: all
-/// that a command about its settings needs. Locked until dropped.
-pub struct Locked {
-    pub root: PathBuf,
-    pub config: Config,
-    lock: File,
-}
-
-/// Find and lock the vault at or above `start`, and read its config.
-pub fn lock(start: &Path) -> Result<Locked> {
-    let root = find_root(start)?;
-    let lock = File::options()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join(".syncit/lock"))?;
-    lock.try_lock()
-        .map_err(|_| anyhow!("vault is in use: {}", root.display()))?;
-    let config = Config::load(&root)?;
-    ensure!(
-        config.syncit == 1,
-        "{} has format version {}, not 1",
-        root.display(),
-        config.syncit
-    );
-    Ok(Locked { root, config, lock })
-}
-
 impl Vault {
     /// Find, lock and load the vault at or above `start`. `local` is for the
     /// vault a command runs in; a peer's log is read leniently.
     pub fn open(ctx: &Context, start: &Path, local: bool) -> Result<Vault> {
-        let Locked { root, config, lock } = lock(start)?;
+        let fs = Fs::open(start)?;
+        let root = fs.root().to_path_buf();
         let dot = root.join(".syncit");
-        let storage = Store::dir(&root);
+        let storage = Store::dir(fs);
+        let config = storage.load_config()?;
         let dirstate = Dirstate::load(&root)?;
         let ignore =
             Ignore::parse(&fs::read_to_string(root.join(".syncitignore")).unwrap_or_default());
@@ -184,7 +158,6 @@ impl Vault {
             config,
             dirstate,
             ignore,
-            _lock: Some(lock),
         };
         for (path, row) in &vault.dirstate.rows {
             vault
@@ -209,11 +182,6 @@ impl Vault {
         let storage = bucket.store(key);
         let config = storage.load_config()?;
         storage.list()?;
-        ensure!(
-            config.syncit == 1,
-            "{url} has format version {}, not 1",
-            config.syncit
-        );
         let mut vault = Vault {
             root: PathBuf::new(),
             name: url.to_string(),
@@ -227,7 +195,6 @@ impl Vault {
             ignore: Ignore::default(),
             hints: HashMap::new(),
             traffic: RefCell::default(),
-            _lock: None,
         };
         vault.derive(|v, hash| v.storage.has_blob(hash));
         Ok(vault)

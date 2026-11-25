@@ -1,6 +1,7 @@
 //! One function per command. Each prints as it goes; a command that runs a
 //! sync returns a `Summary` for `main` to print last.
 
+use crate::backend::Fs;
 use crate::blobs::{self, available, hash_file, retain};
 use crate::config::{Config, default_nickname, prefix_matches};
 use crate::dirstate::is_exec;
@@ -12,7 +13,8 @@ use crate::output::{
 };
 use crate::scan::{Scan, deleted_heads, scan};
 use crate::segment::{self, valid_nickname};
-use crate::vault::{TMP_PREFIX, Vault, find_root, lock, relative, resolve_path, unique};
+use crate::storage::Store;
+use crate::vault::{TMP_PREFIX, Vault, find_root, relative, resolve_path, unique};
 use anyhow::{Context as _, Result, bail, ensure};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -879,15 +881,15 @@ fn open_vault(ctx: &Context, cwd: &Path, vault: Option<&Path>) -> Result<Vault> 
 
 /// List the remotes this vault remembers. Returns them, as printed.
 pub fn remotes(ctx: &Context, cwd: &Path) -> Result<Vec<(String, String)>> {
-    let v = lock(cwd)?;
-    for (nickname, location) in &v.config.remotes {
+    let config = Store::dir(Fs::open(cwd)?).load_config()?;
+    for (nickname, location) in &config.remotes {
         let message = Message::Remote {
             nickname: nickname.clone(),
             location: location.clone(),
         };
         print_stdout(ctx, &message);
     }
-    Ok(v.config.remotes.into_iter().collect())
+    Ok(config.remotes.into_iter().collect())
 }
 
 /// Remember the vault at `location`, a URL or a path, under `nickname` or its
@@ -945,10 +947,11 @@ fn add(
 /// Forget a remote. Its keychain item and `secrets.toml` entry stay, since
 /// other vaults on this machine may use them.
 pub fn remote_remove(ctx: &Context, cwd: &Path, nickname: &str) -> Result<()> {
-    let mut v = lock(cwd)?;
-    let location = v.config.remotes.remove(nickname);
+    let store = Store::dir(Fs::open(cwd)?);
+    let mut config = store.load_config()?;
+    let location = config.remotes.remove(nickname);
     let location = location.with_context(|| format!("no remote nicknamed {nickname}"))?;
-    v.config.save(&v.root)?;
+    store.save_config(&config)?;
     let message = format!("removed remote {nickname}: {location}");
     print_stdout(ctx, &Message::Info { message });
     Ok(())
@@ -1448,7 +1451,7 @@ pub fn config(
     let Some(change) = change else {
         // To show the settings of the vault here, its config is enough.
         let config = match vault {
-            None => lock(cwd)?.config,
+            None => Store::dir(Fs::open(cwd)?).load_config()?,
             Some(_) => open_vault(ctx, cwd, vault)?.config,
         };
         print(&config);
