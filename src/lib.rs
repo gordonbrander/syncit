@@ -1,5 +1,6 @@
 //! syncit: two-way sync and partial replication between folders. See SPEC.md.
 
+pub mod backend;
 pub mod blobs;
 pub mod commands;
 pub mod config;
@@ -15,6 +16,8 @@ pub mod output;
 #[cfg(feature = "remote")]
 pub mod remote;
 pub mod scan;
+#[cfg(feature = "remote")]
+pub mod sealed;
 pub mod segment;
 pub mod storage;
 pub mod vault;

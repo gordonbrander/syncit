@@ -309,6 +309,44 @@ impl Bucket {
     }
 }
 
+impl crate::backend::Backend for Bucket {
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        self.get(path)
+    }
+
+    fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        self.put(path, bytes.to_vec())
+    }
+
+    fn copy_to(&self, path: &str, dest: &Path) -> Result<bool> {
+        self.get_to_file(path, dest)
+    }
+
+    fn move_to(&self, src: &Path, path: &str) -> Result<()> {
+        self.put_file(path, src)?;
+        Ok(fs::remove_file(src)?)
+    }
+
+    fn remove(&self, path: &str) -> Result<()> {
+        match self.rt.block_on(self.store.delete(&self.at(path))) {
+            Err(e) if !not_found(&e) => Err(self.fail(e)),
+            _ => Ok(()),
+        }
+    }
+
+    fn size(&self, path: &str) -> Result<Option<u64>> {
+        match self.rt.block_on(self.store.head(&self.at(path))) {
+            Ok(meta) => Ok(Some(meta.size)),
+            Err(e) if not_found(&e) => Ok(None),
+            Err(e) => Err(self.fail(e)),
+        }
+    }
+
+    fn list(&self, dir: &str) -> Result<BTreeSet<String>> {
+        Ok(Bucket::list(self, dir)?.into_keys().collect())
+    }
+}
+
 /// Read until `buf` is full or the input ends.
 fn read_up_to(input: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     let mut n = 0;
@@ -554,6 +592,23 @@ impl Storage for Remote {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn bucket_backend() {
+        let tmp = TempDir::new().unwrap();
+        let (r, scratch) = (tmp.path().join("r"), tmp.path().join("s"));
+        fs::create_dir(&r).unwrap();
+        fs::create_dir(&scratch).unwrap();
+        let bucket = || Bucket::new(&format!("file://{}", r.display()), vec![]).unwrap();
+        crate::backend::tests::contract(&bucket(), &scratch);
+        for dir in [&r, &scratch] {
+            fs::remove_dir_all(dir).unwrap();
+            fs::create_dir(dir).unwrap();
+        }
+        let key = zeroize::Zeroizing::new([3u8; 32]);
+        let sealed = crate::sealed::Sealed::new(Box::new(bucket()), key);
+        crate::backend::tests::contract(&sealed, &scratch);
+    }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
         list.iter()
