@@ -110,6 +110,7 @@ If an API differs from this when building, adapt the code and record it in `SPEC
 |---|---|
 | `src/backend.rs` | the `Backend` trait, bytes at paths, and `Fs`, a vault folder's `.syncit/`, which holds the vault's lock |
 | `src/storage.rs` | `Store<B>`: a vault's config, log and blobs, and where each is on its backend |
+| `src/migrate.rs` | the layout version, and every change from one layout to the next (section 14) |
 | `src/remote.rs` | `Bucket`, the object-storage backend, the credentials for it, and `backend(url)`, which makes a remote's `Sealed<Bucket>` |
 | `src/sealed.rs` | `Sealed`, a backend that encrypts names and contents on top of another, and the `format` file |
 | `src/crypt.rs` | key derivation, name encryption, stream encryption. No I/O beyond `Read` and `Write` |
@@ -159,12 +160,13 @@ A read that finds something other than what was written (changed, cut short, or 
 **`Store<B>` is a vault's state on the backend `B`.** There is one, for every vault, and it owns its backend. It holds the layout, which is the same everywhere:
 
 ```
+version             the layout version (section 14)
 config              the vault's config
 log/<name>          a segment, named by its SHA-256
 blobs/<ab>/<hash>   a blob, in a folder named by the first 2 chars of its hash
 ```
 
-and these operations: `load_config`, `save_config`; `segment_names`, `read_segment`, `write_segment`; `has_blob`, `missing`, `get_blob`, `read_blob`, `put_blob`, `drop_blobs_except`. These rules hold:
+and these operations: `open`, which refuses a vault that is not at this build's layout, and `create`, which makes a new one; `load_config`, `save_config`; `segment_names`, `read_segment`, `write_segment`; `has_blob`, `missing`, `get_blob`, `read_blob`, `put_blob`, `drop_blobs_except`. These rules hold:
 
 - **A folder vault is `Store` on `Fs`; a remote vault is `Store` on `Sealed` on `Bucket`.** Nothing above the backend knows which. A remote is another vault with a different backend, as the idea in section 1 says.
 - **Listed once.** The log and the blobs are each listed on first need and the lists are kept for the rest of the run, added to as the store writes. `has_blob` is a lookup in the list of blobs if there is one, and a look at that one blob (`size`) if not: `missing` and compaction list, and opening a remote lists, so a command that asks about a few blobs of a folder vault, as `log` does, reads no folders. A file under `blobs/` that is not at `<ab>/<hash>` is not a blob.
@@ -196,6 +198,7 @@ and these operations: `load_config`, `save_config`; `segment_names`, `read_segme
 
 ```
 <url>/format                          plaintext, one line: {"check":"<64 hex>","syncit":1}
+<url>/E(version)                      the layout version (section 14)
 <url>/E(config)                       the vault's config
 <url>/E(log)/E(<name>)                a segment
 <url>/E(blobs)/E(<ab>)/E(<hash>)      a blob
@@ -441,7 +444,53 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 7. **A real bucket.** Run `cloud_remote` against MinIO or a real bucket and fix what differs from `file://`.
 8. **Documents.** `SPEC.md`, `PRD.md` and `CRDT.md` already describe this design as not built. When it is built: in `SPEC.md`, remove the "Not built" notes in sections 8, 10 and 14, tick milestone 9, drop the "not built yet" entry in section 17 and record there anything built differently; in `PRD.md`, remove "Stores are not built yet". Add a README section: remotes, the phrase and its warning, credentials by environment variable, the macOS keychain prompt after reinstalling, the multipart lifecycle rule.
 
-## 14. Building this
+## 14. Migrations (`migrate.rs`)
+
+A vault's **layout** is which files it has on its backend and what is in them. It has a number, in the `version` file at the backend's root: `.syncit/version` in a folder, `E(version)` in a remote. The file holds the number as text and a newline. A vault with no `version` file is at layout 1.
+
+Three numbers are versioned separately, because they version different things:
+
+| Number | Versions | Changes by |
+|---|---|---|
+| `version` | the layout: everything above the backend | a migration |
+| `format`'s `syncit` | the sealing: how names and contents are encrypted (section 6). It is below `Sealed`, where a migration does not reach | not built |
+| a segment header's `syncit` | the segment format (`CRDT.md`). Segments are immutable and replicated, so they are never rewritten in place | a new segment version, read beside the old |
+
+**Every layout change is in `migrate.rs`**, and nowhere else. No other code reads an old layout.
+
+```rust
+pub const VERSION: u32 = 2;                              // the layout this build reads and writes
+pub fn version(b: &impl Backend) -> Result<u32>          // what the vault is at
+pub fn check(b: &impl Backend, name: &str) -> Result<()> // refuse a vault that is not at VERSION
+pub fn migrate(b: &impl Backend, name: &str) -> Result<u32>   // bring it to VERSION; the version it was at
+fn step(b: &impl Backend, from: u32) -> Result<()>       // one `match`: 1 => to_2(b), …
+```
+
+- **A migration is a function on a backend**: `fn to_N(b: &impl Backend) -> Result<()>`. It has the whole backend (section 4), so it can rework anything `Store` or the dirstate reads, and it is the same function for a folder and a remote. A file only a folder has, such as `dirstate`, is reached the same way; a migration takes a missing one as nothing to do.
+- **It reads old files as bytes or untyped JSON**, never through `Config`, `Store` or another type of the current build, so it keeps working when those change.
+- **It is safe to stop at any change and run again from the top.** Two things hold it to that:
+  - Only the runner writes `version`, after a step returns. A run that stops leaves the vault at the version whose step it was in.
+  - The test `every_step_survives_a_stop` takes every step in turn, stops it at its first change, its second, and so on (a test backend that fails at the `n`th write, move or remove), runs it again, and requires the same files as a run that was not stopped. A new step is tested by it as soon as it has an arm in `step`.
+- **To change the layout**: write `to_N`, add its arm to `step`, raise `VERSION`.
+- **There is no way back** to an older layout.
+- `// ponytail:` a step is rerun, not replayed. If one cannot be made safe to rerun, have steps return a plan that the runner journals and replays.
+
+**Who migrates** (the rule is in `SPEC.md`, section 5, "version"):
+
+- `Store::open` calls `check`, so no code reads an existing vault's files at the wrong layout. `Store::create` writes the config, then `version`.
+- The vault a command runs in is migrated before its store is opened: in `Vault::open` when `local`, and in `own_store` for the commands that read only settings. It holds its lock.
+- A peer or a remote is opened without migrating, so one that is behind is refused by `check`. `syncit migrate <vault>` migrates it. A folder is locked first. A remote has no lock: two machines migrating it at once write the same bytes, since a step depends only on what is there and every file is written whole.
+
+**Layouts.**
+
+| Layout | Change |
+|---|---|
+| 1 | as first built. The version is the config's `syncit` field |
+| 2 | the version is the `version` file, and the config has no `syncit` |
+
+Tests: `every_step_survives_a_stop` and `every_step_survives_a_stop_sealed` (the rules above, on a folder and on a sealed folder: a layout 1 vault migrates and keeps every setting; again is nothing; a newer vault is refused untouched; no step is harmed by a stop), `migrates_own_vault`, `migrate_other_vault`, `migrate_remote` (an old remote is refused by `sync`, `clone` and `config --vault` and not changed; migrated from outside any vault; then they work).
+
+## 15. Building this
 
 `SPEC.md`, "Working rules for the implementer", applies. In addition:
 
@@ -456,7 +505,7 @@ Each ends with `cargo test`, `cargo clippy --all-targets -- -D warnings` and `ca
 - **Never print, log or put in an error the phrase or the key**, outside the one `init` message. Tests assert on output; none may contain a real key in a failure message.
 - **No test may touch the real keychain or the network** (section 12).
 
-## 15. Known limits
+## 16. Known limits
 
 - If every copy of the phrase is lost, the remote cannot be read.
 - On macOS, a rebuilt binary is asked once for keychain access.

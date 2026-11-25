@@ -90,7 +90,8 @@ A vault is a folder containing a `.syncit/` directory. There is no other kind of
 ```
 b/
   .syncit/
-    config     # format version, include and exclude prefixes, keep_history, autocompact, nickname, remotes
+    version    # the layout version
+    config     # include and exclude prefixes, keep_history, autocompact, nickname, remotes
     log/       # immutable log segments, named by their hash
     dirstate      # local: path -> (size, mtime, hash, base), and deletions seen
     blobs/     # optional: content-addressed file copies
