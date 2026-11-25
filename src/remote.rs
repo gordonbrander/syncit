@@ -157,7 +157,7 @@ impl Bucket {
     /// The encrypted vault here, whose key is `key`.
     pub fn store(self, key: Key) -> Store {
         let url = self.url.clone();
-        Store::new(&url, Box::new(Sealed::new(Box::new(self), key)))
+        Store::new(&url, Box::new(Sealed::new(self, key)))
     }
 
     fn put(&self, rel: &str, bytes: Vec<u8>) -> Result<()> {
@@ -313,7 +313,7 @@ mod tests {
             fs::create_dir(dir).unwrap();
         }
         let key = zeroize::Zeroizing::new([3u8; 32]);
-        let sealed = crate::sealed::Sealed::new(Box::new(bucket()), key);
+        let sealed = crate::sealed::Sealed::new(bucket(), key);
         crate::backend::tests::contract(&sealed, &scratch);
     }
 

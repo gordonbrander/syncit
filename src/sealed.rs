@@ -43,8 +43,9 @@ pub fn create(inner: &dyn Backend, key: &Key) -> Result<()> {
     )
 }
 
-pub struct Sealed {
-    inner: Box<dyn Backend>,
+/// The backend `B`, with every name and every file encrypted with `key`.
+pub struct Sealed<B> {
+    inner: B,
     key: Key,
 }
 
@@ -55,8 +56,8 @@ fn beside(file: &Path) -> PathBuf {
     name.into()
 }
 
-impl Sealed {
-    pub fn new(inner: Box<dyn Backend>, key: Key) -> Sealed {
+impl<B: Backend> Sealed<B> {
+    pub fn new(inner: B, key: Key) -> Sealed<B> {
         Sealed { inner, key }
     }
 
@@ -77,7 +78,7 @@ impl Sealed {
     }
 }
 
-impl Backend for Sealed {
+impl<B: Backend> Backend for Sealed<B> {
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
         let Some(sealed) = self.inner.read(&self.hide(path))? else {
             return Ok(None);
@@ -166,10 +167,10 @@ mod tests {
     }
 
     /// A sealed backend on a folder, and the folder's `.syncit/`.
-    fn sealed(tmp: &Path, key: Key) -> (Sealed, PathBuf) {
+    fn sealed(tmp: &Path, key: Key) -> (Sealed<Fs>, PathBuf) {
         let root = tmp.join("v");
         fs::create_dir_all(root.join(".syncit")).unwrap();
-        let sealed = Sealed::new(Box::new(Fs::new(&root)), key);
+        let sealed = Sealed::new(Fs::new(&root), key);
         (sealed, root.join(".syncit"))
     }
 
@@ -199,7 +200,7 @@ mod tests {
             }
         }
         // Another key sees none of it.
-        let other = Sealed::new(Box::new(Fs::new(&tmp.path().join("v"))), key(2));
+        let other = Sealed::new(Fs::new(&tmp.path().join("v")), key(2));
         assert!(other.list("folder").unwrap().is_empty());
         assert_eq!(other.read("folder/letter").unwrap(), None);
     }
